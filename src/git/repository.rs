@@ -1182,7 +1182,7 @@ pub struct Repository {
     /// On Windows, this uses the \\?\ UNC prefix format
     canonical_workdir: PathBuf,
     /// Cached git author identity resolved via `git var GIT_COMMITTER_IDENT`.
-    cached_author_identity: std::cell::OnceCell<GitAuthorIdentity>,
+    cached_author_identity: std::sync::OnceLock<GitAuthorIdentity>,
 }
 
 impl Repository {
@@ -2498,7 +2498,7 @@ pub fn find_repository(global_args: &[String]) -> Result<Repository, GitAiError>
         pre_reset_target_commit: None,
         workdir,
         canonical_workdir,
-        cached_author_identity: std::cell::OnceCell::new(),
+        cached_author_identity: std::sync::OnceLock::new(),
     })
 }
 
@@ -2587,7 +2587,7 @@ pub fn from_bare_repository(git_dir: &Path) -> Result<Repository, GitAiError> {
         pre_reset_target_commit: None,
         workdir,
         canonical_workdir,
-        cached_author_identity: std::cell::OnceCell::new(),
+        cached_author_identity: std::sync::OnceLock::new(),
     })
 }
 
