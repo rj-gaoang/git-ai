@@ -69,7 +69,21 @@ jobs:
           grep -F "$INSTALL_DIR" "$HOME/.bashrc"
           grep -F "$INSTALL_DIR" "$HOME/.zshrc"
           grep -F "fish_add_path -g \"$INSTALL_DIR\"" "$HOME/.config/fish/config.fish"
-          grep -F "checkpoint claude" "$HOME/.claude/settings.json"
+          case "${{ matrix.agent.name }}" in
+            claude)
+              grep -F "checkpoint claude" "$HOME/.claude/settings.json"
+              ;;
+            codex)
+              # Codex uses TOML array format: notify = ["<bin>", "checkpoint", "codex", ...]
+              grep -F "checkpoint" "$HOME/.codex/config.toml"
+              ;;
+            gemini)
+              grep -F "checkpoint gemini" "$HOME/.gemini/settings.json"
+              ;;
+            opencode)
+              test -f "$HOME/.config/opencode/plugin/git-ai.ts"
+              ;;
+          esac
           # Verify ~/.local/bin/git-ai symlink
           test -L "$HOME/.local/bin/git-ai"
           readlink "$HOME/.local/bin/git-ai" | grep -qF "$INSTALL_DIR/git-ai"

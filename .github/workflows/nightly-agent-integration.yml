@@ -40,6 +40,8 @@ jobs:
 
       - id: build-matrix
         name: Build dynamic test matrix
+        env:
+          AGENTS_FILTER: ${{ github.event.inputs.agents }}
         run: |
           python3 - <<'PY'
           import json, subprocess, os
@@ -50,6 +52,12 @@ jobs:
               "gemini":   {"pkg": "@google/gemini-cli",        "key": "GEMINI_API_KEY"},
               "opencode": {"pkg": "opencode-ai",               "key": "ANTHROPIC_API_KEY"},
           }
+
+          # Filter agents when workflow_dispatch specifies a subset
+          agents_filter = os.environ.get("AGENTS_FILTER", "all").strip()
+          if agents_filter and agents_filter != "all":
+              allowed = {a.strip() for a in agents_filter.split(",")}
+              agents = {k: v for k, v in agents.items() if k in allowed}
 
           headless_cmds = {
               "claude":   "claude -p --dangerously-skip-permissions --max-turns 3",
