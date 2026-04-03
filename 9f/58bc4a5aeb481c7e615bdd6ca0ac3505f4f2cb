@@ -1,0 +1,24 @@
+src/commands/hooks/fetch_hooks.rs
+  c714be2dc1359000 76-92
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "development:1.2.6",
+  "base_commit_sha": "9f58bc4a5aeb481c7e615bdd6ca0ac3505f4f2cb",
+  "prompts": {
+    "c714be2dc1359000": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ef78ae6e-2558-4e50-b271-1f4ed7416a41",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "Divya",
+      "messages": [],
+      "total_additions": 17,
+      "total_deletions": 0,
+      "accepted_lines": 17,
+      "overriden_lines": 0,
+      "messages_url": "http://localhost:4000/cas/dca9bfc765dce0f7f31e5fbaae02b21542bc346f73daf30fbc49b3f623ecc3c0"
+    }
+  }
+}
