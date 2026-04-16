@@ -1,9 +1,9 @@
 src/git/rewrite_log.rs
   1dbc0609c31414ab 2,588
-src/daemon.rs
-  1dbc0609c31414ab 7973-7981
 src/daemon/family_actor.rs
   1dbc0609c31414ab 150-153
+src/daemon.rs
+  1dbc0609c31414ab 7973-7981
 ---
 {
   "schema_version": "authorship/3.0.0",
