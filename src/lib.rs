@@ -9,6 +9,7 @@ pub mod error;
 pub mod feature_flags;
 pub mod git;
 pub mod http;
+pub mod integration;
 pub mod mdm;
 pub mod metrics;
 pub mod observability;

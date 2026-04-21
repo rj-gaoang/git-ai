@@ -42,6 +42,7 @@ pub fn post_notes_updated(repo: &Repository, notes: &[(String, String)]) {
     let repo_name = context.repo_name;
     let branch = context.branch;
     let is_default_branch = context.is_default_branch;
+    let x_user_id = crate::integration::ide_mcp::resolve_x_user_id(Some(repo.canonical_workdir()));
     let payload = notes
         .iter()
         .map(|(commit_sha, note_content)| {
@@ -52,6 +53,7 @@ pub fn post_notes_updated(repo: &Repository, notes: &[(String, String)]) {
                 "branch": branch.as_str(),
                 "is_default_branch": is_default_branch,
                 "note_content": note_content,
+                "x_user_id": x_user_id,
             })
         })
         .collect::<Vec<_>>();
