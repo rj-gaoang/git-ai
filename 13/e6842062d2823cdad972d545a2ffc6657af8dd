@@ -1,7 +1,269 @@
+README.md
+  h_670eaf8bab379b 88,108,111,115,117-120,122,128-147,154,190,217
+  36183aed99801720 125-126,150
+  43e6dc3a18c4d129 40-41,47-48,54-55,60-62
+  90e0c15acf03f624 42-46,49-53,56-59
+  a16ed14d165faa26 152,156-158
+tests/integration/main.rs
+  c79ee1ac032d0bac 25
+src/daemon.rs
+  dbec0bfb1993ce92 7815-7941,8126-8132,8135-8139,8147-8175
+  c79ee1ac032d0bac 7137-7147
+src/mdm/agents/windsurf.rs
+  4dd9b9c59436d64a 16,20-21
+scripts/ci-test-with-retry.sh
+  b0ed497ae5cf9685 1-90
+tests/integration/simple_additions.rs
+  h_dac2ecdcedf37f 821-851,853-866,869-880,883-896,900,902-904
+src/mdm/utils.rs
+  37d35367e8e09339 813,1092,1128,1137
+AGENTS.md
+  h_dac2ecdcedf37f 4-12,14-23,26-27,34,36,38,51-54,56,96,99,108-197,204,228,230
+src/commands/checkpoint_agent/agent_presets.rs
+  4dd9b9c59436d64a 777-864
+assets/docs/agents/bake_gray.py
+  90e0c15acf03f624 1-131
+src/commands/daemon.rs
+  c79ee1ac032d0bac 157,236-238,254
+scripts/ci-test-with-retry.ps1
+  b0ed497ae5cf9685 1-89
+Taskfile.yml
+  h_dac2ecdcedf37f 2-22,25-30,42-43,47-48,50-53,55-56,58-60,62-66,68-70,72-73,75-77,79-80,99
+tests/integration/checkpoint_perf.rs
+  c79ee1ac032d0bac 1-309
+tests/daemon_mode.rs
+  dbec0bfb1993ce92 4624-4806
+data-privacy.md
+  h_670eaf8bab379b 5,7,34,43,50,59
+  f8164abde60f8fb7 1-4,6,8-33,35-42,44-49,51-58
+.github/workflows/test.yml
+  b0ed497ae5cf9685 9,21,112-114,121-127
+src/metrics/mod.rs
+  48e3b829d4d2bf5e 79-108
+src/mdm/agents/github_copilot.rs
+  37d35367e8e09339 19-25,58,64-69,90-91,99-106,317-323,343-349,467,510-531,541,557,593,618,652,686,742-793
+scripts/ai
+  5811970b0beea008 1-78
+ai
+  5811970b0beea008 1
+src/authorship/post_commit.rs
+  48e3b829d4d2bf5e 652-681,684-691,693-695
+tests/integration/diff.rs
+  6dc8b7e84449532e 2609-2611,2615-2618,2620-2622,2624,2627-2643,2647-2677,2684-2695,2698,2712,2719,2734-2735,2746-2747,2751-2766
+tests/integration/rebase_merge_commit_note_leak.rs
+  1d5a4d8a30595b06 35-591
+tests/integration/windsurf.rs
+  4dd9b9c59436d64a 8,12-13,504-697
+src/commands/checkpoint_agent/bash_tool.rs
+  4dd9b9c59436d64a 472-476,492
+.github/workflows/e2e-tests.yml
+  h_dac2ecdcedf37f 66
+src/daemon/git_backend.rs
+  fdf966670855b533 443,453,623-624,627-634,655,657,660,662-666,734-736,739-884
+src/commands/hooks/rebase_hooks.rs
+  1d5a4d8a30595b06 356,400-424,443-478,640-822
+assets/docs/agents/pi.svg
+  43e6dc3a18c4d129 4-21
 ---
 {
   "schema_version": "authorship/3.0.0",
   "git_ai_version": "1.3.2",
   "base_commit_sha": "13e6842062d2823cdad972d545a2ffc6657af8dd",
-  "prompts": {}
+  "prompts": {
+    "1d5a4d8a30595b06": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a3209d92-45e3-49dc-92d4-9682998841bb",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "Sasha Varlamov",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 552,
+      "overriden_lines": 0,
+      "messages_url": "https://usegitai.com/cas/b60a9be2e0332ba31e507c35f4038ca16d0c098c0d401bc24a72e60afe13a0b5"
+    },
+    "36183aed99801720": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "e594d098-3eea-4d4f-a30c-5753cb9a3149",
+        "model": "claude-opus-4-7"
+      },
+      "human_author": "Aidan Cunniffe",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 3,
+      "overriden_lines": 0,
+      "messages_url": "https://usegitai.com/cas/47c2263a6d2201ae4d75a32ab688125916a487584eb0bda3c22b051403773909"
+    },
+    "37d35367e8e09339": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5d229bdb-3c45-46b5-9e4a-25a240df2d93",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "Sasha Varlamov",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 123,
+      "overriden_lines": 0,
+      "messages_url": "https://usegitai.com/cas/526917c8d8a72f5eafa7f5fd74958b4fb518d4b9ac73940a0f64a5ee1fae2129"
+    },
+    "48e3b829d4d2bf5e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6c2b78cc-8965-4290-a16f-6d5d115f76d4",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "Sasha Varlamov",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 70,
+      "overriden_lines": 0,
+      "messages_url": "https://usegitai.com/cas/cf270f521212ac46e1be8868ee4f3d858c2f641a4f6db10857b18e0640590157"
+    },
+    "4dd9b9c59436d64a": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "78ba4f5d-4047-42b6-8ca1-d3289edd873c",
+        "model": "claude-opus-4-7"
+      },
+      "human_author": "Aidan Cunniffe",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 293,
+      "overriden_lines": 0,
+      "messages_url": "https://usegitai.com/cas/e5b0d8bdd40a74e7b568141e0565a0f593e94d298ba67881e0ab6c0d06f69319"
+    },
+    "5811970b0beea008": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "02e202a4-2d45-4947-a6f5-a7e1092511bc",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "Sasha Varlamov",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 68,
+      "overriden_lines": 0,
+      "messages_url": "https://usegitai.com/cas/d373898974abe4df94e3309908c297ad4e9538f4439f353d8d161093e84b2167"
+    },
+    "6dc8b7e84449532e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "51725c83-0845-429f-9b38-f3e633f5a7b9",
+        "model": "unknown"
+      },
+      "human_author": "Sasha Varlamov",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 99,
+      "overriden_lines": 0
+    },
+    "90e0c15acf03f624": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "188ca393-e574-4939-b565-869a1f66d9d9",
+        "model": "claude-opus-4-7"
+      },
+      "human_author": "Aidan Cunniffe",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 145,
+      "overriden_lines": 0,
+      "messages_url": "https://usegitai.com/cas/e54973cecc03f121f8a25c4419e62a3c8933e52d2092876657947b6457074d31"
+    },
+    "a16ed14d165faa26": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "e7eaf4d1-9251-42a2-99d2-dfe4d93f8458",
+        "model": "claude-opus-4-7"
+      },
+      "human_author": "Aidan Cunniffe",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 4,
+      "overriden_lines": 0,
+      "messages_url": "https://usegitai.com/cas/2578c2888cca21451a6cf183571e96ed67f5ba1f82681f3ac97de424dee3389a"
+    },
+    "b0ed497ae5cf9685": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "91ac4ac8-48a4-4648-9d91-4feabd98da29",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "Sasha Varlamov",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 191,
+      "overriden_lines": 0,
+      "messages_url": "https://usegitai.com/cas/de539aa8d99bd9e49a0b7b3c824c6fb411f9092a8cfd392be88f9f1788ecabc0"
+    },
+    "c79ee1ac032d0bac": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "2a8554be-1d28-4f20-89c7-8cd9306c4ef9",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "Sasha Varlamov",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 326,
+      "overriden_lines": 0,
+      "messages_url": "https://usegitai.com/cas/1b6b1dcb34e44c86ef2c38d5e07dfef3ab30af96b0423f9724d800905b5f178f"
+    },
+    "dbec0bfb1993ce92": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "1cc8540b-3147-48dd-aac5-5978b60cb05d",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "Sasha Varlamov",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 351,
+      "overriden_lines": 0,
+      "messages_url": "https://usegitai.com/cas/c3fc751d53cae2082a38455e35c6dfbfa876c6273acddcd4d0f812d60ca96026"
+    },
+    "f8164abde60f8fb7": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "cd120be4-04bb-4387-bf42-01f1c94f5043",
+        "model": "claude-opus-4-7"
+      },
+      "human_author": "Aidan Cunniffe",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 51,
+      "overriden_lines": 0,
+      "messages_url": "https://usegitai.com/cas/5e5c9577021b721176ba7032410d74434e8369ec74dfd4a041586a0c1c43d2f8"
+    },
+    "fdf966670855b533": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3d5ee20e-29c6-4bdf-94c2-f8b8ca6bdd8a",
+        "model": "claude-sonnet-4-6"
+      },
+      "human_author": "Sasha Varlamov",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 168,
+      "overriden_lines": 0,
+      "messages_url": "https://usegitai.com/cas/f3b2f7fc3c9aeaba609be9cdbe66256674b2333b6a4e8ab22c7d7e2cbc59cf8d"
+    }
+  }
 }
