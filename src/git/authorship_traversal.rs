@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use crate::authorship::authorship_log_serialization::AuthorshipLog;
+use crate::authorship::authorship_log_serialization::{AuthorshipLog, AUTHORSHIP_LOG_VERSION};
 use crate::error::GitAiError;
 use crate::git::refs::{commits_with_authorship_notes, note_blob_oids_for_commits};
 #[cfg(test)]
@@ -174,8 +174,8 @@ fn extract_file_paths_from_note(content: &str, files: &mut HashSet<String>) {
         let attestation_section = &content[..divider_pos];
         // Create a complete parseable format with empty metadata
         let parseable = format!(
-            "{}\n---\n{{\"schema_version\":\"authorship/3.0.0\",\"base_commit_sha\":\"\",\"prompts\":{{}}}}",
-            attestation_section
+            "{}\n---\n{{\"schema_version\":\"{}\",\"base_commit_sha\":\"\",\"prompts\":{{}}}}",
+            attestation_section, AUTHORSHIP_LOG_VERSION
         );
 
         if let Ok(log) = AuthorshipLog::deserialize_from_string(&parseable) {

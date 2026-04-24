@@ -9,7 +9,14 @@ use std::io::{BufRead, Write};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Authorship log format version identifier
-pub const AUTHORSHIP_LOG_VERSION: &str = "authorship/3.0.0";
+pub const AUTHORSHIP_LOG_VERSION: &str = "authorship/3.1.0";
+pub const LEGACY_AUTHORSHIP_LOG_VERSION: &str = "authorship/3.0.0";
+pub const SUPPORTED_AUTHORSHIP_LOG_VERSIONS: &[&str] =
+    &[LEGACY_AUTHORSHIP_LOG_VERSION, AUTHORSHIP_LOG_VERSION];
+
+pub fn is_supported_authorship_log_version(version: &str) -> bool {
+    SUPPORTED_AUTHORSHIP_LOG_VERSIONS.contains(&version)
+}
 
 #[cfg(all(debug_assertions, test))]
 pub const GIT_AI_VERSION: &str = "development";
@@ -21,14 +28,31 @@ pub const GIT_AI_VERSION: &str = concat!("development:", env!("CARGO_PKG_VERSION
 pub const GIT_AI_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Metadata section that goes below the divider as JSON
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct AuthorshipMetadata {
     pub schema_version: String,
     pub git_ai_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub x_user_id: Option<String>,
     pub base_commit_sha: String,
     pub prompts: BTreeMap<String, PromptRecord>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub humans: BTreeMap<String, HumanRecord>,
+}
+
+impl fmt::Debug for AuthorshipMetadata {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut debug = f.debug_struct("AuthorshipMetadata");
+        debug.field("schema_version", &self.schema_version);
+        debug.field("git_ai_version", &self.git_ai_version);
+        if let Some(x_user_id) = &self.x_user_id {
+            debug.field("x_user_id", x_user_id);
+        }
+        debug.field("base_commit_sha", &self.base_commit_sha);
+        debug.field("prompts", &self.prompts);
+        debug.field("humans", &self.humans);
+        debug.finish()
+    }
 }
 
 impl AuthorshipMetadata {
@@ -36,6 +60,7 @@ impl AuthorshipMetadata {
         Self {
             schema_version: AUTHORSHIP_LOG_VERSION.to_string(),
             git_ai_version: Some(GIT_AI_VERSION.to_string()),
+            x_user_id: None,
             base_commit_sha: String::new(),
             prompts: BTreeMap::new(),
             humans: BTreeMap::new(),
@@ -139,6 +164,25 @@ impl AuthorshipLog {
             attestations: Vec::new(),
             metadata: AuthorshipMetadata::new(),
         }
+    }
+
+    pub fn ensure_x_user_id(&mut self, x_user_id: Option<String>) -> bool {
+        if self.metadata.x_user_id.is_some() {
+            return false;
+        }
+
+        let Some(x_user_id) = x_user_id else {
+            return false;
+        };
+
+        self.metadata.x_user_id = Some(x_user_id);
+        true
+    }
+
+    pub fn ensure_x_user_id_from_repo(&mut self, repo: &Repository) -> bool {
+        self.ensure_x_user_id(crate::integration::ide_mcp::resolve_x_user_id(Some(
+            repo.canonical_workdir(),
+        )))
     }
 
     pub fn get_or_create_file(&mut self, file: &str) -> &mut FileAttestation {
@@ -477,6 +521,33 @@ impl AuthorshipLog {
 
         Ok(checkpoints)
     }
+}
+
+pub fn ensure_serialized_note_has_x_user_id(
+    note_content: &str,
+    x_user_id: Option<String>,
+) -> String {
+    let Ok(mut authorship_log) = AuthorshipLog::deserialize_from_string(note_content) else {
+        return note_content.to_string();
+    };
+
+    if !authorship_log.ensure_x_user_id(x_user_id) {
+        return note_content.to_string();
+    }
+
+    authorship_log
+        .serialize_to_string()
+        .unwrap_or_else(|_| note_content.to_string())
+}
+
+pub fn ensure_serialized_note_has_x_user_id_from_repo(
+    repo: &Repository,
+    note_content: &str,
+) -> String {
+    ensure_serialized_note_has_x_user_id(
+        note_content,
+        crate::integration::ide_mcp::resolve_x_user_id(Some(repo.canonical_workdir())),
+    )
 }
 
 /// Convert line numbers to working log Line format (Single/Range)
@@ -949,6 +1020,77 @@ mod tests {
         assert_eq!(deserialized.metadata.base_commit_sha, "abc123");
         assert_eq!(deserialized.metadata.prompts.len(), 1);
         assert_eq!(deserialized.attestations.len(), 0);
+    }
+
+    #[test]
+    fn test_serialize_deserialize_preserves_x_user_id() {
+        let mut log = AuthorshipLog::new();
+        log.metadata.base_commit_sha = "abc123".to_string();
+        log.metadata.x_user_id = Some("user-123".to_string());
+
+        let serialized = log.serialize_to_string().unwrap();
+        let (_, metadata_json) = serialized.split_once("---\n").unwrap();
+        let metadata_value: serde_json::Value = serde_json::from_str(metadata_json).unwrap();
+        assert_eq!(
+            metadata_value
+                .get("x_user_id")
+                .and_then(serde_json::Value::as_str),
+            Some("user-123")
+        );
+
+        let deserialized = AuthorshipLog::deserialize_from_string(&serialized).unwrap();
+        assert_eq!(deserialized.metadata.x_user_id.as_deref(), Some("user-123"));
+    }
+
+    #[test]
+    fn test_deserialize_legacy_note_without_x_user_id() {
+        let serialized = concat!(
+            "---\n",
+            "{\"schema_version\":\"authorship/3.0.0\",\"base_commit_sha\":\"abc123\",\"prompts\":{}}"
+        );
+
+        let deserialized = AuthorshipLog::deserialize_from_string(serialized).unwrap();
+
+        assert_eq!(deserialized.metadata.schema_version, "authorship/3.0.0");
+        assert_eq!(deserialized.metadata.base_commit_sha, "abc123");
+        assert_eq!(deserialized.metadata.x_user_id, None);
+    }
+
+    #[test]
+    fn test_ensure_x_user_id_only_fills_missing_value() {
+        let mut log = AuthorshipLog::new();
+
+        assert!(log.ensure_x_user_id(Some("user-123".to_string())));
+        assert_eq!(log.metadata.x_user_id.as_deref(), Some("user-123"));
+        assert!(!log.ensure_x_user_id(Some("user-456".to_string())));
+        assert_eq!(log.metadata.x_user_id.as_deref(), Some("user-123"));
+    }
+
+    #[test]
+    fn test_ensure_serialized_note_has_x_user_id_injects_missing_field() {
+        let serialized = concat!(
+            "---\n",
+            "{\"schema_version\":\"authorship/3.0.0\",\"base_commit_sha\":\"abc123\",\"prompts\":{}}"
+        );
+
+        let updated =
+            ensure_serialized_note_has_x_user_id(serialized, Some("user-123".to_string()));
+
+        let deserialized = AuthorshipLog::deserialize_from_string(&updated).unwrap();
+        assert_eq!(deserialized.metadata.x_user_id.as_deref(), Some("user-123"));
+    }
+
+    #[test]
+    fn test_ensure_serialized_note_has_x_user_id_preserves_existing_field() {
+        let mut log = AuthorshipLog::new();
+        log.metadata.base_commit_sha = "abc123".to_string();
+        log.metadata.x_user_id = Some("user-123".to_string());
+        let serialized = log.serialize_to_string().unwrap();
+
+        let updated =
+            ensure_serialized_note_has_x_user_id(&serialized, Some("user-456".to_string()));
+
+        assert_eq!(updated, serialized);
     }
 
     #[test]

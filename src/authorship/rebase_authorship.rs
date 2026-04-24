@@ -625,6 +625,8 @@ pub fn rewrite_authorship_after_squash_or_rebase(
                 &source_commits,
                 merge_commit_sha,
             )? {
+                let mut authorship_log = authorship_log;
+                authorship_log.ensure_x_user_id_from_repo(repo);
                 let authorship_json = authorship_log.serialize_to_string().map_err(|_| {
                     GitAiError::Generic("Failed to serialize authorship log".to_string())
                 })?;
@@ -681,6 +683,7 @@ pub fn rewrite_authorship_after_squash_or_rebase(
     // Step 6: Convert to AuthorshipLog (everything is committed in CI merge)
     let mut authorship_log = merged_va.to_authorship_log()?;
     authorship_log.metadata.base_commit_sha = merge_commit_sha.to_string();
+    authorship_log.ensure_x_user_id_from_repo(repo);
 
     // Preserve accumulated totals from source commits (squash/rebase should not drop session totals).
     let mut summed_totals: HashMap<String, (u32, u32)> = HashMap::new();
@@ -2081,6 +2084,7 @@ pub fn rewrite_authorship_after_cherry_pick(
         });
 
         authorship_log.metadata.base_commit_sha = new_commit.clone();
+        authorship_log.ensure_x_user_id_from_repo(repo);
 
         // Save computed note when it has payload; otherwise preserve original metadata-only notes.
         let computed_note_has_payload =
@@ -2103,6 +2107,11 @@ pub fn rewrite_authorship_after_cherry_pick(
                 })?
             }
         };
+        let authorship_json =
+            crate::authorship::authorship_log_serialization::ensure_serialized_note_has_x_user_id_from_repo(
+                repo,
+                &authorship_json,
+            );
 
         crate::git::refs::notes_add(repo, new_commit, &authorship_json)?;
 
@@ -2929,6 +2938,7 @@ pub fn rewrite_authorship_after_commit_amend_with_snapshot(
 
     // Update base commit SHA
     authorship_log.metadata.base_commit_sha = amended_commit.to_string();
+    authorship_log.ensure_x_user_id_from_repo(repo);
 
     // Preserve human contributors from the original commit's note — deleting a
     // KnownHuman-attributed line removes the attribution coordinate but must not
@@ -3413,9 +3423,13 @@ fn remap_notes_for_commit_pairs(
     let mut entries = Vec::new();
     for (original_commit, new_commit) in commit_pairs {
         if let Some(raw_note) = original_note_contents.get(original_commit) {
+            let remapped_note = remap_note_content_for_target_commit(raw_note, new_commit);
             entries.push((
                 new_commit.clone(),
-                remap_note_content_for_target_commit(raw_note, new_commit),
+                crate::authorship::authorship_log_serialization::ensure_serialized_note_has_x_user_id_from_repo(
+                    repo,
+                    &remapped_note,
+                ),
             ));
         }
     }
@@ -4125,6 +4139,7 @@ fn build_note_from_conflict_wl(
 
     let mut authorship_log = AuthorshipLog::new();
     authorship_log.metadata.base_commit_sha = new_commit.to_string();
+    authorship_log.ensure_x_user_id_from_repo(repo);
 
     // Collect all line_attributions per file across all AI checkpoints, then build
     // a single FileAttestation per file. This avoids duplicate attestation entries

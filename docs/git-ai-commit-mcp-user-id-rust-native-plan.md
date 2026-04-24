@@ -1,5 +1,7 @@
 # git-ai 在保存 commit 信息时读取 MCP user_id 的 Rust 原生改造方案
 
+> 更新说明（2026-04-23）：当前实现已经从这份初版方案继续演进。`x_user_id` 不再只进入 `post_notes_updated` hook payload；当本地能够解析到该值时，authorship note 的 JSON 元数据中也会持久化 `x_user_id`。下文中“只进 hook、不进 Git Note”的表述应视为历史设计背景。
+
 ## 1. 文档目的
 
 本文不是替代现有的外挂脚本方案，而是把“在 git-ai Rust 源码中原生读取 MCP 配置并提取 `X-USER-ID`”整理成一份可执行的设计文档，供后续源码改造使用。

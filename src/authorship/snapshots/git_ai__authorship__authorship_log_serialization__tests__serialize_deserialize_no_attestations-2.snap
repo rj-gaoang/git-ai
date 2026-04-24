@@ -5,7 +5,7 @@ expression: deserialized
 AuthorshipLogV3 {
     attestations: [],
     metadata: AuthorshipMetadata {
-        schema_version: "authorship/3.0.0",
+        schema_version: "authorship/3.1.0",
         git_ai_version: Some(
             "development",
         ),

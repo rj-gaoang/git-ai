@@ -157,6 +157,7 @@ pub fn post_commit_with_final_state(
         )?;
 
     authorship_log.metadata.base_commit_sha = commit_sha.clone();
+    authorship_log.ensure_x_user_id_from_repo(repo);
 
     // Long-lived daemon processes should read a fresh config snapshot.
     // Always use Config::fresh() to support runtime config updates

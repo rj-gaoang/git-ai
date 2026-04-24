@@ -34,7 +34,7 @@ AuthorshipLogV3 {
         },
     ],
     metadata: AuthorshipMetadata {
-        schema_version: "authorship/3.0.0",
+        schema_version: "authorship/3.1.0",
         base_commit_sha: "",
         prompts: {
             "67fced12-038d-4b9e-983a-ac1e4b270a92": PromptRecord {

@@ -206,6 +206,7 @@ pub(crate) fn save_stash_authorship_log(
     authorship_log
         .attestations
         .retain(|a| filtered_files.contains(&a.file_path));
+    authorship_log.ensure_x_user_id_from_repo(repo);
 
     // Save as git note at refs/notes/ai-stash
     let json = authorship_log

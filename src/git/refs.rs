@@ -1,4 +1,6 @@
-use crate::authorship::authorship_log_serialization::{AUTHORSHIP_LOG_VERSION, AuthorshipLog};
+use crate::authorship::authorship_log_serialization::{
+    is_supported_authorship_log_version, AuthorshipLog, SUPPORTED_AUTHORSHIP_LOG_VERSIONS,
+};
 use crate::authorship::working_log::Checkpoint;
 use crate::error::GitAiError;
 use crate::git::repository::{Repository, exec_git, exec_git_stdin};
@@ -495,10 +497,11 @@ pub fn get_reference_as_authorship_log_v3(
     };
 
     // Check version compatibility
-    if authorship_log.metadata.schema_version != AUTHORSHIP_LOG_VERSION {
+    if !is_supported_authorship_log_version(&authorship_log.metadata.schema_version) {
         return Err(GitAiError::Generic(format!(
-            "Unsupported authorship log version: {} (expected: {})",
-            authorship_log.metadata.schema_version, AUTHORSHIP_LOG_VERSION
+            "Unsupported authorship log version: {} (supported: {})",
+            authorship_log.metadata.schema_version,
+            SUPPORTED_AUTHORSHIP_LOG_VERSIONS.join(", ")
         )));
     }
 
@@ -1329,5 +1332,29 @@ mod tests {
         } else {
             panic!("Expected version mismatch error");
         }
+    }
+
+    #[test]
+    fn test_get_reference_as_authorship_log_v3_accepts_legacy_version() {
+        let tmp_repo = TmpRepo::new().expect("Failed to create tmp repo");
+
+        tmp_repo
+            .write_file("test.txt", "content\n", true)
+            .expect("write file");
+        tmp_repo.commit_with_message("Commit").expect("commit");
+        let commit_sha = tmp_repo.get_head_commit_sha().expect("head");
+
+        let mut log = AuthorshipLog::new();
+        log.metadata.schema_version = "authorship/3.0.0".to_string();
+        log.metadata.base_commit_sha = commit_sha.clone();
+
+        let note_content = log.serialize_to_string().expect("serialize");
+        notes_add(tmp_repo.gitai_repo(), &commit_sha, &note_content).expect("add note");
+
+        let result = get_reference_as_authorship_log_v3(tmp_repo.gitai_repo(), &commit_sha)
+            .expect("legacy version should be accepted");
+
+        assert_eq!(result.metadata.schema_version, "authorship/3.0.0");
+        assert_eq!(result.metadata.base_commit_sha, commit_sha);
     }
 }
