@@ -1,0 +1,90 @@
+src/commands/hooks/stash_hooks.rs
+  h_602db118073c06 209
+specs/git_ai_standard_v3.1.0.md
+  h_602db118073c06 1-49
+src/authorship/rebase_authorship.rs
+  h_602db118073c06 628-629,686,2087,2110-2114,2941,3426,3429-3432,4142
+src/git/authorship_traversal.rs
+  h_602db118073c06 3,177-178
+src/authorship/authorship_log_serialization.rs
+  h_602db118073c06 12-19,169-187,526-535,537-550,1032-1038,1057-1093
+  51ede415ba62b094 31,35-36,43-57,63,536,551-552,1025-1031,1039-1056,1094-1095
+src/authorship/post_commit.rs
+  h_602db118073c06 160
+src/git/refs.rs
+  h_602db118073c06 1-3,500,502-504,1336-1340,1344-1359
+docs/git-ai-commit-mcp-user-id-rust-native-plan.md
+  h_602db118073c06 3-4
+docs/git-ai-mcp-user-id-verification.md
+  51ede415ba62b094 1-2,5-19,22,24-29,32-228,232-239,241
+  h_602db118073c06 3-4,20-21,23,30-31,229-231,240,242
+---
+{
+  "schema_version": "authorship/3.1.0",
+  "git_ai_version": "development:1.3.3",
+  "x_user_id": "108",
+  "base_commit_sha": "e75a1978fedc74e19c3d4e9c9fe16f16900c239a",
+  "prompts": {
+    "3a0a9dd1f2e9d3a9": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "fb3af6d6-7baf-4423-9e7d-ea6a4acf24a7",
+        "model": "copilot/gpt-5.4"
+      },
+      "human_author": "gaoang <gaoang@ruijie.com.cn>",
+      "messages": [],
+      "total_additions": 14828,
+      "total_deletions": 2,
+      "accepted_lines": 14831,
+      "overriden_lines": 0,
+      "messages_url": "https://usegitai.com/cas/6452a41db624f172c5bcc32687bd6ca17eed17aa47b80da02975633c373a379d"
+    },
+    "51ede415ba62b094": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "83c3714b-2b17-44e2-8503-d87b9e402730",
+        "model": "copilot/gpt-5.4"
+      },
+      "human_author": "gaoang <gaoang@ruijie.com.cn>",
+      "messages": [],
+      "total_additions": 288,
+      "total_deletions": 1,
+      "accepted_lines": 2797,
+      "overriden_lines": 17,
+      "messages_url": "https://usegitai.com/cas/ce6e8f6cea153ec1ecaa65ef3c988c94916f7c714332003fa4a23e9165f134be"
+    },
+    "70ba8a571cde3699": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "ef13595a-b86a-44d6-be5d-a405f319371b",
+        "model": "copilot/ruijiecopilot/uniapi/kimi-k2.5"
+      },
+      "human_author": "gaoang <gaoang@ruijie.com.cn>",
+      "messages": [],
+      "total_additions": 9,
+      "total_deletions": 0,
+      "accepted_lines": 150,
+      "overriden_lines": 0,
+      "messages_url": "https://usegitai.com/cas/7a473fcba64fc6f93a3c532ed4b0ab2c78844bc2157842d6bf79bf4e6a5d9b23"
+    },
+    "e8df73b715abfae2": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "1918047c-607a-443a-b44b-4cbe3999a37d",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "gaoang <gaoang@ruijie.com.cn>",
+      "messages": [],
+      "total_additions": 292,
+      "total_deletions": 3,
+      "accepted_lines": 289,
+      "overriden_lines": 0,
+      "messages_url": "https://usegitai.com/cas/7df146bd1febcf65277b0a0d4b04bc2f8d2bf3a94ec0c5321fa6ce517e464dff"
+    }
+  },
+  "humans": {
+    "h_602db118073c06": {
+      "author": "gaoang"
+    }
+  }
+}
