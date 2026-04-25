@@ -1,5 +1,5 @@
 use crate::authorship::authorship_log_serialization::{
-    is_supported_authorship_log_version, AuthorshipLog, SUPPORTED_AUTHORSHIP_LOG_VERSIONS,
+    AuthorshipLog, SUPPORTED_AUTHORSHIP_LOG_VERSIONS, is_supported_authorship_log_version,
 };
 use crate::authorship::working_log::Checkpoint;
 use crate::error::GitAiError;

@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use crate::authorship::authorship_log_serialization::{AuthorshipLog, AUTHORSHIP_LOG_VERSION};
+use crate::authorship::authorship_log_serialization::{AUTHORSHIP_LOG_VERSION, AuthorshipLog};
 use crate::error::GitAiError;
 use crate::git::refs::{commits_with_authorship_notes, note_blob_oids_for_commits};
 #[cfg(test)]

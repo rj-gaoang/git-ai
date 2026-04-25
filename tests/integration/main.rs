@@ -46,6 +46,7 @@ mod droid;
 mod e2big_post_filter;
 mod fetch_notes;
 mod firebender;
+mod format_only_attribution;
 mod formatting_non_substantial_ai_attribution;
 mod gemini;
 mod git_alias_resolution;

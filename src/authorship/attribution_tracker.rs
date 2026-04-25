@@ -8,7 +8,7 @@ use crate::authorship::move_detection::{DeletedLine, InsertedLine, detect_moves}
 use crate::authorship::working_log::CheckpointKind;
 use crate::error::GitAiError;
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::time::Instant;
 
@@ -897,8 +897,21 @@ impl AttributionTracker {
         let mut deletion_idx = 0;
         let mut insertion_idx = 0;
         let mut prev_whitespace_delete = false;
+        let mut prev_delete_data: Option<&[u8]> = None;
         let mut old_attr_cursor = 0usize;
         let mut insertion_attr_cursor = 0usize;
+
+        // Pre-scan for format-only superblocks (4.3)
+        let format_passthrough_enabled = crate::config::Config::get()
+            .feature_flags()
+            .format_only_attribution_passthrough;
+        let (format_del_indices, format_ins_indices) =
+            if format_passthrough_enabled && !is_ai_checkpoint {
+                scan_format_only_superblocks(diffs)
+            } else {
+                (HashSet::new(), HashSet::new())
+            };
+        let mut format_only_inherit_count = 0u32;
 
         for diff in diffs {
             let op = diff.op();
@@ -941,6 +954,7 @@ impl AttributionTracker {
                     old_pos += len;
                     new_pos += len;
                     prev_whitespace_delete = false;
+                    prev_delete_data = None;
                 }
                 ByteDiffOp::Delete => {
                     let deletion_range = (old_pos, old_pos + len);
@@ -986,6 +1000,8 @@ impl AttributionTracker {
                                 }
                             }
                         }
+                    } else if format_del_indices.contains(&deletion_idx) {
+                        // Format-only superblock: skip zero-length marker to preserve original attribution
                     } else if is_ai_checkpoint || !data_is_whitespace(diff.data()) {
                         // For non-move deletions of substantive content, create a zero-length
                         // marker attribution at the deletion point. For AI checkpoints, apply
@@ -1002,6 +1018,7 @@ impl AttributionTracker {
                     old_pos += len;
                     deletion_idx += 1;
                     prev_whitespace_delete = data_is_whitespace(diff.data());
+                    prev_delete_data = Some(diff.data());
                 }
                 ByteDiffOp::Insert => {
                     // Check if this insertion is from a detected move
@@ -1055,6 +1072,7 @@ impl AttributionTracker {
                         new_pos += len;
                         insertion_idx += 1;
                         prev_whitespace_delete = false;
+                        prev_delete_data = None;
                         continue;
                     }
 
@@ -1070,6 +1088,7 @@ impl AttributionTracker {
                         new_pos += len;
                         insertion_idx += 1;
                         prev_whitespace_delete = false;
+                        prev_delete_data = None;
                         continue;
                     }
 
@@ -1079,12 +1098,19 @@ impl AttributionTracker {
                     let is_whitespace_only = data_is_whitespace(diff.data());
                     let contains_newline = diff.data().contains(&b'\n');
                     let is_formatting_pair = prev_whitespace_delete && is_whitespace_only;
+
+                    // Format-only passthrough (4.2 pair-level + 4.3 superblock-level)
+                    let is_format_pair_new = format_passthrough_enabled
+                        && prev_delete_data.is_some_and(|d| is_format_only_change(d, diff.data()));
+                    let is_format_superblock =
+                        format_passthrough_enabled && format_ins_indices.contains(&insertion_idx);
+                    let is_format_inherit =
+                        is_formatting_pair || is_format_pair_new || is_format_superblock;
+
                     #[allow(clippy::if_same_then_else)]
-                    let (author_id, attribution_ts) = if contains_newline {
-                        (current_author.to_string(), ts)
-                    } else if is_substantive_insert {
-                        (current_author.to_string(), ts)
-                    } else if is_formatting_pair {
+                    let (author_id, attribution_ts) = if is_format_inherit {
+                        // Format-only change: inherit original attribution
+                        format_only_inherit_count += 1;
                         if let Some(attr) = find_attribution_for_insertion(
                             old_attributions,
                             old_pos,
@@ -1096,6 +1122,10 @@ impl AttributionTracker {
                         } else {
                             (current_author.to_string(), ts)
                         }
+                    } else if contains_newline {
+                        (current_author.to_string(), ts)
+                    } else if is_substantive_insert {
+                        (current_author.to_string(), ts)
                     } else if let Some(attr) = new_attributions.last() {
                         (attr.author_id.clone(), attr.ts)
                     } else if let Some(attr) = find_attribution_for_insertion(
@@ -1118,8 +1148,16 @@ impl AttributionTracker {
                     new_pos += len;
                     insertion_idx += 1;
                     prev_whitespace_delete = false;
+                    prev_delete_data = None;
                 }
             }
+        }
+
+        if format_only_inherit_count > 0 && cfg!(debug_assertions) {
+            eprintln!(
+                "[git-ai] format-only passthrough: segments={}",
+                format_only_inherit_count
+            );
         }
 
         new_attributions
@@ -1885,6 +1923,125 @@ fn data_is_whitespace(data: &[u8]) -> bool {
     std::str::from_utf8(data)
         .map(|s| s.chars().all(|c| c.is_whitespace()))
         .unwrap_or(false)
+}
+
+/// Determines if two byte slices differ only in whitespace (formatting-equivalent).
+/// Returns true when, after stripping all Unicode whitespace characters, the
+/// non-whitespace content is identical.  O(n) time, zero allocation for valid UTF-8.
+fn is_format_only_change(old: &[u8], new: &[u8]) -> bool {
+    // Both empty is identity, not a "format change".
+    if old.is_empty() && new.is_empty() {
+        return false;
+    }
+    // One empty, other not: only format-only if the non-empty side is pure whitespace.
+    if old.is_empty() || new.is_empty() {
+        let non_empty = if old.is_empty() { new } else { old };
+        return data_is_whitespace(non_empty);
+    }
+    // Fast path: byte-identical means no change at all.
+    if old == new {
+        return false;
+    }
+
+    // Compare non-whitespace chars from both sides
+    fn non_ws_chars(data: &[u8]) -> impl Iterator<Item = char> + '_ {
+        // Safe: from_utf8 is O(n) but we need char boundaries for Unicode whitespace
+        let s = match std::str::from_utf8(data) {
+            Ok(s) => s,
+            // Invalid UTF-8: treat each byte as a Latin-1 char
+            Err(_) => return None.into_iter().flatten(),
+        };
+        Some(s.chars().filter(|c| !c.is_whitespace()))
+            .into_iter()
+            .flatten()
+    }
+
+    // For invalid UTF-8, fall back to lossy comparison
+    let old_valid = std::str::from_utf8(old).is_ok();
+    let new_valid = std::str::from_utf8(new).is_ok();
+
+    if old_valid && new_valid {
+        non_ws_chars(old).eq(non_ws_chars(new))
+    } else {
+        // Fallback: allocate lossy strings
+        let old_s = String::from_utf8_lossy(old);
+        let new_s = String::from_utf8_lossy(new);
+        old_s
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .eq(new_s.chars().filter(|c| !c.is_whitespace()))
+    }
+}
+
+/// Pre-scan the diff list and identify "superblocks" of consecutive Delete/Insert
+/// operations (not separated by Equal) where the concatenated deleted content and
+/// concatenated inserted content are format-only equivalent.
+///
+/// Returns two sets: deletion indices and insertion indices that belong to
+/// format-only superblocks.
+fn scan_format_only_superblocks(diffs: &[ByteDiff]) -> (HashSet<usize>, HashSet<usize>) {
+    let mut format_deletion_indices = HashSet::new();
+    let mut format_insertion_indices = HashSet::new();
+
+    let mut deletion_idx = 0usize;
+    let mut insertion_idx = 0usize;
+
+    // Collect superblocks: groups of consecutive Delete/Insert not separated by Equal
+    let mut i = 0;
+    while i < diffs.len() {
+        if diffs[i].op() == ByteDiffOp::Equal {
+            i += 1;
+            continue;
+        }
+
+        // Start of a superblock: collect all consecutive non-Equal diffs
+        let block_start = i;
+        let block_del_start = deletion_idx;
+        let block_ins_start = insertion_idx;
+        let mut del_data: Vec<u8> = Vec::new();
+        let mut ins_data: Vec<u8> = Vec::new();
+        let mut has_delete = false;
+        let mut has_insert = false;
+
+        while i < diffs.len() && diffs[i].op() != ByteDiffOp::Equal {
+            match diffs[i].op() {
+                ByteDiffOp::Delete => {
+                    del_data.extend_from_slice(diffs[i].data());
+                    has_delete = true;
+                    deletion_idx += 1;
+                }
+                ByteDiffOp::Insert => {
+                    ins_data.extend_from_slice(diffs[i].data());
+                    has_insert = true;
+                    insertion_idx += 1;
+                }
+                ByteDiffOp::Equal => unreachable!(),
+            }
+            i += 1;
+        }
+
+        // Only check if we have both deletes and inserts
+        if has_delete && has_insert && is_format_only_change(&del_data, &ins_data) {
+            // Mark all deletion/insertion indices in this superblock
+            let mut d = block_del_start;
+            let mut n = block_ins_start;
+            for diff in &diffs[block_start..i] {
+                match diff.op() {
+                    ByteDiffOp::Delete => {
+                        format_deletion_indices.insert(d);
+                        d += 1;
+                    }
+                    ByteDiffOp::Insert => {
+                        format_insertion_indices.insert(n);
+                        n += 1;
+                    }
+                    ByteDiffOp::Equal => {}
+                }
+            }
+        }
+    }
+
+    (format_deletion_indices, format_insertion_indices)
 }
 
 impl Default for AttributionTracker {
@@ -2736,5 +2893,90 @@ mod tests {
         assert_eq!(metadata.len(), 2);
         assert_eq!(metadata[0].text, "hello");
         assert_eq!(metadata[1].text, "world");
+    }
+
+    // --- is_format_only_change unit tests ---
+
+    #[test]
+    fn format_only_identical_returns_false() {
+        // Identical content is not a "format change"
+        assert!(!is_format_only_change(b"hello", b"hello"));
+    }
+
+    #[test]
+    fn format_only_both_empty_returns_false() {
+        assert!(!is_format_only_change(b"", b""));
+    }
+
+    #[test]
+    fn format_only_indent_change_returns_true() {
+        assert!(is_format_only_change(b"    fn a()", b"\tfn a()"));
+    }
+
+    #[test]
+    fn format_only_4space_to_2space_returns_true() {
+        assert!(is_format_only_change(b"    let x = 1;", b"  let x = 1;"));
+    }
+
+    #[test]
+    fn format_only_trailing_ws_returns_true() {
+        assert!(is_format_only_change(b"foo();   ", b"foo();"));
+    }
+
+    #[test]
+    fn format_only_eol_conversion_returns_true() {
+        assert!(is_format_only_change(
+            b"line1\r\nline2\r\n",
+            b"line1\nline2\n"
+        ));
+    }
+
+    #[test]
+    fn format_only_real_edit_returns_false() {
+        assert!(!is_format_only_change(b"foo()", b"bar()"));
+    }
+
+    #[test]
+    fn format_only_added_char_returns_false() {
+        assert!(!is_format_only_change(b"foo()", b"foo();"));
+    }
+
+    #[test]
+    fn format_only_pure_whitespace_insert() {
+        // One side empty, the other is pure whitespace
+        assert!(is_format_only_change(b"", b"   "));
+        assert!(is_format_only_change(b"  \t\n", b""));
+    }
+
+    #[test]
+    fn format_only_multiline_block_reindent_returns_true() {
+        let old = b"    fn foo() {\n        bar();\n    }";
+        let new = b"  fn foo() {\n    bar();\n  }";
+        assert!(is_format_only_change(old, new));
+    }
+
+    #[test]
+    fn format_only_string_literal_whitespace_change() {
+        // Per plan: "a b" → "a  b" is format-only (intentional trade-off)
+        assert!(is_format_only_change(b"\"a b\"", b"\"a  b\""));
+    }
+
+    #[test]
+    fn format_only_indent_preserves_ai_attribution() {
+        let tracker = AttributionTracker::new();
+        let old = "    let x = 1;\n    let y = 2;\n";
+        let new = "  let x = 1;\n  let y = 2;\n";
+        let old_attrs = vec![Attribution::new(0, old.len(), "mock_ai".into(), TEST_TS)];
+
+        let updated = tracker
+            .update_attributions(old, new, &old_attrs, "human", TEST_TS + 1)
+            .unwrap();
+
+        let line_attrs = attributions_to_line_attributions(&updated, new);
+        assert!(
+            line_attrs.iter().all(|la| la.author_id == "mock_ai"),
+            "reindent should preserve AI attribution, got {:?}",
+            line_attrs
+        );
     }
 }

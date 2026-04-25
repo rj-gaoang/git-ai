@@ -328,6 +328,16 @@ pub fn post_commit_with_final_state(
             }
         }
     }
+
+    // Best-effort upload of authorship stats to the team-managed remote.
+    // Always non-blocking and silent on failure so it cannot disrupt commits.
+    crate::integration::upload_stats::maybe_upload_after_commit(
+        repo,
+        &commit_sha,
+        &authorship_log,
+        stats.as_ref(),
+    );
+
     Ok((commit_sha.to_string(), authorship_log))
 }
 

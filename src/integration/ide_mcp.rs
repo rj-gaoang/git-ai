@@ -47,7 +47,11 @@ fn build_candidate_paths(
         push_unique(&mut paths, &mut seen, PathBuf::from(path));
     }
     if let Some(workdir) = repo_workdir {
-        push_unique(&mut paths, &mut seen, workdir.join(".vscode").join(MCP_FILENAME));
+        push_unique(
+            &mut paths,
+            &mut seen,
+            workdir.join(".vscode").join(MCP_FILENAME),
+        );
     }
 
     #[cfg(windows)]
@@ -62,7 +66,10 @@ fn build_candidate_paths(
             push_unique(
                 &mut paths,
                 &mut seen,
-                appdata.join("Code - Insiders").join("User").join(MCP_FILENAME),
+                appdata
+                    .join("Code - Insiders")
+                    .join("User")
+                    .join(MCP_FILENAME),
             );
             push_unique(
                 &mut paths,
@@ -92,7 +99,11 @@ fn build_candidate_paths(
             push_unique(
                 &mut paths,
                 &mut seen,
-                home_dir.join(".config").join("Code").join("User").join(MCP_FILENAME),
+                home_dir
+                    .join(".config")
+                    .join("Code")
+                    .join("User")
+                    .join(MCP_FILENAME),
             );
             push_unique(
                 &mut paths,
@@ -315,7 +326,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(read_x_user_id_from_file(&file_path), Some("301".to_string()));
+        assert_eq!(
+            read_x_user_id_from_file(&file_path),
+            Some("301".to_string())
+        );
     }
 
     #[test]

@@ -58,6 +58,8 @@ define_feature_flags!(
     async_mode: async_mode, debug = false, release = true,
     git_hooks_enabled: git_hooks_enabled, debug = false, release = false,
     git_hooks_externally_managed: git_hooks_externally_managed, debug = false, release = false,
+    format_only_attribution_passthrough: format_passthrough, debug = true, release = true,
+    auto_upload_ai_stats: auto_upload_ai_stats, debug = false, release = false,
 );
 
 impl FeatureFlags {
@@ -133,6 +135,8 @@ mod tests {
             assert!(!flags.async_mode);
             assert!(!flags.git_hooks_enabled);
             assert!(!flags.git_hooks_externally_managed);
+            assert!(flags.format_only_attribution_passthrough);
+            assert!(!flags.auto_upload_ai_stats);
         }
         #[cfg(not(debug_assertions))]
         {
@@ -142,6 +146,8 @@ mod tests {
             assert!(flags.async_mode);
             assert!(!flags.git_hooks_enabled);
             assert!(!flags.git_hooks_externally_managed);
+            assert!(flags.format_only_attribution_passthrough);
+            assert!(!flags.auto_upload_ai_stats);
         }
     }
 
@@ -251,6 +257,8 @@ mod tests {
             async_mode: true,
             git_hooks_enabled: false,
             git_hooks_externally_managed: false,
+            format_only_attribution_passthrough: true,
+            auto_upload_ai_stats: false,
         };
 
         let serialized = serde_json::to_string(&flags).unwrap();
@@ -271,6 +279,8 @@ mod tests {
             async_mode: true,
             git_hooks_enabled: true,
             git_hooks_externally_managed: false,
+            format_only_attribution_passthrough: true,
+            auto_upload_ai_stats: false,
         };
         let cloned = flags.clone();
         assert_eq!(cloned.rewrite_stash, flags.rewrite_stash);

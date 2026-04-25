@@ -22,6 +22,8 @@ fn setup() {
         async_mode: false,
         git_hooks_enabled: false,
         git_hooks_externally_managed: false,
+        format_only_attribution_passthrough: true,
+        auto_upload_ai_stats: false,
     };
 
     git_ai::config::Config::set_test_feature_flags(test_flags.clone());
