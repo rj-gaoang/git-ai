@@ -423,7 +423,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Generate release bot token
-        if: inputs.release_production == true
+        if: inputs.release_production == true && secrets.GIT_AI_INTERNAL_RELEASE_BOT_PRIVATE_KEY != ''
         id: release-bot-token
         uses: actions/create-github-app-token@1b10c78c7865c340bc4f6099eb2f838309f1e8c3 # v3.1.1
         with:
@@ -431,20 +431,20 @@ jobs:
           private-key: ${{ secrets.GIT_AI_INTERNAL_RELEASE_BOT_PRIVATE_KEY }}
 
       - name: Checkout code for version bump
-        if: inputs.release_production == true
+        if: inputs.release_production == true && secrets.GIT_AI_INTERNAL_RELEASE_BOT_PRIVATE_KEY != ''
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           token: ${{ steps.release-bot-token.outputs.token }}
           fetch-depth: 0
 
       - name: Install Rust toolchain
-        if: inputs.release_production == true
+        if: inputs.release_production == true && secrets.GIT_AI_INTERNAL_RELEASE_BOT_PRIVATE_KEY != ''
         uses: dtolnay/rust-toolchain@efa25f7f19611383d5b0ccf2d1c8914531636bf9 # master
         with:
           toolchain: stable
 
       - name: Bump version in Cargo.toml
-        if: inputs.release_production == true
+        if: inputs.release_production == true && secrets.GIT_AI_INTERNAL_RELEASE_BOT_PRIVATE_KEY != ''
         id: bump-version
         run: |
           # Extract current version
@@ -473,7 +473,7 @@ jobs:
           echo "new_version=${NEW_VERSION}" >> $GITHUB_OUTPUT
 
       - name: Commit and push version bump
-        if: inputs.release_production == true
+        if: inputs.release_production == true && secrets.GIT_AI_INTERNAL_RELEASE_BOT_PRIVATE_KEY != ''
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -483,6 +483,7 @@ jobs:
           git push origin main
 
       - name: Trigger release channel update
+        if: secrets.RELEASE_CHANNEL_TOKEN != ''
         run: |
           curl -X POST \
             -H "Authorization: token ${{ secrets.RELEASE_CHANNEL_TOKEN }}" \
