@@ -13,6 +13,7 @@ import { getGitRepoRoot } from "./utils/git-api";
  */
 export class KnownHumanCheckpointManager {
   private readonly debounceMs = 500;
+  private readonly aiEditSuppressionMaxAgeMs = 15000;
 
   // per repo root: pending debounce timer
   private pendingTimers = new Map<string, NodeJS.Timeout>();
@@ -20,10 +21,27 @@ export class KnownHumanCheckpointManager {
   // per repo root: set of absolute file paths queued in current debounce window
   private pendingPaths = new Map<string, Set<string>>();
 
+  // per file: last time we saw a Copilot chat-editing document for this path
+  private recentAiEditAt = new Map<string, number>();
+
   constructor(
     private readonly editorVersion: string,
     private readonly extensionVersion: string,
   ) {}
+
+  public handlePotentialAiEditEvent(doc: vscode.TextDocument): void {
+    if (!this.isCopilotChatEditingDocument(doc)) {
+      return;
+    }
+
+    const filePath = doc.uri.fsPath;
+    if (!filePath || this.isInternalVSCodePath(filePath)) {
+      return;
+    }
+
+    this.recentAiEditAt.set(filePath, Date.now());
+    console.log("[git-ai] KnownHumanCheckpointManager: Marked next save as AI-associated for", filePath);
+  }
 
   public handleSaveEvent(doc: vscode.TextDocument): void {
     if (doc.uri.scheme !== "file") {
@@ -34,6 +52,11 @@ export class KnownHumanCheckpointManager {
 
     if (this.isInternalVSCodePath(filePath)) {
       console.log("[git-ai] KnownHumanCheckpointManager: Ignoring internal VSCode file:", filePath);
+      return;
+    }
+
+    if (this.consumeRecentAiSaveSuppression(filePath)) {
+      console.log("[git-ai] KnownHumanCheckpointManager: Skipping AI-associated save for", filePath);
       return;
     }
 
@@ -151,11 +174,27 @@ export class KnownHumanCheckpointManager {
     return normalized.includes("/.vscode/");
   }
 
+  private isCopilotChatEditingDocument(doc: vscode.TextDocument): boolean {
+    return doc.uri.scheme === "chat-editing-snapshot-text-model"
+      || doc.uri.scheme === "chat-editing-text-model";
+  }
+
+  private consumeRecentAiSaveSuppression(filePath: string): boolean {
+    const markedAt = this.recentAiEditAt.get(filePath);
+    if (!markedAt) {
+      return false;
+    }
+
+    this.recentAiEditAt.delete(filePath);
+    return Date.now() - markedAt <= this.aiEditSuppressionMaxAgeMs;
+  }
+
   public dispose(): void {
     for (const timer of this.pendingTimers.values()) {
       clearTimeout(timer);
     }
     this.pendingTimers.clear();
     this.pendingPaths.clear();
+    this.recentAiEditAt.clear();
   }
 }

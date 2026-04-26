@@ -50,6 +50,9 @@ export function activate(context: vscode.ExtensionContext) {
     context.extension.packageJSON.version,
   );
   context.subscriptions.push(
+    vscode.workspace.onDidOpenTextDocument((doc) => {
+      knownHumanManager.handlePotentialAiEditEvent(doc);
+    }),
     vscode.workspace.onDidSaveTextDocument((doc) => {
       knownHumanManager.handleSaveEvent(doc);
     }),

@@ -59,7 +59,7 @@ define_feature_flags!(
     git_hooks_enabled: git_hooks_enabled, debug = false, release = false,
     git_hooks_externally_managed: git_hooks_externally_managed, debug = false, release = false,
     format_only_attribution_passthrough: format_passthrough, debug = true, release = true,
-    auto_upload_ai_stats: auto_upload_ai_stats, debug = false, release = false,
+    auto_upload_ai_stats: auto_upload_ai_stats, debug = true, release = true,
 );
 
 impl FeatureFlags {
@@ -136,7 +136,7 @@ mod tests {
             assert!(!flags.git_hooks_enabled);
             assert!(!flags.git_hooks_externally_managed);
             assert!(flags.format_only_attribution_passthrough);
-            assert!(!flags.auto_upload_ai_stats);
+            assert!(flags.auto_upload_ai_stats);
         }
         #[cfg(not(debug_assertions))]
         {
@@ -147,7 +147,7 @@ mod tests {
             assert!(!flags.git_hooks_enabled);
             assert!(!flags.git_hooks_externally_managed);
             assert!(flags.format_only_attribution_passthrough);
-            assert!(!flags.auto_upload_ai_stats);
+            assert!(flags.auto_upload_ai_stats);
         }
     }
 
