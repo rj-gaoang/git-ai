@@ -78,6 +78,8 @@ Non-WSL Windows support is currently experimental and under active development. 
 powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://usegitai.com/install.ps1 | iex"
 ```
 
+If you need the installer to pull binaries from a different GitHub repository, set `GIT_AI_GITHUB_REPO=<owner/repo>` before running it, and optionally set `GIT_AI_RELEASE_TAG=<tag-or-latest>` to pin a specific release. For local development validation, set `GIT_AI_LOCAL_BINARY` to a built executable instead. The installer still consumes release assets, so a branch URL by itself is not enough unless that branch has a published tag/release.
+
 That's it — **no per-repo setup required.** Prompt and commit as normal. Git AI tracks attribution automatically.
 
 ### Our Choices

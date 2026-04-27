@@ -202,9 +202,13 @@ function Verify-Checksum {
 # GitHub repository details
 # Replaced during release builds with the actual repository (e.g., "git-ai-project/git-ai")
 # When set to __REPO_PLACEHOLDER__, defaults to "git-ai-project/git-ai"
+# Can be overridden at runtime with GIT_AI_GITHUB_REPO (e.g., "rj-gaoang/git-ai")
 $Repo = '__REPO_PLACEHOLDER__'
 if ($Repo -eq '__REPO_PLACEHOLDER__') {
     $Repo = 'git-ai-project/git-ai'
+}
+if (-not [string]::IsNullOrWhiteSpace($env:GIT_AI_GITHUB_REPO)) {
+    $Repo = $env:GIT_AI_GITHUB_REPO.Trim()
 }
 
 # Version placeholder - replaced during release builds with actual version (e.g., "v1.0.24")
@@ -411,7 +415,7 @@ if (-not [string]::IsNullOrWhiteSpace($env:GIT_AI_LOCAL_BINARY)) {
 $installDir = Join-Path $HOME ".git-ai\bin"
 New-Item -ItemType Directory -Force -Path $installDir | Out-Null
 
-Write-Host ("Downloading git-ai (release: {0})..." -f $releaseTag)
+Write-Host ("Downloading git-ai (repo: {0}, release: {1})..." -f $Repo, $releaseTag)
 $tmpFile = Join-Path $installDir "git-ai.tmp.$PID.exe"
 
 function Try-Download {

@@ -50,9 +50,13 @@ NC='\033[0m' # No Color
 # GitHub repository details
 # Replaced during release builds with the actual repository (e.g., "git-ai-project/git-ai")
 # When set to __REPO_PLACEHOLDER__, defaults to "git-ai-project/git-ai"
+# Can be overridden at runtime with GIT_AI_GITHUB_REPO (e.g., "rj-gaoang/git-ai")
 REPO="__REPO_PLACEHOLDER__"
 if [ "$REPO" = "__REPO_PLACEHOLDER__" ]; then
     REPO="git-ai-project/git-ai"
+fi
+if [ -n "${GIT_AI_GITHUB_REPO:-}" ]; then
+    REPO="$GIT_AI_GITHUB_REPO"
 fi
 
 # Version placeholder - replaced during release builds with actual version (e.g., "v1.0.24")
@@ -288,7 +292,7 @@ if [ -n "${GIT_AI_LOCAL_BINARY:-}" ]; then
     fi
     cp "$GIT_AI_LOCAL_BINARY" "$TMP_FILE"
 else
-    echo "Downloading git-ai (release: ${RELEASE_TAG})..."
+    echo "Downloading git-ai (repo: ${REPO}, release: ${RELEASE_TAG})..."
     if ! curl --fail --location --silent --show-error -o "$TMP_FILE" "$DOWNLOAD_URL"; then
         rm -f "$TMP_FILE" 2>/dev/null || true
         error "Failed to download binary (HTTP error)"
