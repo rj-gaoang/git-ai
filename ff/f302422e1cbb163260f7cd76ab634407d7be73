@@ -1,0 +1,19 @@
+README.md
+  h_602db118073c06 81
+install.ps1
+  h_602db118073c06 205,210-212,418
+install.sh
+  h_602db118073c06 53,58-59,295
+---
+{
+  "schema_version": "authorship/3.1.0",
+  "git_ai_version": "2.0.3",
+  "x_user_id": "108",
+  "base_commit_sha": "fff302422e1cbb163260f7cd76ab634407d7be73",
+  "prompts": {},
+  "humans": {
+    "h_602db118073c06": {
+      "author": "gaoang"
+    }
+  }
+}
