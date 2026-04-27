@@ -1098,8 +1098,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "git-ai"
-version = "1.3.5"
+name = "git-ai-ruijie"
+version = "2.0.2"
 dependencies = [
  "chrono",
  "clap",
@@ -1108,7 +1108,7 @@ dependencies = [
  "envy",
  "filetime",
  "futures",
- "git-ai",
+ "git-ai-ruijie",
  "git2",
  "gix-config",
  "gix-index",
