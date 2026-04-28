@@ -112,10 +112,10 @@ fn ensure_daemon_running_attached(timeout: Duration) -> Result<DaemonConfig, Str
     }
 
     if daemon_startup_is_blocked(&config) {
-        return Err(format!(
-            "daemon startup blocked: lock held at {}",
-            config.lock_path.display()
-        ));
+        if wait_for_daemon_up(&config, timeout) {
+            return Ok(config);
+        }
+        return Err(daemon_startup_blocked_message(&config));
     }
 
     let mut child = spawn_daemon_run_with_piped_stderr(&config)?;
@@ -138,6 +138,14 @@ fn ensure_daemon_running_attached(timeout: Duration) -> Result<DaemonConfig, Str
                 } else {
                     stderr_buf.trim().to_string()
                 };
+                if daemon_startup_error_is_lock_contention(&detail)
+                    && wait_for_daemon_up(
+                        &config,
+                        deadline.saturating_duration_since(Instant::now()),
+                    )
+                {
+                    return Ok(config);
+                }
                 return Err(format!("daemon failed to start: {}", detail));
             }
             Ok(Some(_)) => {
@@ -197,10 +205,10 @@ pub(crate) fn ensure_daemon_running(timeout: Duration) -> Result<DaemonConfig, S
     }
 
     if daemon_startup_is_blocked(&config) {
-        return Err(format!(
-            "daemon startup blocked: lock held at {}",
-            config.lock_path.display()
-        ));
+        if wait_for_daemon_up(&config, timeout) {
+            return Ok(config);
+        }
+        return Err(daemon_startup_blocked_message(&config));
     }
 
     spawn_daemon_run_detached(&config)?;
@@ -230,6 +238,19 @@ fn daemon_startup_is_blocked(config: &DaemonConfig) -> bool {
         }
         None => true,
     }
+}
+
+fn daemon_startup_blocked_message(config: &DaemonConfig) -> String {
+    format!(
+        "daemon startup blocked: lock held at {}",
+        config.lock_path.display()
+    )
+}
+
+#[cfg(not(windows))]
+fn daemon_startup_error_is_lock_contention(detail: &str) -> bool {
+    let detail = detail.to_ascii_lowercase();
+    detail.contains("lock held") || detail.contains("already running")
 }
 
 pub(crate) fn daemon_is_up(config: &DaemonConfig) -> bool {

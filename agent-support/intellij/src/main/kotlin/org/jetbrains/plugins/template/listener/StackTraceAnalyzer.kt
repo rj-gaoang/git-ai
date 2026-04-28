@@ -27,8 +27,12 @@ object StackTraceAnalyzer {
     private val knownAgents = listOf(
         AgentPattern(
             name = "github-copilot-jetbrains",
-            packagePatterns = listOf("com.github.copilot"),
-            classPatterns = listOf("copilot")
+            packagePatterns = listOf(
+                "com.github.copilot",
+                "com.intellij.copilot",
+                "org.intellij.plugins.github.copilot"
+            ),
+            classPatterns = listOf("githubcopilot", "github.copilot", "copilot")
         ),
         AgentPattern(
             name = "junie",
@@ -37,8 +41,22 @@ object StackTraceAnalyzer {
                 "com.intellij.ml.llm.matterhorn"
             ),
             classPatterns = listOf("junie", "matterhorn", "embark")
+        ),
+        AgentPattern(
+            name = "jetbrains-ai-assistant",
+            packagePatterns = listOf(
+                "com.intellij.ml.llm",
+                "com.jetbrains.ai",
+                "ai.grazie"
+            ),
+            classPatterns = listOf("aiassistant", "ai.assistant", "grazie")
         )
     )
+
+    fun isActionableAiEdit(analysis: AnalysisResult): Boolean {
+        return analysis.sourceName != null &&
+            (analysis.confidence == Confidence.HIGH || analysis.confidence == Confidence.MEDIUM)
+    }
 
     fun analyze(stackTrace: Array<StackTraceElement>): AnalysisResult {
         val relevantFrames = mutableListOf<StackTraceElement>()

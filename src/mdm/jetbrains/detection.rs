@@ -236,6 +236,18 @@ fn find_windows_installations() -> Vec<DetectedIde> {
         }
     }
 
+    for install_path in read_windows_jetbrains_registry_candidates() {
+        for ide in JETBRAINS_IDES {
+            if let Some(detected_ide) = detect_windows_ide(ide, &install_path)
+                && !detected
+                    .iter()
+                    .any(|d| d.install_path == detected_ide.install_path)
+            {
+                detected.push(detected_ide);
+            }
+        }
+    }
+
     let android_studio = android_studio_ide();
     for install_path in windows_android_studio_installation_candidates(&program_dirs) {
         if let Some(detected_ide) = detect_windows_ide(android_studio, &install_path)
@@ -602,6 +614,71 @@ fn windows_program_files_dirs() -> Vec<PathBuf> {
 }
 
 #[cfg(windows)]
+fn read_windows_jetbrains_registry_candidates() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    for hive in [
+        RegKey::predef(HKEY_CURRENT_USER),
+        RegKey::predef(HKEY_LOCAL_MACHINE),
+    ] {
+        for candidate in collect_windows_jetbrains_paths_from_hive(&hive) {
+            push_unique_path(&mut candidates, candidate);
+        }
+    }
+    candidates
+}
+
+#[cfg(windows)]
+fn collect_windows_jetbrains_paths_from_hive(hive: &RegKey) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+
+    for uninstall_path in [
+        "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall",
+        "Software\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall",
+    ] {
+        if let Ok(uninstall_root) = hive.open_subkey(uninstall_path) {
+            for subkey_name in uninstall_root.enum_keys().flatten() {
+                if let Ok(uninstall_entry) = uninstall_root.open_subkey(&subkey_name)
+                    && read_windows_string_value(&uninstall_entry, "DisplayName")
+                        .as_deref()
+                        .is_some_and(windows_display_name_matches_jetbrains_ide)
+                {
+                    for value_name in ["InstallLocation", "DisplayIcon", "UninstallString"] {
+                        if let Some(value) = read_windows_string_value(&uninstall_entry, value_name)
+                            && let Some(candidate) =
+                                normalize_windows_install_path_candidate(&value)
+                        {
+                            push_unique_path(&mut candidates, candidate);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    candidates
+}
+
+#[cfg(windows)]
+fn windows_display_name_matches_jetbrains_ide(display_name: &str) -> bool {
+    let lower = display_name.to_ascii_lowercase();
+    lower.contains("jetbrains")
+        || [
+            "intellij idea",
+            "pycharm",
+            "webstorm",
+            "goland",
+            "clion",
+            "phpstorm",
+            "rider",
+            "rubymine",
+            "datagrip",
+            "android studio",
+        ]
+        .into_iter()
+        .any(|name| lower.contains(name))
+}
+
+#[cfg(windows)]
 fn android_studio_ide() -> &'static JetBrainsIde {
     JETBRAINS_IDES
         .iter()
@@ -705,7 +782,18 @@ fn normalize_windows_install_path_candidate(raw_value: &str) -> Option<PathBuf> 
         .map(|value| value.to_ascii_lowercase());
 
     match file_name.as_deref() {
-        Some("studio.exe") | Some("studio64.exe") => path.parent()?.parent().map(Path::to_path_buf),
+        Some(name) if name.ends_with(".exe") => {
+            let parent = path.parent()?;
+            if parent
+                .file_name()
+                .and_then(|value| value.to_str())
+                .is_some_and(|name| name.eq_ignore_ascii_case("bin"))
+            {
+                parent.parent().map(Path::to_path_buf)
+            } else {
+                None
+            }
+        }
         Some("bin") => path.parent().map(Path::to_path_buf),
         Some(_) if path.extension().is_some() => None,
         _ => Some(path),
@@ -921,5 +1009,32 @@ mod tests {
             normalize_windows_install_path_candidate(r"D:\software\as\bin\studio.exe"),
             Some(PathBuf::from(r"D:\software\as"))
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_normalize_windows_install_path_candidate_strips_jetbrains_bin_executables() {
+        assert_eq!(
+            normalize_windows_install_path_candidate(r"D:\IntelliJ IDEA 2025.2.4\bin\idea64.exe"),
+            Some(PathBuf::from(r"D:\IntelliJ IDEA 2025.2.4"))
+        );
+        assert_eq!(
+            normalize_windows_install_path_candidate(
+                r"D:\IntelliJ IDEA 2025.2.4\bin\Uninstall.exe"
+            ),
+            Some(PathBuf::from(r"D:\IntelliJ IDEA 2025.2.4"))
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_windows_display_name_matches_jetbrains_ide() {
+        assert!(windows_display_name_matches_jetbrains_ide(
+            "IntelliJ IDEA 2025.2.4"
+        ));
+        assert!(windows_display_name_matches_jetbrains_ide(
+            "JetBrains Toolbox"
+        ));
+        assert!(!windows_display_name_matches_jetbrains_ide("Git"));
     }
 }

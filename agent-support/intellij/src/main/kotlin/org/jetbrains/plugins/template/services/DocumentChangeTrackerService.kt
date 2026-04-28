@@ -46,9 +46,11 @@ class DocumentChangeTrackerService : Disposable {
         val editorVersion = ApplicationInfo.getInstance().fullVersion
         // TODO: Get plugin version dynamically when IntelliJ platform API stabilizes
         val extensionVersion = "0.1.6"
-        val saveListener = DocumentSaveListener(scheduler, editorVersion, extensionVersion)
+        val saveListener = DocumentSaveListener(scheduler, agentTouchedFiles, editorVersion, extensionVersion)
         ApplicationManager.getApplication().messageBus.connect(this)
             .subscribe(VirtualFileManager.VFS_CHANGES, saveListener)
+
+        GitExecutableConfigurator.configureGitProxy()
 
         // Periodic eviction of stale tracking entries
         scheduler.scheduleAtFixedRate(

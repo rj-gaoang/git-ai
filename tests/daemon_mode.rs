@@ -1054,6 +1054,66 @@ fn daemon_start_spawns_detached_run_process() {
 
 #[test]
 #[serial]
+fn concurrent_daemon_start_calls_reuse_single_startup() {
+    let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
+
+    let mut children = Vec::new();
+    for _ in 0..6 {
+        let mut command = Command::new(get_binary_path());
+        command
+            .arg("bg")
+            .arg("start")
+            .current_dir(repo.path())
+            .env("GIT_AI_TEST_DB_PATH", repo.test_db_path())
+            .env("GITAI_TEST_DB_PATH", repo.test_db_path())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        configure_test_home_env(&mut command, repo.test_home_path());
+        configure_test_daemon_env(
+            &mut command,
+            &repo.daemon_home_path(),
+            &daemon_control_socket_path(&repo),
+            &daemon_trace_socket_path(&repo),
+        );
+        children.push(command.spawn().expect("failed to spawn daemon start"));
+    }
+
+    for child in children {
+        let output = child
+            .wait_with_output()
+            .expect("failed waiting for daemon start");
+        assert!(
+            output.status.success(),
+            "concurrent daemon start should succeed: stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            !String::from_utf8_lossy(&output.stderr).contains("daemon startup blocked"),
+            "daemon start should wait for the startup owner instead of surfacing lock contention"
+        );
+    }
+
+    let status = send_control_request(
+        &daemon_control_socket_path(&repo),
+        &ControlRequest::StatusFamily {
+            repo_working_dir: repo_workdir_string(&repo),
+        },
+    )
+    .expect("daemon status should be reachable after concurrent starts");
+    assert!(
+        status.ok,
+        "daemon status should be ok after concurrent starts"
+    );
+
+    let _ = send_control_request(
+        &daemon_control_socket_path(&repo),
+        &ControlRequest::Shutdown,
+    );
+}
+
+#[test]
+#[serial]
 fn checkpoint_delegate_autostarts_daemon_when_unavailable() {
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
 

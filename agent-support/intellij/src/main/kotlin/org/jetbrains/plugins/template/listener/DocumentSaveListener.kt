@@ -21,6 +21,7 @@ import java.util.concurrent.TimeUnit
  */
 class DocumentSaveListener(
     private val scheduler: ScheduledExecutorService,
+    private val agentTouchedFiles: ConcurrentHashMap<String, TrackedAgent>,
     private val editorVersion: String,
     private val extensionVersion: String,
 ) : BulkFileListener {
@@ -37,12 +38,17 @@ class DocumentSaveListener(
 
     override fun after(events: List<VFileEvent>) {
         val workspaceRoots = mutableSetOf<String>()
+        val now = System.currentTimeMillis()
 
         for (event in events) {
             if (event !is VFileContentChangeEvent) continue
             if (event.isFromRefresh) continue  // external writes handled by VfsRefreshListener
             if (isInternalJetBrainsPath(event.path)) {
                 logger.debug("[SAVE] Ignoring internal JetBrains file: ${event.path}")
+                continue
+            }
+            if (shouldSkipKnownHumanForAiTouchedPath(event.path, now, agentTouchedFiles)) {
+                logger.debug("[SAVE] Skipping AI-associated save: ${event.path}")
                 continue
             }
 
@@ -123,4 +129,17 @@ class DocumentSaveListener(
         }
         return null
     }
+}
+
+internal fun shouldSkipKnownHumanForAiTouchedPath(
+    path: String,
+    now: Long,
+    agentTouchedFiles: ConcurrentHashMap<String, TrackedAgent>
+): Boolean {
+    val tracked = agentTouchedFiles[path] ?: return false
+    if (now > tracked.refreshEligibleUntil) {
+        agentTouchedFiles.remove(path, tracked)
+        return false
+    }
+    return true
 }

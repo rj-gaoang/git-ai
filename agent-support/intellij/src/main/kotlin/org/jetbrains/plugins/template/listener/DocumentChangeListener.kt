@@ -61,10 +61,10 @@ class DocumentChangeListener(
         // Log for debugging
         logDocumentChange("BEFORE", event, analysis)
 
-        // Only proceed for HIGH confidence AI agent detection
-        if (analysis.confidence != StackTraceAnalyzer.Confidence.HIGH || analysis.sourceName == null) {
+        if (!StackTraceAnalyzer.isActionableAiEdit(analysis)) {
             return
         }
+        val sourceName = analysis.sourceName ?: return
 
         val workspaceRoot = findWorkspaceRoot(file) ?: return
 
@@ -83,7 +83,7 @@ class DocumentChangeListener(
 
         // Track this file so later VFS refresh events (from patch-based edits) trigger a sweep
         agentTouchedFiles[filePath] = TrackedAgent(
-            agentName = analysis.sourceName,
+            agentName = sourceName,
             workspaceRoot = workspaceRoot,
             lastCheckpointContent = currentContent,
             trackedAt = now
@@ -91,7 +91,7 @@ class DocumentChangeListener(
 
         // Trigger before_edit checkpoint
         triggerBeforeEditCheckpoint(
-            agentName = analysis.sourceName,
+            agentName = sourceName,
             filePath = filePath,
             workspaceRoot = workspaceRoot,
             fileContent = currentContent
@@ -109,10 +109,10 @@ class DocumentChangeListener(
         // Log for debugging
         logDocumentChange("AFTER", event, analysis)
 
-        // Only proceed for HIGH confidence AI agent detection
-        if (analysis.confidence != StackTraceAnalyzer.Confidence.HIGH || analysis.sourceName == null) {
+        if (!StackTraceAnalyzer.isActionableAiEdit(analysis)) {
             return
         }
+        val sourceName = analysis.sourceName ?: return
 
         val workspaceRoot = findWorkspaceRoot(file) ?: return
         val contentAfterEdit = document.text
@@ -123,14 +123,14 @@ class DocumentChangeListener(
             val updatedTrackedAt = now
             if (existing == null) {
                 TrackedAgent(
-                    agentName = analysis.sourceName,
+                    agentName = sourceName,
                     workspaceRoot = workspaceRoot,
                     lastCheckpointContent = contentAfterEdit,
                     trackedAt = updatedTrackedAt
                 )
             } else {
                 existing.copy(
-                    agentName = analysis.sourceName,
+                    agentName = sourceName,
                     workspaceRoot = workspaceRoot,
                     lastCheckpointContent = contentAfterEdit,
                     trackedAt = updatedTrackedAt,
@@ -150,7 +150,7 @@ class DocumentChangeListener(
         pendingCheckpoints[filePath] = PendingCheckpoint(
             filePath = filePath,
             workspaceRoot = workspaceRoot,
-            agentName = analysis.sourceName,
+            agentName = sourceName,
             scheduledFuture = future,
             contentAfterEdit = contentAfterEdit
         )
