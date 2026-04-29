@@ -80,6 +80,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://usegitai.com
 
 If you need the installer to pull binaries from a different GitHub repository, set `GIT_AI_GITHUB_REPO=<owner/repo>` before running it, and optionally set `GIT_AI_RELEASE_TAG=<tag-or-latest>` to pin a specific release. For local development validation, set `GIT_AI_LOCAL_BINARY` to a built executable instead. The installer still consumes release assets, so a branch URL by itself is not enough unless that branch has a published tag/release.
 
+On Windows, both the installer and the runtime Git resolver skip any existing `git-ai` shim on `PATH` and look for a standard Git binary instead. Git for Windows still needs to be installed and reachable somewhere on `PATH`, typically via `C:\Program Files\Git\cmd`.
+
+If an older Windows release fails to launch with a missing `VCRUNTIME140.dll` message, that binary was built against the MSVC runtime and the machine is missing the Microsoft Visual C++ Redistributable. Install the matching VC++ Redistributable for the machine architecture, or use a newer release built with static CRT linking.
+
 That's it — **no per-repo setup required.** Prompt and commit as normal. Git AI tracks attribution automatically.
 
 ### Our Choices
@@ -243,6 +247,8 @@ Agents make fewer mistakes and produce more maintainable code when they understa
 2. **Hooks call `git-ai checkpoint`** to link each line of AI-Code to the model, Agent and prompt that generated it.
 3. **Post Commit** a Git Note with AI-attributions in it is attached to the commit
 4. **On `merge --squash`, `rebase`, `cherry-pick`, `stash`, `pop`, `commit --amend`, etc** AI-attributions are automatically moved 
+
+For GitHub Copilot in VS Code, Git AI scopes attribution to the current native hook tool call. If the hook payload omits file paths, Git AI falls back to the matching `tool_use_id` / `toolCallId` in the Copilot transcript instead of scanning the whole chat session, so unrelated edits from nearby tool calls are not mixed into the checkpoint.
 
 #### Example Note
 `refs/notes/ai/commit_sha`

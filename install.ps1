@@ -242,13 +242,42 @@ function Get-Architecture {
 }
 
 function Get-StdGitPath {
-    $cmd = Get-Command git.exe -ErrorAction SilentlyContinue
     $gitPath = $null
-    if ($cmd -and $cmd.Path) {
-        # Ensure we never return a path for git that contains git-ai (recursive)
-        if ($cmd.Path -notmatch "git-ai") {
-            $gitPath = $cmd.Path
+
+    # Get-Command returns the first git.exe on PATH, which may be our own shim.
+    # Walk all discovered candidates and pick the first usable non-git-ai binary.
+    $candidatePaths = New-Object System.Collections.Generic.List[string]
+    try {
+        $commands = @(Get-Command git.exe -All -ErrorAction SilentlyContinue)
+        foreach ($command in $commands) {
+            if ($command -and $command.Path -and $command.Path -notmatch 'git-ai' -and (Test-Path -LiteralPath $command.Path)) {
+                if (-not $candidatePaths.Contains($command.Path)) {
+                    [void]$candidatePaths.Add($command.Path)
+                }
+            }
         }
+    } catch { }
+
+    try {
+        $whereCandidates = @(where.exe git.exe 2>$null)
+        foreach ($candidate in $whereCandidates) {
+            $candidatePath = "$candidate".Trim()
+            if ($candidatePath -and $candidatePath -notmatch 'git-ai' -and (Test-Path -LiteralPath $candidatePath)) {
+                if (-not $candidatePaths.Contains($candidatePath)) {
+                    [void]$candidatePaths.Add($candidatePath)
+                }
+            }
+        }
+    } catch { }
+
+    foreach ($candidatePath in $candidatePaths) {
+        try {
+            & $candidatePath --version | Out-Null
+            if ($LASTEXITCODE -eq 0) {
+                $gitPath = $candidatePath
+                break
+            }
+        } catch { }
     }
 
     # If detection failed or was our own shim, try to recover from saved config

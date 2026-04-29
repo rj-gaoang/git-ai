@@ -391,7 +391,8 @@ fn normalize_tool_model(tool: Option<&str>, model: Option<&str>) -> (String, Opt
                 .as_deref()
                 .map(|tool_value| {
                     model_text.eq_ignore_ascii_case(&format!("{}::{}", tool_value, model_value))
-                        || model_text.eq_ignore_ascii_case(&format!("{}/{}", tool_value, model_value))
+                        || model_text
+                            .eq_ignore_ascii_case(&format!("{}/{}", tool_value, model_value))
                         || same_tool_family(tool_value, &model_tool)
                 })
                 .unwrap_or(true);
@@ -792,10 +793,7 @@ mod tests {
         assert_eq!(prompt["tool"], "github copilot");
         assert_eq!(prompt["model"], "gpt-5.4");
         assert_eq!(prompt["humanAuthor"], "dev@example.com");
-        assert_eq!(
-            prompt["promptText"],
-            "first prompt\n\nsecond prompt"
-        );
+        assert_eq!(prompt["promptText"], "first prompt\n\nsecond prompt");
         assert_eq!(prompt["messagesUrl"], "https://cas.example/prompt-123");
         assert_eq!(prompt["acceptedLines"], 7);
         assert_eq!(prompt["customAttributes"]["language"], "rust");

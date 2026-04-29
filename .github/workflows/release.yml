@@ -100,8 +100,8 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-${{ matrix.target }}-
 
-      - name: Build release binary (non-Docker, non-Windows-ARM64)
-        if: matrix.use_docker == false && matrix.os != 'windows-11-arm'
+      - name: Build release binary (macOS ARM64)
+        if: matrix.os == 'macos-latest'
         run: |
           cargo build --release --target ${{ matrix.target }}
         env:
@@ -110,7 +110,18 @@ jobs:
           POSTHOG_API_KEY: ${{ secrets.POSTHOG_API_KEY }}
           OSS_BUILD: "1"
 
-      - name: Build release binary (Windows ARM64 with LLVM strip)
+      - name: Build release binary (Windows x64 with static CRT)
+        if: matrix.os == 'windows-latest'
+        run: |
+          cargo build --release --target ${{ matrix.target }}
+        env:
+          CARGO_INCREMENTAL: 0
+          SENTRY_OSS: ${{ secrets.SENTRY_OSS }}
+          POSTHOG_API_KEY: ${{ secrets.POSTHOG_API_KEY }}
+          OSS_BUILD: "1"
+          RUSTFLAGS: "-C target-feature=+crt-static"
+
+      - name: Build release binary (Windows ARM64 with static CRT and LLVM strip)
         if: matrix.os == 'windows-11-arm'
         run: |
           cargo build --release --target ${{ matrix.target }}
@@ -119,7 +130,7 @@ jobs:
           SENTRY_OSS: ${{ secrets.SENTRY_OSS }}
           POSTHOG_API_KEY: ${{ secrets.POSTHOG_API_KEY }}
           OSS_BUILD: "1"
-          RUSTFLAGS: "-C strip=symbols"
+          RUSTFLAGS: "-C target-feature=+crt-static -C strip=symbols"
 
       - name: Verify binary architecture (Linux)
         if: contains(matrix.os, 'ubuntu')

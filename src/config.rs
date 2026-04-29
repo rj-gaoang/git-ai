@@ -796,7 +796,12 @@ fn resolve_git_path(file_cfg: &Option<FileConfig>) -> String {
         }
     }
 
-    // 2) Probe common locations across platforms.
+    // 2) Search PATH entries, skipping any git-ai shim.
+    if let Some(found) = find_real_git_on_path() {
+        return found;
+    }
+
+    // 3) Probe common locations across platforms.
     // Also check ~/.local/bin/git — the XDG user binary dir used by the Linux installer.
     // All candidates are guarded by path_is_git_ai_binary so that a git-ai shim at any
     // of these locations can never be returned as the "real git" (fork bomb prevention).
@@ -815,7 +820,9 @@ fn resolve_git_path(file_cfg: &Option<FileConfig>) -> String {
         "/usr/sbin/git",
         // Windows Git for Windows
         r"C:\\Program Files\\Git\\bin\\git.exe",
+        r"C:\\Program Files\\Git\\cmd\\git.exe",
         r"C:\\Program Files (x86)\\Git\\bin\\git.exe",
+        r"C:\\Program Files (x86)\\Git\\cmd\\git.exe",
     ];
 
     if let Some(found) = candidates
@@ -826,7 +833,7 @@ fn resolve_git_path(file_cfg: &Option<FileConfig>) -> String {
         return found.to_string_lossy().to_string();
     }
 
-    // 3) Fatal error: no real git found
+    // 4) Fatal error: no real git found
     eprintln!(
         "Fatal: Could not locate a real 'git' binary.\n\
          Expected a valid 'git_path' in {cfg_path} or in standard locations.\n\
@@ -836,6 +843,19 @@ fn resolve_git_path(file_cfg: &Option<FileConfig>) -> String {
             .unwrap_or_else(|| "~/.git-ai/config.json".to_string()),
     );
     std::process::exit(1);
+}
+
+fn find_real_git_on_path() -> Option<String> {
+    find_real_git_in_path_var(env::var_os("PATH")).map(|path| path.to_string_lossy().to_string())
+}
+
+fn find_real_git_in_path_var(path_var: Option<std::ffi::OsString>) -> Option<PathBuf> {
+    let binary_name = if cfg!(windows) { "git.exe" } else { "git" };
+    let path_var = path_var?;
+
+    env::split_paths(&path_var)
+        .map(|dir| dir.join(binary_name))
+        .find(|candidate| is_real_git_candidate(candidate))
 }
 
 fn load_file_config() -> Option<FileConfig> {
@@ -989,6 +1009,19 @@ fn same_file(a: &Path, b: &Path) -> bool {
     false
 }
 
+fn files_have_same_contents(a: &Path, b: &Path) -> bool {
+    let (Ok(meta_a), Ok(meta_b)) = (fs::metadata(a), fs::metadata(b)) else {
+        return false;
+    };
+    if meta_a.len() != meta_b.len() {
+        return false;
+    }
+    let (Ok(bytes_a), Ok(bytes_b)) = (fs::read(a), fs::read(b)) else {
+        return false;
+    };
+    bytes_a == bytes_b
+}
+
 /// Detect if a path is actually the git-ai binary (or a symlink to it).
 /// This prevents `git_cmd()` from returning the git-ai shim, which would
 /// cause infinite recursion: handle_git() → proxy_to_git() → shim → handle_git() → ...
@@ -1019,8 +1052,16 @@ fn path_is_git_ai_binary(path: &Path) -> bool {
             "git-ai"
         };
         let sibling = parent.join(git_ai_name);
-        if sibling.exists() && same_file(path, &sibling) {
-            return true;
+        if sibling.exists() {
+            if same_file(path, &sibling) {
+                return true;
+            }
+
+            // Windows installer creates `git.exe` by copying `git-ai.exe`, not by
+            // hard-linking it. Treat byte-identical siblings as git-ai shims too.
+            if files_have_same_contents(path, &sibling) {
+                return true;
+            }
         }
     }
 
@@ -1697,5 +1738,76 @@ mod tests {
             fs::hard_link(&git_ai, &git).unwrap();
             assert!(path_is_git_ai_binary(&git));
         }
+    }
+
+    #[test]
+    fn test_path_is_git_ai_binary_copied_sibling() {
+        let dir = tempfile::tempdir().unwrap();
+        let git_ai_name = if cfg!(windows) {
+            "git-ai.exe"
+        } else {
+            "git-ai"
+        };
+        let git_name = if cfg!(windows) { "git.exe" } else { "git" };
+
+        let git_ai = dir.path().join(git_ai_name);
+        let git = dir.path().join(git_name);
+
+        fs::write(&git_ai, "git-ai-binary").unwrap();
+        fs::copy(&git_ai, &git).unwrap();
+
+        assert!(path_is_git_ai_binary(&git));
+    }
+
+    #[test]
+    fn test_find_real_git_in_path_var_skips_git_ai_shim() {
+        let dir = tempfile::tempdir().unwrap();
+        let shim_dir = dir.path().join("shim");
+        let real_dir = dir.path().join("real");
+        fs::create_dir_all(&shim_dir).unwrap();
+        fs::create_dir_all(&real_dir).unwrap();
+
+        let shim_name = if cfg!(windows) { "git.exe" } else { "git" };
+        let git_ai_name = if cfg!(windows) {
+            "git-ai.exe"
+        } else {
+            "git-ai"
+        };
+
+        let shim = shim_dir.join(shim_name);
+        let git_ai = shim_dir.join(git_ai_name);
+        let real_git = real_dir.join(shim_name);
+
+        fs::write(&git_ai, "git-ai-binary").unwrap();
+        fs::copy(&git_ai, &shim).unwrap();
+        fs::write(&real_git, "real-git-binary").unwrap();
+
+        let joined_path = env::join_paths([shim_dir.as_path(), real_dir.as_path()]).unwrap();
+        let found = find_real_git_in_path_var(Some(joined_path)).unwrap();
+
+        assert_eq!(found, real_git);
+    }
+
+    #[test]
+    fn test_find_real_git_in_path_var_returns_none_for_only_shim() {
+        let dir = tempfile::tempdir().unwrap();
+        let shim_dir = dir.path().join("shim");
+        fs::create_dir_all(&shim_dir).unwrap();
+
+        let shim_name = if cfg!(windows) { "git.exe" } else { "git" };
+        let git_ai_name = if cfg!(windows) {
+            "git-ai.exe"
+        } else {
+            "git-ai"
+        };
+
+        let shim = shim_dir.join(shim_name);
+        let git_ai = shim_dir.join(git_ai_name);
+
+        fs::write(&git_ai, "git-ai-binary").unwrap();
+        fs::copy(&git_ai, &shim).unwrap();
+
+        let joined_path = env::join_paths([shim_dir.as_path()]).unwrap();
+        assert!(find_real_git_in_path_var(Some(joined_path)).is_none());
     }
 }
