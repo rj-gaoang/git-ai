@@ -7,7 +7,7 @@ use crate::mdm::git_clients::get_all_git_client_installers;
 use crate::mdm::hook_installer::HookInstallerParams;
 use crate::mdm::skills_installer;
 use crate::mdm::spinner::{Spinner, print_diff};
-use crate::mdm::utils::{get_current_binary_path, git_shim_path};
+use crate::mdm::utils::{get_current_binary_path, git_shim_path, home_dir};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -190,22 +190,6 @@ fn find_running_pids(process_names: &[&str]) -> Vec<(u32, String)> {
     results
 }
 
-fn set_global_git_config_value(git_cmd: &str, key: &str, value: &str) -> Result<(), GitAiError> {
-    let status = Command::new(git_cmd)
-        .args(["config", "--global", key, value])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(GitAiError::Generic(format!(
-            "failed to set global git config key '{}'",
-            key
-        )))
-    }
-}
-
 fn ensure_global_git_config_dirs() -> Result<(), GitAiError> {
     if let Ok(path) = std::env::var("GIT_CONFIG_GLOBAL") {
         let config_path = PathBuf::from(path);
@@ -221,21 +205,54 @@ fn ensure_global_git_config_dirs() -> Result<(), GitAiError> {
     Ok(())
 }
 
-fn remove_global_git_config_section(git_cmd: &str, section: &str) -> Result<(), GitAiError> {
-    let status = Command::new(git_cmd)
-        .args(["config", "--global", "--remove-section", section])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()?;
-    // Exit code 128 means the section doesn't exist, which is fine.
-    if status.success() || status.code() == Some(128) {
-        Ok(())
-    } else {
-        Err(GitAiError::Generic(format!(
-            "failed to remove global git config section '{}'",
-            section
-        )))
+fn global_git_config_path() -> PathBuf {
+    if let Ok(path) = std::env::var("GIT_CONFIG_GLOBAL")
+        && !path.trim().is_empty()
+    {
+        return PathBuf::from(path);
     }
+    home_dir().join(".gitconfig")
+}
+
+fn load_global_git_config(path: &Path) -> Result<gix_config::File<'static>, GitAiError> {
+    if path.exists() {
+        return gix_config::File::from_path_no_includes(
+            path.to_path_buf(),
+            gix_config::Source::User,
+        )
+        .map_err(|e| GitAiError::GixError(e.to_string()));
+    }
+    Ok(gix_config::File::default())
+}
+
+fn write_global_git_config(path: &Path, cfg: &gix_config::File<'_>) -> Result<(), GitAiError> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let bytes = cfg.to_bstring();
+    fs::write(path, bytes.as_slice())?;
+    Ok(())
+}
+
+fn remove_global_git_config_section(section: &str) -> Result<(), GitAiError> {
+    let config_path = global_git_config_path();
+    if !config_path.exists() {
+        return Ok(());
+    }
+    let mut cfg = load_global_git_config(&config_path)?;
+    while cfg.remove_section(section, None).is_some() {}
+    write_global_git_config(&config_path, &cfg)
+}
+
+fn configure_global_trace2_file(event_target: &str) -> Result<(), GitAiError> {
+    let config_path = global_git_config_path();
+    let mut cfg = load_global_git_config(&config_path)?;
+    while cfg.remove_section("trace2", None).is_some() {}
+    cfg.set_raw_value(&TRACE2_EVENT_TARGET_KEY, event_target)
+        .map_err(|e| GitAiError::GixError(e.to_string()))?;
+    cfg.set_raw_value(&TRACE2_EVENT_NESTING_KEY, TRACE2_EVENT_NESTING_VALUE)
+        .map_err(|e| GitAiError::GixError(e.to_string()))?;
+    write_global_git_config(&config_path, &cfg)
 }
 
 fn maybe_configure_async_mode_daemon_trace2(dry_run: bool) -> Result<(), GitAiError> {
@@ -244,7 +261,7 @@ fn maybe_configure_async_mode_daemon_trace2(dry_run: bool) -> Result<(), GitAiEr
     if !runtime_config.feature_flags().async_mode {
         if !dry_run {
             // Async mode is off — clean up any trace2 config we previously wrote.
-            let _ = remove_global_git_config_section(runtime_config.git_cmd(), "trace2");
+            let _ = remove_global_git_config_section("trace2");
         }
         return Ok(());
     }
@@ -252,28 +269,24 @@ fn maybe_configure_async_mode_daemon_trace2(dry_run: bool) -> Result<(), GitAiEr
     ensure_global_git_config_dirs()?;
 
     let daemon_config = DaemonConfig::from_env_or_default_paths()?;
-    let event_target = daemon_config.trace2_event_target();
 
     if dry_run {
         return Ok(());
     }
 
+    configure_async_mode_daemon_trace2_for_config(&daemon_config)
+}
+
+pub(crate) fn configure_async_mode_daemon_trace2_for_config(
+    daemon_config: &DaemonConfig,
+) -> Result<(), GitAiError> {
+    ensure_global_git_config_dirs()?;
+    let event_target = daemon_config.trace2_event_target();
+
     // Fully reset any existing trace2 config the user may have set
     // (e.g. trace2.normalTarget, trace2.perfTarget, trace2.configParams, etc.)
     // before writing only the keys we need.
-    remove_global_git_config_section(runtime_config.git_cmd(), "trace2")?;
-
-    set_global_git_config_value(
-        runtime_config.git_cmd(),
-        TRACE2_EVENT_TARGET_KEY,
-        &event_target,
-    )?;
-    set_global_git_config_value(
-        runtime_config.git_cmd(),
-        TRACE2_EVENT_NESTING_KEY,
-        TRACE2_EVENT_NESTING_VALUE,
-    )?;
-    Ok(())
+    configure_global_trace2_file(&event_target)
 }
 
 fn maybe_teardown_async_mode(dry_run: bool) {
@@ -1083,6 +1096,39 @@ mod tests {
         {
             std::os::unix::fs::symlink(git_path, install_dir.join("git-og")).unwrap();
         }
+    }
+
+    #[test]
+    #[serial]
+    fn configure_global_trace2_file_replaces_existing_trace2_section() {
+        let temp = tempdir().unwrap();
+        let config_path = temp.path().join(".gitconfig");
+        fs::write(
+            &config_path,
+            "[user]\n\tname = Test User\n[trace2]\n\teventTarget = old-target\n\tnormalTarget = old-normal\n",
+        )
+        .unwrap();
+
+        let _global_config = EnvVarGuard::set("GIT_CONFIG_GLOBAL", config_path.to_str().unwrap());
+
+        configure_global_trace2_file("afunix:/tmp/git-ai-trace.sock").unwrap();
+
+        let cfg = load_global_git_config(&config_path).unwrap();
+        assert_eq!(
+            cfg.string("user.name").map(|value| value.to_string()),
+            Some("Test User".to_string())
+        );
+        assert_eq!(
+            cfg.string(TRACE2_EVENT_TARGET_KEY)
+                .map(|value| value.to_string()),
+            Some("afunix:/tmp/git-ai-trace.sock".to_string())
+        );
+        assert_eq!(
+            cfg.string(TRACE2_EVENT_NESTING_KEY)
+                .map(|value| value.to_string()),
+            Some(TRACE2_EVENT_NESTING_VALUE.to_string())
+        );
+        assert!(cfg.string("trace2.normalTarget").is_none());
     }
 
     #[test]

@@ -83,6 +83,7 @@ pub use control_api::{
 };
 
 const PID_META_FILE: &str = "daemon.pid.json";
+const ACTIVE_DAEMON_RUNTIME_FILE: &str = "active-runtime.json";
 const TRACE_INGEST_SEQ_FIELD: &str = "git_ai_ingest_seq";
 const DAEMON_CONTROL_CONNECT_TIMEOUT: Duration = Duration::from_millis(250);
 const DAEMON_CONTROL_RESPONSE_TIMEOUT: Duration = Duration::from_secs(2);
@@ -216,7 +217,11 @@ impl DaemonConfig {
         let internal_dir = config::internal_dir_path().ok_or_else(|| {
             GitAiError::Generic("Unable to determine ~/.git-ai/internal path".to_string())
         })?;
-        Ok(Self::from_internal_dir(internal_dir))
+        let default_config = Self::from_internal_dir(internal_dir.clone());
+        if let Some(active_config) = Self::active_runtime_config(&internal_dir) {
+            return Ok(active_config);
+        }
+        Ok(default_config)
     }
 
     pub fn from_env_or_default_paths() -> Result<Self, GitAiError> {
@@ -241,6 +246,46 @@ impl DaemonConfig {
         }
 
         Ok(config)
+    }
+
+    fn active_runtime_meta_path(default_internal_dir: &Path) -> PathBuf {
+        default_internal_dir
+            .join("daemon")
+            .join(ACTIVE_DAEMON_RUNTIME_FILE)
+    }
+
+    fn active_runtime_config(default_internal_dir: &Path) -> Option<Self> {
+        let meta_path = Self::active_runtime_meta_path(default_internal_dir);
+        let contents = fs::read_to_string(meta_path).ok()?;
+        let meta: ActiveDaemonRuntimeMeta = serde_json::from_str(&contents).ok()?;
+        if meta.internal_dir == default_internal_dir {
+            return None;
+        }
+        Some(Self::from_internal_dir(meta.internal_dir))
+    }
+
+    pub fn activate_replacement_runtime(reason: &str) -> Result<Self, GitAiError> {
+        let default_internal_dir = config::internal_dir_path().ok_or_else(|| {
+            GitAiError::Generic("Unable to determine ~/.git-ai/internal path".to_string())
+        })?;
+        let runtime_id = format!("{}-{}", now_unix_nanos(), std::process::id());
+        let replacement_internal_dir = default_internal_dir
+            .join("daemon-runtimes")
+            .join(runtime_id);
+        let replacement = Self::from_internal_dir(replacement_internal_dir.clone());
+        replacement.ensure_parent_dirs()?;
+
+        let meta = ActiveDaemonRuntimeMeta {
+            internal_dir: replacement_internal_dir,
+            activated_at_ns: now_unix_nanos(),
+            reason: reason.to_string(),
+        };
+        let meta_path = Self::active_runtime_meta_path(&default_internal_dir);
+        if let Some(parent) = meta_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(meta_path, serde_json::to_string_pretty(&meta)?)?;
+        Ok(replacement)
     }
 
     pub fn ensure_parent_dirs(&self) -> Result<(), GitAiError> {
@@ -285,6 +330,13 @@ impl DaemonConfig {
 struct DaemonPidMeta {
     pid: u32,
     started_at_ns: u128,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ActiveDaemonRuntimeMeta {
+    internal_dir: PathBuf,
+    activated_at_ns: u128,
+    reason: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

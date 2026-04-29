@@ -121,7 +121,9 @@ fn ensure_daemon_running_attached(timeout: Duration) -> Result<DaemonConfig, Str
         return Ok(config);
     }
 
-    if daemon_startup_is_blocked(&config) && recover_blocked_daemon_startup(&config, timeout)? {
+    if daemon_startup_is_blocked(&config)
+        && let Some(config) = recover_blocked_daemon_startup(&config, timeout)?
+    {
         return Ok(config);
     }
 
@@ -203,7 +205,9 @@ pub(crate) fn ensure_daemon_running(timeout: Duration) -> Result<DaemonConfig, S
         return Ok(config);
     }
 
-    if daemon_startup_is_blocked(&config) && recover_blocked_daemon_startup(&config, timeout)? {
+    if daemon_startup_is_blocked(&config)
+        && let Some(config) = recover_blocked_daemon_startup(&config, timeout)?
+    {
         return Ok(config);
     }
 
@@ -239,25 +243,30 @@ fn daemon_startup_is_blocked(config: &DaemonConfig) -> bool {
 fn recover_blocked_daemon_startup(
     config: &DaemonConfig,
     timeout: Duration,
-) -> Result<bool, String> {
+) -> Result<Option<DaemonConfig>, String> {
     match wait_for_blocked_daemon(config, timeout) {
-        BlockedDaemonWaitResult::BecameHealthy => Ok(true),
+        BlockedDaemonWaitResult::BecameHealthy => Ok(Some(config.clone())),
         BlockedDaemonWaitResult::MissingPidMetadata => Err(format!(
             "daemon startup blocked: lock held at {}; no daemon pid metadata available for recovery",
             config.lock_path.display()
         )),
         BlockedDaemonWaitResult::TimedOutWithPid(pid) => {
             if daemon_is_up(config) {
-                return Ok(true);
+                return Ok(Some(config.clone()));
             }
-            hard_kill_daemon_pid(config, pid).map_err(|e| {
-                format!(
-                    "daemon startup blocked: lock held at {}; failed to recover unhealthy daemon pid {}: {}",
-                    config.lock_path.display(),
-                    pid,
-                    e
-                )
-            })?;
+            if let Err(error) = hard_kill_daemon_pid(config, pid) {
+                return start_replacement_daemon_runtime(config, timeout, pid, &error)
+                    .map(Some)
+                    .map_err(|replacement_error| {
+                        format!(
+                            "daemon startup blocked: lock held at {}; failed to recover unhealthy daemon pid {}: {}; replacement runtime also failed: {}",
+                            config.lock_path.display(),
+                            pid,
+                            error,
+                            replacement_error
+                        )
+                    });
+            }
             if !wait_for_daemon_dead(config, Duration::from_secs(2)) {
                 return Err(format!(
                     "daemon startup blocked: lock held at {}; daemon pid {} did not release the lock after force kill",
@@ -265,9 +274,43 @@ fn recover_blocked_daemon_startup(
                     pid
                 ));
             }
-            Ok(false)
+            Ok(None)
         }
     }
+}
+
+fn start_replacement_daemon_runtime(
+    blocked_config: &DaemonConfig,
+    timeout: Duration,
+    blocked_pid: u32,
+    recovery_error: &str,
+) -> Result<DaemonConfig, String> {
+    let reason = format!(
+        "failed to recover locked daemon pid {} at {}: {}",
+        blocked_pid,
+        blocked_config.lock_path.display(),
+        recovery_error
+    );
+    let replacement = DaemonConfig::activate_replacement_runtime(&reason)
+        .map_err(|e| format!("failed to activate replacement daemon runtime after {}", e))?;
+    if let Err(error) =
+        crate::commands::install_hooks::configure_async_mode_daemon_trace2_for_config(&replacement)
+    {
+        eprintln!(
+            "[git-ai] warning: failed to repoint git trace2 to replacement daemon runtime: {}",
+            error
+        );
+    }
+    spawn_daemon_run_detached(&replacement)?;
+    if wait_for_daemon_up(&replacement, timeout) {
+        return Ok(replacement);
+    }
+    Err(format!(
+        "timed out after {:?} waiting for replacement daemon sockets {} and {}",
+        timeout,
+        replacement.control_socket_path.display(),
+        replacement.trace_socket_path.display()
+    ))
 }
 
 fn wait_for_blocked_daemon(config: &DaemonConfig, timeout: Duration) -> BlockedDaemonWaitResult {
@@ -608,7 +651,13 @@ fn handle_restart(args: &[String]) -> Result<(), String> {
     let was_running = daemon_is_up(&config) || daemon_startup_is_blocked(&config);
     if was_running {
         if hard {
-            hard_kill_daemon(&config)?;
+            if let Err(error) = hard_kill_daemon(&config) {
+                eprintln!(
+                    "[git-ai] warning: hard restart could not kill existing daemon: {}; starting replacement runtime",
+                    error
+                );
+                return ensure_daemon_running(daemon_startup_timeout()).map(|_| ());
+            }
         } else {
             // Attempt soft shutdown; escalate to hard kill on timeout.
             let _ = send_control_request(&config.control_socket_path, &ControlRequest::Shutdown);
@@ -738,7 +787,12 @@ pub(crate) fn stop_daemon(config: &DaemonConfig, timeout: Duration) -> Result<()
 pub(crate) fn restart_daemon(config: &DaemonConfig) -> Result<(), String> {
     let was_running = daemon_is_up(config) || daemon_startup_is_blocked(config);
     if was_running {
-        stop_daemon(config, GRACEFUL_SHUTDOWN_TIMEOUT)?;
+        if let Err(error) = stop_daemon(config, GRACEFUL_SHUTDOWN_TIMEOUT) {
+            eprintln!(
+                "[git-ai] warning: failed to stop existing background service before restart: {}; starting replacement runtime",
+                error
+            );
+        }
     }
     ensure_daemon_running(Duration::from_secs(5)).map(|_| ())
 }
