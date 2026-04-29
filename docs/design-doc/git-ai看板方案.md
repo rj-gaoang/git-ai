@@ -2066,6 +2066,8 @@ notes
 
 当需要排查“git-ai 到底把这次修改判成 AI 还是人工”或“统计为什么没有上传到远程服务”时，设置：
 
+ $env:GIT_AI_DEBUG = "1" 
+
 ```powershell
 [Environment]::SetEnvironmentVariable("GIT_AI_DEBUG", "1", "User")
 ```
@@ -2385,6 +2387,8 @@ notes
 
 # 可选：排查上传时打开 debug 日志
 [Environment]::SetEnvironmentVariable("GIT_AI_DEBUG", "1", "User")
+
+$env:GIT_AI_DEBUG = "1" 临时排查
 ```
 
 **当前行为要点：**
