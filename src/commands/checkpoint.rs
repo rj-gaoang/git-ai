@@ -384,6 +384,20 @@ pub(crate) fn run_with_base_commit_override_with_policy(
         base_override_resolution_policy,
     )?;
     let Some(resolved) = resolved else {
+        crate::diagnostics::append_debug_event(
+            "checkpoint_skipped",
+            serde_json::json!({
+                "reason": "no_resolved_checkpoint_execution",
+                "repo": repo.canonical_workdir().to_string_lossy().to_string(),
+                "baseCommitOverride": base_commit_override,
+                "requestedKind": kind.to_str(),
+                "requestedDecision": if kind.is_ai() { "ai_generated" } else { "human" },
+                "author": author,
+                "isPreCommit": is_pre_commit,
+                "hasAgentRunResult": agent_run_result.is_some(),
+                "baseOverrideResolutionPolicy": format!("{:?}", base_override_resolution_policy),
+            }),
+        );
         tracing::debug!(
             "[BENCHMARK] Total checkpoint run took {:?}",
             checkpoint_start.elapsed()
@@ -928,6 +942,19 @@ fn execute_resolved_checkpoint(
 
         let append_start = Instant::now();
         working_log.append_checkpoint(&checkpoint)?;
+        append_attribution_debug_log(
+            repo,
+            &resolved.base_commit,
+            author,
+            kind,
+            is_pre_commit,
+            &checkpoint,
+            &resolved.files,
+            &entries,
+            &file_stats,
+            checkpoints.len(),
+            agent_run_result.as_ref(),
+        );
         tracing::debug!(
             "[BENCHMARK] Appending checkpoint to working log took {:?}",
             append_start.elapsed()
@@ -949,6 +976,26 @@ fn execute_resolved_checkpoint(
             let file_attrs = attrs.clone().author(&checkpoint.author);
             crate::metrics::record(values, file_attrs);
         }
+    } else {
+        crate::diagnostics::append_debug_event(
+            "checkpoint_no_entries",
+            serde_json::json!({
+                "repo": repo.canonical_workdir().to_string_lossy().to_string(),
+                "baseCommit": &resolved.base_commit,
+                "requestedKind": kind.to_str(),
+                "requestedDecision": if kind.is_ai() { "ai_generated" } else { "human" },
+                "author": author,
+                "isPreCommit": is_pre_commit,
+                "candidateFileCount": resolved.files.len(),
+                "candidateFilesSample": sample_strings(resolved.files.iter().map(String::as_str), 50),
+                "priorCheckpointCount": checkpoints.len(),
+                "reason": "get_checkpoint_entries_returned_no_entries",
+                "diagnosticHints": [
+                    "candidate_files_may_have_been_unchanged_ignored_binary_or_already_checkpointed",
+                    "check_previous_checkpoint_attribution_decision_events_for_the_same_base_commit"
+                ],
+            }),
+        );
     }
 
     let agent_tool = if kind.is_ai()
@@ -2190,6 +2237,131 @@ fn compute_line_stats(
     }
 
     Ok(stats)
+}
+
+fn append_attribution_debug_log(
+    repo: &Repository,
+    base_commit: &str,
+    author: &str,
+    kind: CheckpointKind,
+    is_pre_commit: bool,
+    checkpoint: &Checkpoint,
+    candidate_files: &[String],
+    entries: &[WorkingLogEntry],
+    file_stats: &[FileLineStats],
+    prior_checkpoint_count: usize,
+    agent_run_result: Option<&AgentRunResult>,
+) {
+    let explicit_capture =
+        explicit_capture_target_paths(kind, agent_run_result).map(|(role, paths)| {
+            serde_json::json!({
+                "role": format!("{:?}", role),
+                "pathCount": paths.len(),
+                "samplePaths": sample_strings(paths.iter().map(String::as_str), 25),
+            })
+        });
+
+    crate::diagnostics::append_debug_event(
+        "checkpoint_attribution_decision",
+        serde_json::json!({
+            "repo": repo.canonical_workdir().to_string_lossy().to_string(),
+            "baseCommit": base_commit,
+            "checkpointTimestamp": checkpoint.timestamp,
+            "kind": checkpoint.kind.to_str(),
+            "decision": if kind.is_ai() { "ai_generated" } else { "human" },
+            "isAi": kind.is_ai(),
+            "decisionRule": "CheckpointKind::is_ai is true only for ai_agent and ai_tab",
+            "author": author,
+            "isPreCommit": is_pre_commit,
+            "candidateFileCount": candidate_files.len(),
+            "candidateFilesSample": sample_strings(candidate_files.iter().map(String::as_str), 50),
+            "checkpointFileCount": entries.len(),
+            "checkpointFilesSample": sample_strings(entries.iter().map(|entry| entry.file.as_str()), 50),
+            "filesTruncated": entries.len() > 50,
+            "priorCheckpointCount": prior_checkpoint_count,
+            "explicitCapture": explicit_capture,
+            "diagnosticHints": checkpoint_diagnostic_hints(kind, agent_run_result, candidate_files.len(), entries.len()),
+            "lineStats": {
+                "additions": checkpoint.line_stats.additions,
+                "deletions": checkpoint.line_stats.deletions,
+                "additionsSloc": checkpoint.line_stats.additions_sloc,
+                "deletionsSloc": checkpoint.line_stats.deletions_sloc,
+            },
+            "files": checkpoint_file_debug_entries(entries, file_stats),
+            "agent": agent_run_result.map(|result| serde_json::json!({
+                "tool": result.agent_id.tool.as_str(),
+                "model": result.agent_id.model.as_str(),
+                "agentIdHash": generate_short_hash(&result.agent_id.id, &result.agent_id.tool),
+                "checkpointKind": result.checkpoint_kind.to_str(),
+                "hasTranscript": result.transcript.is_some(),
+                "hasDirtyFiles": result.dirty_files.as_ref().is_some_and(|files| !files.is_empty()),
+                "dirtyFileCount": result.dirty_files.as_ref().map(|files| files.len()).unwrap_or(0),
+                "editedFilepathCount": result.edited_filepaths.as_ref().map(|paths| paths.len()).unwrap_or(0),
+                "willEditFilepathCount": result.will_edit_filepaths.as_ref().map(|paths| paths.len()).unwrap_or(0),
+                "metadataKeys": result.agent_metadata.as_ref().map(|metadata| {
+                    let mut keys = metadata.keys().cloned().collect::<Vec<_>>();
+                    keys.sort();
+                    keys
+                }).unwrap_or_default(),
+            })),
+        }),
+    );
+}
+
+fn checkpoint_diagnostic_hints(
+    kind: CheckpointKind,
+    agent_run_result: Option<&AgentRunResult>,
+    candidate_file_count: usize,
+    checkpoint_file_count: usize,
+) -> Vec<&'static str> {
+    let mut hints = Vec::new();
+    if kind == CheckpointKind::Human && agent_run_result.is_none() {
+        hints.push("human_fallback_no_agent_context");
+    }
+    if kind == CheckpointKind::KnownHuman {
+        hints.push("known_human_save_checkpoint");
+        hints.push("check_whether_ai_save_suppression_missed_this_path");
+    }
+    if kind.is_ai() && agent_run_result.is_none() {
+        hints.push("ai_kind_without_agent_context");
+    }
+    if let Some(result) = agent_run_result
+        && result.checkpoint_kind != kind
+    {
+        hints.push("agent_result_kind_differs_from_written_checkpoint_kind");
+    }
+    if checkpoint_file_count < candidate_file_count {
+        hints.push("some_candidate_files_not_written_to_this_checkpoint");
+    }
+    hints
+}
+
+fn checkpoint_file_debug_entries(
+    entries: &[WorkingLogEntry],
+    file_stats: &[FileLineStats],
+) -> Vec<serde_json::Value> {
+    entries
+        .iter()
+        .zip(file_stats.iter())
+        .take(50)
+        .map(|(entry, file_stat)| {
+            serde_json::json!({
+                "path": entry.file,
+                "attributionEntryCount": entry.attributions.len(),
+                "lineAttributionCount": entry.line_attributions.len(),
+                "lineStats": {
+                    "additions": file_stat.additions,
+                    "deletions": file_stat.deletions,
+                    "additionsSloc": file_stat.additions_sloc,
+                    "deletionsSloc": file_stat.deletions_sloc,
+                }
+            })
+        })
+        .collect()
+}
+
+fn sample_strings<'a>(values: impl Iterator<Item = &'a str>, limit: usize) -> Vec<String> {
+    values.take(limit).map(ToString::to_string).collect()
 }
 
 fn is_text_file(working_log: &PersistedWorkingLog, path: &str) -> bool {

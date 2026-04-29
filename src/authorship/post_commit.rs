@@ -229,6 +229,19 @@ pub fn post_commit_with_final_state(
         .map_err(|_| GitAiError::Generic("Failed to serialize authorship log".to_string()))?;
 
     notes_add(repo, &commit_sha, &authorship_json)?;
+    crate::diagnostics::append_debug_event(
+        "post_commit_authorship_note_written",
+        serde_json::json!({
+            "repo": repo.canonical_workdir().to_string_lossy().to_string(),
+            "commitSha": commit_sha,
+            "parentSha": parent_sha,
+            "humanAuthor": human_author,
+            "effectivePromptStorage": effective_storage.as_str(),
+            "authorshipJsonBytes": authorship_json.len(),
+            "promptSummary": prompt_debug_summary(&authorship_log),
+            "attestationFileCount": authorship_log.attestations.len(),
+        }),
+    );
 
     // Compute stats once (needed for both metrics and terminal output), unless preflight
     // estimate predicts this would be too expensive for the commit hook path.
@@ -254,6 +267,15 @@ pub fn post_commit_with_final_state(
 
     if skip_reason.is_none() {
         let computed = stats_for_commit_stats(repo, &commit_sha, &ignore_patterns)?;
+        crate::diagnostics::append_debug_event(
+            "post_commit_stats_computed",
+            serde_json::json!({
+                "repo": repo.canonical_workdir().to_string_lossy().to_string(),
+                "commitSha": commit_sha,
+                "parentSha": parent_sha,
+                "statsSummary": commit_stats_debug_summary(&computed),
+            }),
+        );
         // Record metrics only when we have full stats.
         record_commit_metrics(
             repo,
@@ -269,6 +291,7 @@ pub fn post_commit_with_final_state(
         match skip_reason.as_ref() {
             Some(StatsSkipReason::MergeCommit) => {
                 tracing::debug!("Skipping post-commit stats for merge commit {}", commit_sha);
+                log_post_commit_stats_skipped(repo, &commit_sha, &parent_sha, "merge_commit", None);
             }
             Some(StatsSkipReason::Expensive(estimate)) => {
                 tracing::debug!(
@@ -278,6 +301,13 @@ pub fn post_commit_with_final_state(
                     estimate.added_lines,
                     estimate.deleted_lines,
                     estimate.hunk_ranges
+                );
+                log_post_commit_stats_skipped(
+                    repo,
+                    &commit_sha,
+                    &parent_sha,
+                    "expensive_commit",
+                    Some(estimate),
                 );
             }
             None => {}
@@ -345,6 +375,80 @@ pub fn post_commit_with_final_state(
 enum StatsSkipReason {
     MergeCommit,
     Expensive(StatsCostEstimate),
+}
+
+fn log_post_commit_stats_skipped(
+    repo: &Repository,
+    commit_sha: &str,
+    parent_sha: &str,
+    reason: &str,
+    estimate: Option<&StatsCostEstimate>,
+) {
+    crate::diagnostics::append_debug_event(
+        "post_commit_stats_skipped",
+        serde_json::json!({
+            "repo": repo.canonical_workdir().to_string_lossy().to_string(),
+            "commitSha": commit_sha,
+            "parentSha": parent_sha,
+            "reason": reason,
+            "effect": "auto_upload_will_skip_because_stats_are_unavailable",
+            "estimate": estimate.map(|estimate| serde_json::json!({
+                "filesWithAdditions": estimate.files_with_additions,
+                "addedLines": estimate.added_lines,
+                "deletedLines": estimate.deleted_lines,
+                "hunkRanges": estimate.hunk_ranges,
+                "thresholds": {
+                    "maxFilesWithAdditions": STATS_SKIP_MAX_FILES_WITH_ADDITIONS,
+                    "maxAddedLines": STATS_SKIP_MAX_ADDED_LINES,
+                    "maxDeletedLines": STATS_SKIP_MAX_DELETED_LINES,
+                    "maxHunkRanges": STATS_SKIP_MAX_HUNKS,
+                }
+            })),
+        }),
+    );
+}
+
+fn prompt_debug_summary(authorship_log: &AuthorshipLog) -> serde_json::Value {
+    let mut total_messages = 0usize;
+    let mut prompts_with_messages = 0usize;
+    let mut prompts_with_messages_url = 0usize;
+    let mut tools: HashMap<String, usize> = HashMap::new();
+
+    for prompt in authorship_log.metadata.prompts.values() {
+        total_messages += prompt.messages.len();
+        if !prompt.messages.is_empty() {
+            prompts_with_messages += 1;
+        }
+        if prompt
+            .messages_url
+            .as_ref()
+            .is_some_and(|url| !url.trim().is_empty())
+        {
+            prompts_with_messages_url += 1;
+        }
+        *tools.entry(prompt.agent_id.tool.clone()).or_insert(0) += 1;
+    }
+
+    serde_json::json!({
+        "promptCount": authorship_log.metadata.prompts.len(),
+        "totalMessages": total_messages,
+        "promptsWithMessages": prompts_with_messages,
+        "promptsWithMessagesUrl": prompts_with_messages_url,
+        "tools": tools,
+    })
+}
+
+fn commit_stats_debug_summary(stats: &crate::authorship::stats::CommitStats) -> serde_json::Value {
+    serde_json::json!({
+        "humanAdditions": stats.human_additions,
+        "unknownAdditions": stats.unknown_additions,
+        "aiAdditions": stats.ai_additions,
+        "aiAccepted": stats.ai_accepted,
+        "mixedAdditions": stats.mixed_additions,
+        "gitDiffAddedLines": stats.git_diff_added_lines,
+        "gitDiffDeletedLines": stats.git_diff_deleted_lines,
+        "toolModelBreakdownCount": stats.tool_model_breakdown.len(),
+    })
 }
 
 fn should_skip_expensive_post_commit_stats(estimate: &StatsCostEstimate) -> bool {

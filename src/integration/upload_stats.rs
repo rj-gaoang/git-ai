@@ -17,8 +17,9 @@
 
 use crate::authorship::authorship_log::{LineRange, PromptRecord};
 use crate::authorship::authorship_log_serialization::{AUTHORSHIP_LOG_VERSION, AuthorshipLog};
-use crate::authorship::stats::CommitStats;
+use crate::authorship::stats::{CommitStats, stats_for_commit_stats};
 use crate::authorship::transcript::Message;
+use crate::git::refs::get_authorship;
 use crate::git::repository::Repository;
 use crate::http;
 use crate::integration::ide_mcp::resolve_x_user_id;
@@ -30,11 +31,45 @@ const DEFAULT_UPLOAD_URL: &str =
     "https://service-gw.ruijie.com.cn/api/ai-cr-manage-service/api/public/upload/ai-stats";
 const UPLOAD_TIMEOUT_SECS: u64 = 10;
 
+#[derive(Debug, Clone)]
+pub enum ManualUploadOutcome {
+    DryRun {
+        commit_sha: String,
+        url: String,
+        url_source: &'static str,
+        payload_summary: Value,
+    },
+    Uploaded {
+        commit_sha: String,
+        url: String,
+        status_code: u16,
+    },
+    Skipped {
+        commit_sha: String,
+        reason: &'static str,
+    },
+}
+
+impl ManualUploadOutcome {
+    pub fn commit_sha(&self) -> &str {
+        match self {
+            Self::DryRun { commit_sha, .. }
+            | Self::Uploaded { commit_sha, .. }
+            | Self::Skipped { commit_sha, .. } => commit_sha,
+        }
+    }
+}
+
 /// Resolve the upload endpoint URL from the environment, falling back to the
 /// team-managed default when no override is provided.
+#[cfg(test)]
 fn resolve_upload_url() -> String {
+    resolve_upload_url_with_source().0
+}
+
+fn resolve_upload_url_with_source() -> (String, &'static str) {
     if let Some(url) = env_non_empty("GIT_AI_REPORT_REMOTE_URL") {
-        return url;
+        return (url, "GIT_AI_REPORT_REMOTE_URL");
     }
 
     let endpoint = env_non_empty("GIT_AI_REPORT_REMOTE_ENDPOINT");
@@ -42,10 +77,13 @@ fn resolve_upload_url() -> String {
     if let (Some(endpoint), Some(path)) = (endpoint.as_ref(), path.as_ref()) {
         let endpoint = endpoint.trim_end_matches('/');
         let path = path.trim_start_matches('/');
-        return format!("{}/{}", endpoint, path);
+        return (
+            format!("{}/{}", endpoint, path),
+            "GIT_AI_REPORT_REMOTE_ENDPOINT+GIT_AI_REPORT_REMOTE_PATH",
+        );
     }
 
-    DEFAULT_UPLOAD_URL.to_string()
+    (DEFAULT_UPLOAD_URL.to_string(), "built_in_default")
 }
 
 fn env_non_empty(name: &str) -> Option<String> {
@@ -71,6 +109,18 @@ pub fn maybe_upload_after_commit(
     let feature_flags = config.feature_flags();
 
     if !feature_flags.auto_upload_ai_stats {
+        crate::diagnostics::append_debug_event(
+            "upload_stats_skipped",
+            json!({
+                "reason": "feature_flag_disabled",
+                "source": "auto",
+                "commitSha": commit_sha,
+                "commitShort": short_sha(commit_sha),
+                "repo": repo.canonical_workdir().to_string_lossy().to_string(),
+                "envAutoUploadAiStats": std::env::var("GIT_AI_AUTO_UPLOAD_AI_STATS").ok(),
+                "asyncMode": feature_flags.async_mode,
+            }),
+        );
         log_debug(&format!(
             "feature flag auto_upload_ai_stats disabled; skipping upload for {}",
             short_sha(commit_sha)
@@ -82,6 +132,17 @@ pub fn maybe_upload_after_commit(
     // Without stats we have nothing meaningful to upload (the PowerShell
     // script effectively did the same thing by calling `git-ai stats`).
     let Some(stats) = stats else {
+        crate::diagnostics::append_debug_event(
+            "upload_stats_skipped",
+            json!({
+                "reason": "stats_unavailable",
+                "source": "auto",
+                "commitSha": commit_sha,
+                "commitShort": short_sha(commit_sha),
+                "repo": repo.canonical_workdir().to_string_lossy().to_string(),
+                "hint": "post_commit_stats_skipped event should explain whether this was a merge commit or an expensive commit",
+            }),
+        );
         log_debug("stats unavailable for this commit; skipping upload");
         return;
     };
@@ -89,6 +150,17 @@ pub fn maybe_upload_after_commit(
     let payload = match build_payload(repo, commit_sha, authorship_log, stats) {
         Ok(payload) => payload,
         Err(err) => {
+            crate::diagnostics::append_debug_event(
+                "upload_stats_skipped",
+                json!({
+                    "reason": "payload_build_failed",
+                    "source": "auto",
+                    "commitSha": commit_sha,
+                    "commitShort": short_sha(commit_sha),
+                    "repo": repo.canonical_workdir().to_string_lossy().to_string(),
+                    "error": err,
+                }),
+            );
             log_debug(&format!(
                 "payload build failed for {}: {}",
                 short_sha(commit_sha),
@@ -98,19 +170,203 @@ pub fn maybe_upload_after_commit(
         }
     };
 
-    let url = resolve_upload_url();
+    let (url, url_source) = resolve_upload_url_with_source();
     let api_key = env_non_empty("GIT_AI_REPORT_REMOTE_API_KEY");
-    let user_id = env_non_empty("GIT_AI_REPORT_REMOTE_USER_ID")
+    let explicit_user_id = env_non_empty("GIT_AI_REPORT_REMOTE_USER_ID");
+    let user_id = explicit_user_id
+        .clone()
         .or_else(|| resolve_x_user_id(Some(repo.canonical_workdir())));
     let commit_short = short_sha(commit_sha).to_string();
+    crate::diagnostics::append_debug_event(
+        "upload_stats_ready",
+        json!({
+            "commitSha": commit_sha,
+            "commitShort": commit_short,
+            "source": "auto",
+            "repo": repo.canonical_workdir().to_string_lossy().to_string(),
+            "mode": if feature_flags.async_mode { "background" } else { "inline" },
+            "url": url,
+            "urlSource": url_source,
+            "hasApiKey": api_key.is_some(),
+            "hasUserId": user_id.is_some(),
+            "userIdSource": if explicit_user_id.is_some() { "GIT_AI_REPORT_REMOTE_USER_ID" } else if user_id.is_some() { "ide_mcp_config" } else { "missing" },
+            "payloadSummary": upload_payload_summary(&payload),
+        }),
+    );
     dispatch_upload(
         feature_flags.async_mode,
         url,
         payload,
         api_key,
         user_id,
+        commit_sha.to_string(),
         commit_short,
+        "auto".to_string(),
     );
+}
+
+pub fn upload_local_commit_stats(
+    repo: &Repository,
+    commit_sha: &str,
+    ignore_patterns: &[String],
+    dry_run: bool,
+    source: &str,
+) -> Result<ManualUploadOutcome, String> {
+    let commit_short = short_sha(commit_sha).to_string();
+
+    let Some(authorship_log) = get_authorship(repo, commit_sha) else {
+        crate::diagnostics::append_debug_event(
+            "upload_stats_skipped",
+            json!({
+                "reason": "manual_no_authorship_note",
+                "source": source,
+                "commitSha": commit_sha,
+                "commitShort": commit_short,
+                "repo": repo.canonical_workdir().to_string_lossy().to_string(),
+            }),
+        );
+        return Ok(ManualUploadOutcome::Skipped {
+            commit_sha: commit_sha.to_string(),
+            reason: "no_authorship_note",
+        });
+    };
+
+    let stats = stats_for_commit_stats(repo, commit_sha, ignore_patterns).map_err(|err| {
+        let error = err.to_string();
+        crate::diagnostics::append_debug_event(
+            "upload_stats_skipped",
+            json!({
+                "reason": "manual_stats_build_failed",
+                "source": source,
+                "commitSha": commit_sha,
+                "commitShort": commit_short,
+                "repo": repo.canonical_workdir().to_string_lossy().to_string(),
+                "error": error,
+            }),
+        );
+        error
+    })?;
+
+    let payload = build_payload_with_source(repo, commit_sha, &authorship_log, &stats, source)
+        .map_err(|error| {
+            crate::diagnostics::append_debug_event(
+                "upload_stats_skipped",
+                json!({
+                    "reason": "payload_build_failed",
+                    "source": source,
+                    "commitSha": commit_sha,
+                    "commitShort": commit_short,
+                    "repo": repo.canonical_workdir().to_string_lossy().to_string(),
+                    "error": error,
+                }),
+            );
+            error
+        })?;
+
+    let (url, url_source) = resolve_upload_url_with_source();
+    let api_key = env_non_empty("GIT_AI_REPORT_REMOTE_API_KEY");
+    let explicit_user_id = env_non_empty("GIT_AI_REPORT_REMOTE_USER_ID");
+    let user_id = explicit_user_id
+        .clone()
+        .or_else(|| resolve_x_user_id(Some(repo.canonical_workdir())));
+    let payload_summary = upload_payload_summary(&payload);
+
+    crate::diagnostics::append_debug_event(
+        "upload_stats_ready",
+        json!({
+            "commitSha": commit_sha,
+            "commitShort": commit_short,
+            "source": source,
+            "repo": repo.canonical_workdir().to_string_lossy().to_string(),
+            "mode": if dry_run { "manual_dry_run" } else { "manual" },
+            "url": url,
+            "urlSource": url_source,
+            "hasApiKey": api_key.is_some(),
+            "hasUserId": user_id.is_some(),
+            "userIdSource": if explicit_user_id.is_some() { "GIT_AI_REPORT_REMOTE_USER_ID" } else if user_id.is_some() { "ide_mcp_config" } else { "missing" },
+            "payloadSummary": payload_summary,
+        }),
+    );
+
+    if dry_run {
+        log_info(&format!(
+            "prepared dry-run upload for {} source={} url={}",
+            commit_short, source, url
+        ));
+        return Ok(ManualUploadOutcome::DryRun {
+            commit_sha: commit_sha.to_string(),
+            url,
+            url_source,
+            payload_summary: upload_payload_summary(&payload),
+        });
+    }
+
+    log_info(&format!(
+        "starting manual upload for {} source={} url={} has_api_key={} has_user_id={}",
+        commit_short,
+        source,
+        url,
+        api_key.is_some(),
+        user_id.is_some()
+    ));
+    crate::diagnostics::append_debug_event(
+        "upload_stats_started",
+        json!({
+            "commitSha": commit_sha,
+            "commitShort": commit_short,
+            "source": source,
+            "mode": "manual",
+            "url": url,
+            "hasApiKey": api_key.is_some(),
+            "hasUserId": user_id.is_some(),
+            "payloadSummary": upload_payload_summary(&payload),
+        }),
+    );
+
+    match perform_upload(&url, &payload, api_key.as_deref(), user_id.as_deref()) {
+        Ok(status_code) => {
+            crate::diagnostics::append_debug_event(
+                "upload_stats_succeeded",
+                json!({
+                    "commitSha": commit_sha,
+                    "commitShort": commit_short,
+                    "source": source,
+                    "mode": "manual",
+                    "url": url,
+                    "statusCode": status_code,
+                }),
+            );
+            log_info(&format!(
+                "uploaded manual stats for {} source={} status={}",
+                commit_short, source, status_code
+            ));
+            Ok(ManualUploadOutcome::Uploaded {
+                commit_sha: commit_sha.to_string(),
+                url,
+                status_code,
+            })
+        }
+        Err(error) => {
+            crate::diagnostics::append_debug_event(
+                "upload_stats_failed",
+                json!({
+                    "commitSha": commit_sha,
+                    "commitShort": commit_short,
+                    "source": source,
+                    "mode": "manual",
+                    "url": url,
+                    "error": &error,
+                    "hasApiKey": api_key.is_some(),
+                    "hasUserId": user_id.is_some(),
+                }),
+            );
+            log_warn(&format!(
+                "manual upload failed for {} source={}: {}",
+                commit_short, source, error
+            ));
+            Err(error)
+        }
+    }
 }
 
 fn dispatch_upload(
@@ -119,7 +375,9 @@ fn dispatch_upload(
     payload: Value,
     api_key: Option<String>,
     user_id: Option<String>,
+    commit_sha: String,
     commit_short: String,
+    source: String,
 ) {
     let upload_mode = if run_in_background {
         "background"
@@ -136,10 +394,50 @@ fn dispatch_upload(
             api_key.is_some(),
             user_id.is_some()
         ));
-        if let Err(err) = perform_upload(&url, &payload, api_key.as_deref(), user_id.as_deref()) {
-            log_warn(&format!("upload failed for {}: {}", commit_short, err));
-        } else {
-            log_info(&format!("uploaded stats for {}", commit_short));
+        crate::diagnostics::append_debug_event(
+            "upload_stats_started",
+            json!({
+                "commitSha": commit_sha,
+                "commitShort": commit_short,
+                "source": source,
+                "mode": upload_mode,
+                "url": url,
+                "hasApiKey": api_key.is_some(),
+                "hasUserId": user_id.is_some(),
+                "payloadSummary": upload_payload_summary(&payload),
+            }),
+        );
+        match perform_upload(&url, &payload, api_key.as_deref(), user_id.as_deref()) {
+            Err(err) => {
+                crate::diagnostics::append_debug_event(
+                    "upload_stats_failed",
+                    json!({
+                        "commitSha": commit_sha,
+                        "commitShort": commit_short,
+                        "source": source,
+                        "mode": upload_mode,
+                        "url": url,
+                        "error": err,
+                        "hasApiKey": api_key.is_some(),
+                        "hasUserId": user_id.is_some(),
+                    }),
+                );
+                log_warn(&format!("upload failed for {}: {}", commit_short, err));
+            }
+            Ok(status_code) => {
+                crate::diagnostics::append_debug_event(
+                    "upload_stats_succeeded",
+                    json!({
+                        "commitSha": commit_sha,
+                        "commitShort": commit_short,
+                        "source": source,
+                        "mode": upload_mode,
+                        "url": url,
+                        "statusCode": status_code,
+                    }),
+                );
+                log_info(&format!("uploaded stats for {}", commit_short));
+            }
         }
     });
 }
@@ -174,9 +472,54 @@ fn log_warn(message: &str) {
 }
 
 fn emit_debug_stderr(message: &str) {
-    if cfg!(debug_assertions) || std::env::var("GIT_AI_DEBUG").is_ok() {
+    if cfg!(debug_assertions) || crate::diagnostics::debug_enabled() {
         eprintln!("[git-ai] upload-ai-stats: {}", message);
     }
+}
+
+fn upload_payload_summary(payload: &Value) -> Value {
+    let commits = payload
+        .get("commits")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let first_commit = commits.first();
+    let stats = first_commit.and_then(|commit| commit.get("stats"));
+    let prompts = first_commit
+        .and_then(|commit| commit.get("prompts"))
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let files = stats
+        .and_then(|stats| stats.get("files"))
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let prompt_text_count = prompts
+        .iter()
+        .filter(|prompt| {
+            prompt
+                .get("promptText")
+                .and_then(Value::as_str)
+                .is_some_and(|text| !text.trim().is_empty())
+        })
+        .count();
+
+    json!({
+        "commitCount": commits.len(),
+        "firstCommitSha": first_commit.and_then(|commit| commit.get("commitSha")).and_then(Value::as_str),
+        "hasAuthorshipNote": first_commit.and_then(|commit| commit.get("hasAuthorshipNote")).and_then(Value::as_bool),
+        "fileCount": files.len(),
+        "promptCount": prompts.len(),
+        "promptsWithText": prompt_text_count,
+        "stats": stats.map(|stats| json!({
+            "humanAdditions": stats.get("humanAdditions").and_then(Value::as_u64).unwrap_or(0),
+            "unknownAdditions": stats.get("unknownAdditions").and_then(Value::as_u64).unwrap_or(0),
+            "aiAdditions": stats.get("aiAdditions").and_then(Value::as_u64).unwrap_or(0),
+            "gitDiffAddedLines": stats.get("gitDiffAddedLines").and_then(Value::as_u64).unwrap_or(0),
+            "gitDiffDeletedLines": stats.get("gitDiffDeletedLines").and_then(Value::as_u64).unwrap_or(0),
+        })),
+    })
 }
 
 fn perform_upload(
@@ -184,7 +527,7 @@ fn perform_upload(
     payload: &Value,
     api_key: Option<&str>,
     user_id: Option<&str>,
-) -> Result<(), String> {
+) -> Result<u16, String> {
     log_debug(&format!(
         "perform_upload url={} has_api_key={} has_user_id={}",
         url,
@@ -208,7 +551,7 @@ fn perform_upload(
         response.status_code, url
     ));
     if (200..300).contains(&response.status_code) {
-        Ok(())
+        Ok(response.status_code)
     } else {
         let body_excerpt = response
             .as_str()
@@ -225,6 +568,16 @@ fn build_payload(
     commit_sha: &str,
     authorship_log: &AuthorshipLog,
     stats: &CommitStats,
+) -> Result<Value, String> {
+    build_payload_with_source(repo, commit_sha, authorship_log, stats, "auto")
+}
+
+fn build_payload_with_source(
+    repo: &Repository,
+    commit_sha: &str,
+    authorship_log: &AuthorshipLog,
+    stats: &CommitStats,
+    source: &str,
 ) -> Result<Value, String> {
     let workdir = repo.canonical_workdir().to_path_buf();
     let repo_url = git_repo_url(&workdir);
@@ -254,7 +607,7 @@ fn build_payload(
         "repoUrl": repo_url.unwrap_or_default(),
         "projectName": project_name,
         "branch": branch.unwrap_or_default(),
-        "source": "auto",
+        "source": source,
         "reviewDocumentId": Value::Null,
         "authorshipSchemaVersion": AUTHORSHIP_LOG_VERSION,
         "commits": [Value::Object(commit_entry)],
@@ -673,8 +1026,10 @@ mod tests {
     use crate::authorship::working_log::AgentId;
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::{Arc, mpsc};
+    use std::sync::{Arc, Mutex, MutexGuard, mpsc};
     use std::time::Duration;
+
+    static ENV_GUARD_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn split_tool_model_with_separator() {
@@ -919,9 +1274,10 @@ mod tests {
         assert!(ran.load(Ordering::SeqCst));
     }
 
-    /// Restore the upload-related env vars after each test to prevent
-    /// cross-test contamination when running serially.
+    /// Serialize and restore upload-related env vars so URL resolution tests do
+    /// not race under the default parallel test runner.
     struct EnvGuard {
+        _lock: MutexGuard<'static, ()>,
         url: Option<String>,
         endpoint: Option<String>,
         path: Option<String>,
@@ -929,7 +1285,9 @@ mod tests {
 
     impl EnvGuard {
         fn new() -> Self {
+            let lock = ENV_GUARD_LOCK.lock().expect("env guard lock poisoned");
             Self {
+                _lock: lock,
                 url: std::env::var("GIT_AI_REPORT_REMOTE_URL").ok(),
                 endpoint: std::env::var("GIT_AI_REPORT_REMOTE_ENDPOINT").ok(),
                 path: std::env::var("GIT_AI_REPORT_REMOTE_PATH").ok(),

@@ -17,6 +17,7 @@ use std::sync::RwLock;
 
 /// Default API base URL for comparison
 pub const DEFAULT_API_BASE_URL: &str = "https://usegitai.com";
+const DEFAULT_PROMPT_STORAGE: &str = "notes";
 
 /// Prompt storage mode enum for type-safe handling
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -357,7 +358,7 @@ impl Config {
             return self
                 .prompt_storage
                 .parse::<PromptStorageMode>()
-                .unwrap_or(PromptStorageMode::Default);
+                .unwrap_or(PromptStorageMode::Notes);
         }
 
         // Step 3: Check if repo matches include list
@@ -386,7 +387,7 @@ impl Config {
             // Step 3a: Repo is in include list → use primary prompt_storage
             self.prompt_storage
                 .parse::<PromptStorageMode>()
-                .unwrap_or(PromptStorageMode::Default)
+                .unwrap_or(PromptStorageMode::Notes)
         } else {
             // Step 4: Repo not in include list → use fallback
             self.default_prompt_storage
@@ -602,22 +603,10 @@ fn build_config() -> Config {
         .or_else(|| env::var("GIT_AI_API_BASE_URL").ok())
         .unwrap_or_else(|| DEFAULT_API_BASE_URL.to_string());
 
-    // Get prompt_storage setting (defaults to "default")
+    // Get prompt_storage setting (defaults to "notes")
     // Valid values: "default", "notes", "local"
-    let prompt_storage = file_cfg
-        .as_ref()
-        .and_then(|c| c.prompt_storage.clone())
-        .unwrap_or_else(|| "default".to_string());
-    let prompt_storage = match prompt_storage.as_str() {
-        "default" | "notes" | "local" => prompt_storage,
-        other => {
-            eprintln!(
-                "Warning: Invalid prompt_storage value '{}', using 'default'",
-                other
-            );
-            "default".to_string()
-        }
-    };
+    let prompt_storage =
+        normalize_prompt_storage(file_cfg.as_ref().and_then(|c| c.prompt_storage.clone()));
 
     // Get default_prompt_storage setting (fallback for repos not in include list)
     // Valid values: "default", "notes", "local", or None (defaults to "local")
@@ -723,6 +712,20 @@ fn build_config() -> Config {
         quiet,
         custom_attributes,
         git_ai_hooks,
+    }
+}
+
+fn normalize_prompt_storage(prompt_storage: Option<String>) -> String {
+    let prompt_storage = prompt_storage.unwrap_or_else(|| DEFAULT_PROMPT_STORAGE.to_string());
+    match prompt_storage.as_str() {
+        "default" | "notes" | "local" => prompt_storage,
+        other => {
+            eprintln!(
+                "Warning: Invalid prompt_storage value '{}', using '{}'",
+                other, DEFAULT_PROMPT_STORAGE
+            );
+            DEFAULT_PROMPT_STORAGE.to_string()
+        }
     }
 }
 
@@ -1416,6 +1419,21 @@ mod tests {
             config.effective_prompt_storage(&None),
             PromptStorageMode::Default
         );
+    }
+
+    #[test]
+    fn test_prompt_storage_normalization_defaults_to_notes() {
+        assert_eq!(normalize_prompt_storage(None), "notes");
+        assert_eq!(normalize_prompt_storage(Some("".to_string())), "notes");
+        assert_eq!(
+            normalize_prompt_storage(Some("invalid".to_string())),
+            "notes"
+        );
+        assert_eq!(
+            normalize_prompt_storage(Some("default".to_string())),
+            "default"
+        );
+        assert_eq!(normalize_prompt_storage(Some("local".to_string())), "local");
     }
 
     #[test]

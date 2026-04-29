@@ -5,6 +5,7 @@ pub mod ci;
 pub mod commands;
 pub mod config;
 pub mod daemon;
+pub(crate) mod diagnostics;
 pub mod error;
 pub mod feature_flags;
 pub mod git;

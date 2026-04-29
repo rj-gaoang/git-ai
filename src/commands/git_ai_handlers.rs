@@ -121,6 +121,9 @@ pub fn handle_git_ai(args: &[String]) {
             }
             handle_stats(&args[1..]);
         }
+        "upload-stats" | "upload-ai-stats" => {
+            handle_upload_stats(&args[1..]);
+        }
         "status" => {
             commands::status::handle_status(&args[1..]);
         }
@@ -285,6 +288,12 @@ fn print_help() {
     );
     eprintln!("  stats [commit]     Show AI authorship statistics for a commit");
     eprintln!("    --json                 Output in JSON format");
+    eprintln!("  upload-stats [commit...]  Manually upload local AI stats for one or more commits");
+    eprintln!("    --dry-run             Build the upload payload without sending it");
+    eprintln!("    --source <name>       Source label written into the payload (default: manual)");
+    eprintln!(
+        "    --ignore <pattern>    Ignore a file pattern when recomputing stats (repeatable)"
+    );
     eprintln!("  status             Show uncommitted AI authorship status (debug)");
     eprintln!("    --json                 Output in JSON format");
     eprintln!("  show <rev|range>   Display authorship logs for a revision or range");
@@ -2090,6 +2099,188 @@ fn handle_stats(args: &[String]) {
     }
 }
 
+#[derive(Debug, Clone)]
+struct UploadStatsArgs {
+    commit_revs: Vec<String>,
+    dry_run: bool,
+    source: String,
+    ignore_patterns: Vec<String>,
+}
+
+fn handle_upload_stats(args: &[String]) {
+    let repo = match find_repository(&Vec::<String>::new()) {
+        Ok(repo) => repo,
+        Err(e) => {
+            eprintln!("Failed to find repository: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    let parsed = match parse_upload_stats_args(args) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            eprintln!("upload-stats: {}", error);
+            std::process::exit(1);
+        }
+    };
+
+    let effective_patterns = effective_ignore_patterns(&repo, &parsed.ignore_patterns, &[]);
+
+    let mut uploaded_count = 0usize;
+    let mut dry_run_count = 0usize;
+    let mut skipped_count = 0usize;
+    let mut failed_count = 0usize;
+
+    for commit_rev in &parsed.commit_revs {
+        let resolved_commit = match repo.revparse_single(commit_rev) {
+            Ok(commit_obj) => commit_obj.id().to_string(),
+            Err(crate::error::GitAiError::GitCliError { .. }) => {
+                failed_count += 1;
+                eprintln!("[git-ai] upload-stats: unknown commit {}", commit_rev);
+                continue;
+            }
+            Err(error) => {
+                failed_count += 1;
+                eprintln!(
+                    "[git-ai] upload-stats: failed to resolve commit {}: {}",
+                    commit_rev, error
+                );
+                continue;
+            }
+        };
+
+        match crate::integration::upload_stats::upload_local_commit_stats(
+            &repo,
+            &resolved_commit,
+            &effective_patterns,
+            parsed.dry_run,
+            &parsed.source,
+        ) {
+            Ok(crate::integration::upload_stats::ManualUploadOutcome::DryRun {
+                commit_sha,
+                url,
+                url_source,
+                payload_summary,
+            }) => {
+                dry_run_count += 1;
+                println!(
+                    "[git-ai] upload-stats: dry-run {} source={} url={} urlSource={} summary={}",
+                    short_commit_sha(&commit_sha),
+                    parsed.source,
+                    url,
+                    url_source,
+                    payload_summary
+                );
+            }
+            Ok(crate::integration::upload_stats::ManualUploadOutcome::Uploaded {
+                commit_sha,
+                url,
+                status_code,
+            }) => {
+                uploaded_count += 1;
+                println!(
+                    "[git-ai] upload-stats: uploaded {} source={} status={} url={}",
+                    short_commit_sha(&commit_sha),
+                    parsed.source,
+                    status_code,
+                    url
+                );
+            }
+            Ok(crate::integration::upload_stats::ManualUploadOutcome::Skipped {
+                commit_sha,
+                reason,
+            }) => {
+                skipped_count += 1;
+                println!(
+                    "[git-ai] upload-stats: skipped {} source={} reason={}",
+                    short_commit_sha(&commit_sha),
+                    parsed.source,
+                    reason
+                );
+            }
+            Err(error) => {
+                failed_count += 1;
+                eprintln!(
+                    "[git-ai] upload-stats: failed {} source={}: {}",
+                    short_commit_sha(&resolved_commit),
+                    parsed.source,
+                    error
+                );
+            }
+        }
+    }
+
+    println!(
+        "[git-ai] upload-stats: completed source={} uploaded={} dry_run={} skipped={} failed={}",
+        parsed.source, uploaded_count, dry_run_count, skipped_count, failed_count
+    );
+
+    if failed_count > 0 {
+        std::process::exit(1);
+    }
+}
+
+fn parse_upload_stats_args(args: &[String]) -> Result<UploadStatsArgs, String> {
+    let mut dry_run = false;
+    let mut source = "manual".to_string();
+    let mut ignore_patterns = Vec::new();
+    let mut commit_revs = Vec::new();
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--dry-run" => {
+                dry_run = true;
+                i += 1;
+            }
+            "--source" => {
+                let Some(value) = args.get(i + 1) else {
+                    return Err("--source requires a value".to_string());
+                };
+                let trimmed = value.trim();
+                if trimmed.is_empty() {
+                    return Err("--source requires a non-empty value".to_string());
+                }
+                source = trimmed.to_string();
+                i += 2;
+            }
+            "--ignore" => {
+                let Some(value) = args.get(i + 1) else {
+                    return Err("--ignore requires a value".to_string());
+                };
+                ignore_patterns.push(value.clone());
+                i += 2;
+            }
+            value if value.starts_with("--") => {
+                return Err(format!("unknown upload-stats flag: {}", value));
+            }
+            value => {
+                commit_revs.push(normalize_head_rev(value));
+                i += 1;
+            }
+        }
+    }
+
+    if commit_revs.is_empty() {
+        commit_revs.push("HEAD".to_string());
+    }
+
+    Ok(UploadStatsArgs {
+        commit_revs,
+        dry_run,
+        source,
+        ignore_patterns,
+    })
+}
+
+fn short_commit_sha(commit_sha: &str) -> &str {
+    if commit_sha.len() > 7 {
+        &commit_sha[..7]
+    } else {
+        commit_sha
+    }
+}
+
 /// Normalise a revision token that the user may have typed with a lowercase
 /// "head" prefix.  On case-insensitive file systems (macOS) git accepts both
 /// "head" and "HEAD", but in a linked worktree "head" can resolve to the
@@ -2112,6 +2303,54 @@ fn normalize_head_rev(rev: &str) -> String {
         }
     }
     rev.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{normalize_head_rev, parse_upload_stats_args};
+
+    #[test]
+    fn upload_stats_defaults_to_head_and_manual_source() {
+        let parsed = parse_upload_stats_args(&[]).expect("parse upload-stats args");
+        assert_eq!(parsed.commit_revs, vec!["HEAD"]);
+        assert_eq!(parsed.source, "manual");
+        assert!(!parsed.dry_run);
+        assert!(parsed.ignore_patterns.is_empty());
+    }
+
+    #[test]
+    fn upload_stats_parses_multiple_commits_and_options() {
+        let args = vec![
+            "--dry-run".to_string(),
+            "--source".to_string(),
+            "review".to_string(),
+            "--ignore".to_string(),
+            "Cargo.lock".to_string(),
+            "head~1".to_string(),
+            "abc1234".to_string(),
+        ];
+
+        let parsed = parse_upload_stats_args(&args).expect("parse upload-stats args");
+        assert!(parsed.dry_run);
+        assert_eq!(parsed.source, "review");
+        assert_eq!(parsed.ignore_patterns, vec!["Cargo.lock"]);
+        assert_eq!(parsed.commit_revs, vec!["HEAD~1", "abc1234"]);
+    }
+
+    #[test]
+    fn upload_stats_rejects_unknown_flag() {
+        let args = vec!["--bogus".to_string()];
+        let error = parse_upload_stats_args(&args).expect_err("unknown flag should fail");
+        assert!(error.contains("unknown upload-stats flag"));
+    }
+
+    #[test]
+    fn normalize_head_rev_preserves_head_suffixes() {
+        assert_eq!(normalize_head_rev("head"), "HEAD");
+        assert_eq!(normalize_head_rev("head~2"), "HEAD~2");
+        assert_eq!(normalize_head_rev("head^1"), "HEAD^1");
+        assert_eq!(normalize_head_rev("head@{0}"), "HEAD@{0}");
+    }
 }
 
 fn handle_git_hooks(args: &[String]) {
