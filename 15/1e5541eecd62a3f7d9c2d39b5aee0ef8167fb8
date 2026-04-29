@@ -1,0 +1,29 @@
+src/commands/daemon.rs
+  12ec1409edf255cf 105-114,124-125,206-207,239-304,646-650,668-672
+---
+{
+  "schema_version": "authorship/3.1.0",
+  "git_ai_version": "2.0.8",
+  "x_user_id": "108",
+  "base_commit_sha": "151e5541eecd62a3f7d9c2d39b5aee0ef8167fb8",
+  "prompts": {
+    "12ec1409edf255cf": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "943cc490-bbc0-4f90-8bf5-3383c5a602f2",
+        "model": "copilot/gpt-5.4"
+      },
+      "human_author": "gaoang",
+      "messages": [],
+      "total_additions": 4,
+      "total_deletions": 7,
+      "accepted_lines": 783,
+      "overriden_lines": 0
+    }
+  },
+  "humans": {
+    "h_602db118073c06": {
+      "author": "gaoang"
+    }
+  }
+}
