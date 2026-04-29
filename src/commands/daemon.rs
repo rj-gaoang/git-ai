@@ -102,6 +102,16 @@ fn daemon_startup_timeout() -> Duration {
     }
 }
 
+fn blocked_daemon_missing_pid_grace() -> Duration {
+    Duration::from_millis(500)
+}
+
+enum BlockedDaemonWaitResult {
+    BecameHealthy,
+    TimedOutWithPid(u32),
+    MissingPidMetadata,
+}
+
 /// Like `ensure_daemon_running`, but spawns with inherited stderr so the user
 /// sees startup failures before the daemon detaches.
 #[cfg(not(windows))]
@@ -111,11 +121,8 @@ fn ensure_daemon_running_attached(timeout: Duration) -> Result<DaemonConfig, Str
         return Ok(config);
     }
 
-    if daemon_startup_is_blocked(&config) {
-        return Err(format!(
-            "daemon startup blocked: lock held at {}",
-            config.lock_path.display()
-        ));
+    if daemon_startup_is_blocked(&config) && recover_blocked_daemon_startup(&config, timeout)? {
+        return Ok(config);
     }
 
     let mut child = spawn_daemon_run_with_piped_stderr(&config)?;
@@ -196,11 +203,8 @@ pub(crate) fn ensure_daemon_running(timeout: Duration) -> Result<DaemonConfig, S
         return Ok(config);
     }
 
-    if daemon_startup_is_blocked(&config) {
-        return Err(format!(
-            "daemon startup blocked: lock held at {}",
-            config.lock_path.display()
-        ));
+    if daemon_startup_is_blocked(&config) && recover_blocked_daemon_startup(&config, timeout)? {
+        return Ok(config);
     }
 
     spawn_daemon_run_detached(&config)?;
@@ -229,6 +233,72 @@ fn daemon_startup_is_blocked(config: &DaemonConfig) -> bool {
             false
         }
         None => true,
+    }
+}
+
+fn recover_blocked_daemon_startup(
+    config: &DaemonConfig,
+    timeout: Duration,
+) -> Result<bool, String> {
+    match wait_for_blocked_daemon(config, timeout) {
+        BlockedDaemonWaitResult::BecameHealthy => Ok(true),
+        BlockedDaemonWaitResult::MissingPidMetadata => Err(format!(
+            "daemon startup blocked: lock held at {}; no daemon pid metadata available for recovery",
+            config.lock_path.display()
+        )),
+        BlockedDaemonWaitResult::TimedOutWithPid(pid) => {
+            if daemon_is_up(config) {
+                return Ok(true);
+            }
+            hard_kill_daemon_pid(config, pid).map_err(|e| {
+                format!(
+                    "daemon startup blocked: lock held at {}; failed to recover unhealthy daemon pid {}: {}",
+                    config.lock_path.display(),
+                    pid,
+                    e
+                )
+            })?;
+            if !wait_for_daemon_dead(config, Duration::from_secs(2)) {
+                return Err(format!(
+                    "daemon startup blocked: lock held at {}; daemon pid {} did not release the lock after force kill",
+                    config.lock_path.display(),
+                    pid
+                ));
+            }
+            Ok(false)
+        }
+    }
+}
+
+fn wait_for_blocked_daemon(config: &DaemonConfig, timeout: Duration) -> BlockedDaemonWaitResult {
+    let deadline = Instant::now() + timeout;
+    let no_pid_deadline =
+        Instant::now() + std::cmp::min(timeout, blocked_daemon_missing_pid_grace());
+    let mut observed_pid = None;
+
+    loop {
+        if daemon_is_up(config) {
+            return BlockedDaemonWaitResult::BecameHealthy;
+        }
+
+        if observed_pid.is_none()
+            && let Ok(pid) = read_daemon_pid(config)
+        {
+            observed_pid = Some(pid);
+        }
+
+        let now = Instant::now();
+        if observed_pid.is_none() && now >= no_pid_deadline {
+            return BlockedDaemonWaitResult::MissingPidMetadata;
+        }
+        if now >= deadline {
+            return match observed_pid {
+                Some(pid) => BlockedDaemonWaitResult::TimedOutWithPid(pid),
+                None => BlockedDaemonWaitResult::MissingPidMetadata,
+            };
+        }
+
+        thread::sleep(Duration::from_millis(50));
     }
 }
 
@@ -573,6 +643,11 @@ fn soft_shutdown_daemon(config: &DaemonConfig) -> Result<(), String> {
 #[cfg(unix)]
 fn hard_kill_daemon(config: &DaemonConfig) -> Result<(), String> {
     let pid = read_daemon_pid(config).map_err(|e| format!("cannot read daemon pid: {}", e))?;
+    hard_kill_daemon_pid(config, pid)
+}
+
+#[cfg(unix)]
+fn hard_kill_daemon_pid(config: &DaemonConfig, pid: u32) -> Result<(), String> {
     let ret = unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
     if ret != 0 {
         let err = std::io::Error::last_os_error();
@@ -590,6 +665,11 @@ fn hard_kill_daemon(config: &DaemonConfig) -> Result<(), String> {
 #[cfg(windows)]
 fn hard_kill_daemon(config: &DaemonConfig) -> Result<(), String> {
     let pid = read_daemon_pid(config).map_err(|e| format!("cannot read daemon pid: {}", e))?;
+    hard_kill_daemon_pid(config, pid)
+}
+
+#[cfg(windows)]
+fn hard_kill_daemon_pid(config: &DaemonConfig, pid: u32) -> Result<(), String> {
     let output = Command::new("taskkill")
         .args(["/F", "/T", "/PID", &pid.to_string()])
         .output()
