@@ -2083,8 +2083,10 @@ notes
 | 事件 | 用途 |
 |------|------|
 | `checkpoint_skipped` | checkpoint 未执行，记录原因、请求的 `kind`、是否带 agent 上下文 |
-| `checkpoint_no_entries` | 找到了候选文件但没有写入归因 entry，排查文件未变化、被忽略、二进制或已归因等情况 |
-| `checkpoint_attribution_decision` | checkpoint 实际写入后的归因判定，记录 `kind`、`decision`、`isAi`、`decisionRule`、文件样例、行数、agent 工具/模型、显式捕获路径和 `diagnosticHints` |
+| `checkpoint_explicit_path_resolution` | agent/IDE 带了显式路径但部分或全部未进入 checkpoint；逐路径记录 `included` / `dropped` 和 `duplicate_explicit_path`、`ignored_by_git_ai_ignore_rules`、`outside_repository_workdir`、`clean_file_without_dirty_snapshot`、`not_a_text_file_or_missing` 等原因 |
+| `checkpoint_no_entries` | 找到了候选文件但没有写入归因 entry；现在包含 `fileDiagnostics[]`，逐文件记录 `outcome=skipped`、`reason`、上一条 `previousCheckpoint`、内容是否相同和 `rootCauseHint` |
+| `checkpoint_attribution_decision` | checkpoint 实际写入后的归因判定；记录 `kind`、`decision`、`isAi`、`decisionRule`、文件样例、行数、agent 工具/模型、显式捕获路径、`fileDiagnostics[]` 和 `diagnosticHints` |
+| `known_human_checkpoint_rejected` | KnownHuman 保存事件被 AI 保存抑制规则拦截；记录拦截窗口、候选文件和命中的上一条 AI checkpoint，证明抑制规则已生效 |
 | `post_commit_authorship_note_written` | authorship note 写入成功，记录 prompt 保存模式、note 大小、prompt/message 计数 |
 | `post_commit_stats_computed` | commit stats 已计算，记录 AI/人工/unknown/add/delete 汇总 |
 | `post_commit_stats_skipped` | stats 被跳过，记录 `merge_commit` 或 `expensive_commit` 原因；这会导致本次自动上传跳过 |
@@ -2094,7 +2096,9 @@ notes
 | `upload_stats_failed` | HTTP 上传失败，记录错误信息；非 2xx 会包含 HTTP 状态和响应正文摘要 |
 | `upload_stats_succeeded` | HTTP 上传成功，记录 HTTP 状态码 |
 
-排查口径：AI 代码被标成人工时，优先看同一次 `checkpoint_attribution_decision.kind` 是否为 `human` / `known_human`，以及 `diagnosticHints` 是否出现 `human_fallback_no_agent_context`、`known_human_save_checkpoint` 或 `check_whether_ai_save_suppression_missed_this_path`；人工代码被标成 AI 时，看 `kind=ai_agent` / `ai_tab`、`agent.tool`、`agent.model`、`editedFilepathCount`、`explicitCapture` 是否覆盖了该文件；统计未上传时，看 `post_commit_stats_skipped`、`upload_stats_skipped`、`upload_stats_ready` 和 `upload_stats_failed` 的原因、URL 来源、用户 ID/API Key 状态和 HTTP 错误。
+排查口径：AI 代码被标成人工时，优先看同一次 `checkpoint_attribution_decision.kind` 是否为 `human` / `known_human`，以及 `diagnosticHints` 是否出现 `human_fallback_no_agent_context`、`known_human_save_checkpoint` 或 `check_whether_ai_save_suppression_missed_this_path`；再看 `fileDiagnostics[].reason`。如果后续 AI checkpoint 的 `checkpoint_no_entries.fileDiagnostics[].reason=unchanged_from_previous_checkpoint`，并且 `previousCheckpoint.kind=known_human`，同时 `rootCauseHint=ai_checkpoint_arrived_after_known_human_already_captured_same_file`，就可以直接判定为 KnownHuman 先捕获了这批代码。如果没有进入 `checkpoint_no_entries`，先看是否有 `checkpoint_explicit_path_resolution`，它能说明显式路径是否被 ignore、越界、clean、非文本或缺少 dirty snapshot。人工代码被标成 AI 时，看 `kind=ai_agent` / `ai_tab`、`agent.tool`、`agent.model`、`editedFilepathCount`、`editedFilepathsSample`、`willEditFilepathsSample`、`dirtyFilePathsSample`、`explicitCapture` 是否覆盖了该文件；统计未上传时，看 `post_commit_stats_skipped`、`upload_stats_skipped`、`upload_stats_ready` 和 `upload_stats_failed` 的原因、URL 来源、用户 ID/API Key 状态和 HTTP 错误。
+
+典型误归因链路：如果同一 `baseCommit` / 文件集合先出现 `checkpoint_attribution_decision.kind=known_human`、`decision=human`、`isAi=false`，并带有 `known_human_save_checkpoint` / `check_whether_ai_save_suppression_missed_this_path`，随后 `ai_agent` 对同一批文件只出现 `checkpoint_no_entries`，且逐文件 `fileDiagnostics[].previousCheckpoint.kind=known_human`、`reason=unchanged_from_previous_checkpoint`，说明 IDE 的已知人工保存 checkpoint 先把当前文件状态写进 working log，后续 AI checkpoint 因为文件已无新增差异而没有机会覆盖。最终 `post_commit_stats_computed` / `upload_stats_ready` 里出现 `aiAdditions=0` 不是远程上传或看板计算错误，而是本地 authorship note 已经按人工归因生成。继续向上查时，看 `agent.knownHumanMetadata.editor` / `editorVersion` / `extensionVersion`、`editedFilepathsSample`、`willEditFilepathsSample`、`dirtyFilePathsSample` 来确认 KnownHuman 事件来源；如果出现 `known_human_checkpoint_rejected`，说明 AI 保存抑制规则已拦截该次保存事件，误归因应继续排查其他 checkpoint 或路径匹配问题。
 
 这份日志只用于本机排查，不参与上传；失败时静默跳过，不能影响 commit。
 
@@ -2607,14 +2611,14 @@ git-ai upload-stats --dry-run --ignore '*.md' --ignore 'src/generated/**' HEAD
 |------|--------|------|
 | `git-ai/src/config.rs` | 新增 `DEFAULT_PROMPT_STORAGE="notes"`，未配置或配置非法时回退到 `notes`；`effective_prompt_storage` 的异常解析兜底也改为 `Notes` | 默认让 `prompts[].messages` 保留在 authorship note 中，支撑 `git_ai_prompt_stats.prompt_text` 稳定落库 |
 | `git-ai/src/diagnostics.rs` | 新增统一 JSONL 诊断日志入口，设置 `GIT_AI_DEBUG` 后追加 `~/.git-ai/logs/debug.jsonl`，日志写入失败静默忽略 | debug 日志不影响 commit、stats 或上传主流程 |
-| `git-ai/src/commands/checkpoint.rs` | 写入 `checkpoint_skipped`、`checkpoint_no_entries`、`checkpoint_attribution_decision`，记录归因决策、文件样例、行数、agent 上下文和诊断 hints | 即使用户看不到 stderr，也能在本地文件里确认本次 checkpoint 被判为 AI 还是人工，并解释常见误判原因 |
+| `git-ai/src/commands/checkpoint.rs` | 写入 `checkpoint_skipped`、`checkpoint_explicit_path_resolution`、`checkpoint_no_entries`、`checkpoint_attribution_decision`、`known_human_checkpoint_rejected`；`checkpoint_no_entries` / `checkpoint_attribution_decision` 增加逐文件 `fileDiagnostics[]`、上一条 `previousCheckpoint`、KnownHuman 元数据和诊断 hints | 即使用户看不到 stderr，也能在本地文件里确认本次 checkpoint 被判为 AI 还是人工，并解释每个候选文件为什么写入、跳过或没有进入候选集 |
 | `git-ai/src/authorship/post_commit.rs` | 写入 authorship note、stats 计算成功和 stats 跳过事件 | 能解释 note 是否生成、prompt 是否进入 note、以及 stats 缺失是否导致自动上传跳过 |
 | `git-ai/src/integration/upload_stats.rs` | 写入上传跳过、ready、started、failed、succeeded 事件，记录 URL 来源、用户 ID/API Key 状态、payload 摘要和 HTTP 结果 | 能从本地日志判断统计未上传是配置、payload、stats 缺失、网络还是服务端响应问题 |
 | `git-ai/docs/design-doc/git-ai看板方案.md` | 补充默认值、debug 日志路径、统计字段可靠性和 Phase 2 代码修改项 | 看板方案与当前代码状态保持一致 |
 
 **debug 日志内容边界：**
 
-只记录 `CheckpointKind`、AI/人工决策、repo 路径、base/commit sha、文件路径样例、文件数、行数、工具、模型、是否有 transcript、stats 汇总、URL 来源、是否配置 API Key / X-USER-ID、HTTP 状态和错误摘要等元数据；不记录代码内容，不记录 prompt 正文，也不记录完整 prompt id。
+只记录 `CheckpointKind`、AI/人工决策、repo 路径、base/commit sha、文件路径样例、文件数、行数、显式路径过滤原因、逐文件跳过原因、上一条 checkpoint 的 kind/时间/agent 摘要、KnownHuman editor/extension 版本、工具、模型、是否有 transcript、stats 汇总、URL 来源、是否配置 API Key / X-USER-ID、HTTP 状态和错误摘要等元数据；不记录代码内容，不记录 prompt 正文，也不记录完整 prompt id。
 
 **统计可靠性结论：**
 

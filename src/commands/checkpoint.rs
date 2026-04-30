@@ -21,6 +21,7 @@ use crate::git::status::{EntryKind, StatusCode};
 use crate::utils::normalize_to_posix;
 use futures::stream::{self, StreamExt};
 use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -43,6 +44,46 @@ struct FileLineStats {
 struct PreviousFileState {
     blob_sha: String,
     attributions: Vec<Attribution>,
+    checkpoint: PreviousCheckpointDiagnostic,
+}
+
+/// Debug-only metadata about the latest checkpoint that touched a file.
+#[derive(Debug, Clone)]
+struct PreviousCheckpointDiagnostic {
+    kind: CheckpointKind,
+    timestamp: u64,
+    author: String,
+    agent_tool: Option<String>,
+    agent_model: Option<String>,
+    agent_id_hash: Option<String>,
+    known_human_editor: Option<String>,
+    known_human_editor_version: Option<String>,
+    known_human_extension_version: Option<String>,
+    attribution_entry_count: usize,
+    line_attribution_count: usize,
+}
+
+/// Per-candidate-file checkpoint outcome used only for debug diagnostics.
+#[derive(Debug, Clone)]
+struct FileCheckpointDiagnostic {
+    path: String,
+    outcome: &'static str,
+    reason: &'static str,
+    root_cause_hint: Option<&'static str>,
+    has_prior_ai_edits: bool,
+    initial_attribution_count: usize,
+    has_previous_checkpoint: bool,
+    previous_checkpoint: Option<PreviousCheckpointDiagnostic>,
+    current_blob_sha: String,
+    current_line_count: Option<usize>,
+    previous_line_count: Option<usize>,
+    content_equal_normalized: Option<bool>,
+    byte_identical_to_previous: Option<bool>,
+}
+
+struct FileCheckpointResult {
+    entry: Option<(WorkingLogEntry, FileLineStats)>,
+    diagnostic: FileCheckpointDiagnostic,
 }
 
 use crate::authorship::working_log::AgentId;
@@ -395,6 +436,8 @@ pub(crate) fn run_with_base_commit_override_with_policy(
                 "author": author,
                 "isPreCommit": is_pre_commit,
                 "hasAgentRunResult": agent_run_result.is_some(),
+                "agent": agent_debug_entry(agent_run_result.as_ref()),
+                "explicitCapture": explicit_capture_debug(kind, agent_run_result.as_ref()),
                 "baseOverrideResolutionPolicy": format!("{:?}", base_override_resolution_policy),
             }),
         );
@@ -533,14 +576,25 @@ fn resolve_explicit_path_execution(
 ) -> Result<Option<ResolvedCheckpointExecution>, GitAiError> {
     let repo_workdir = repo.workdir()?;
     let mut candidate_paths = Vec::new();
+    let mut path_diagnostics = Vec::new();
     let mut seen = HashSet::new();
 
     for path in explicit_paths {
         let normalized_path = normalize_to_posix(path);
         if !seen.insert(normalized_path.clone()) {
+            path_diagnostics.push(json!({
+                "path": normalized_path,
+                "outcome": "dropped",
+                "reason": "duplicate_explicit_path",
+            }));
             continue;
         }
         if should_ignore_file_with_matcher(&normalized_path, ignore_matcher) {
+            path_diagnostics.push(json!({
+                "path": normalized_path,
+                "outcome": "dropped",
+                "reason": "ignored_by_git_ai_ignore_rules",
+            }));
             continue;
         }
 
@@ -550,6 +604,11 @@ fn resolve_explicit_path_execution(
             repo_workdir.join(&normalized_path)
         };
         if !repo.path_is_in_workdir(&path_buf) {
+            path_diagnostics.push(json!({
+                "path": normalized_path,
+                "outcome": "dropped",
+                "reason": "outside_repository_workdir",
+            }));
             continue;
         }
 
@@ -557,6 +616,17 @@ fn resolve_explicit_path_execution(
     }
 
     if candidate_paths.is_empty() {
+        append_explicit_path_resolution_debug(
+            repo,
+            base_commit,
+            kind,
+            is_pre_commit,
+            explicit_paths.len(),
+            0,
+            0,
+            "no_candidate_paths_after_initial_filtering",
+            &path_diagnostics,
+        );
         return Ok(None);
     }
 
@@ -570,6 +640,7 @@ fn resolve_explicit_path_execution(
 
     let mut files = Vec::new();
     let mut resolved_dirty_files = HashMap::new();
+    let candidate_path_count = candidate_paths.len();
 
     for normalized_path in candidate_paths {
         // Status output uses NFC paths; the normalized_path may be NFD on some
@@ -577,6 +648,11 @@ fn resolve_explicit_path_execution(
         let nfc_key: String = normalized_path.nfc().collect();
         let status_entry = explicit_statuses.get(&nfc_key);
         if matches!(status_entry, Some(entry) if entry.kind == EntryKind::Unmerged) {
+            path_diagnostics.push(json!({
+                "path": normalized_path,
+                "outcome": "dropped",
+                "reason": "unmerged_file",
+            }));
             continue;
         }
 
@@ -586,11 +662,21 @@ fn resolve_explicit_path_execution(
             && explicit_dirty_content.is_none()
             && !preserve_unchanged_explicit_paths
         {
+            path_diagnostics.push(json!({
+                "path": normalized_path,
+                "outcome": "dropped",
+                "reason": "clean_file_without_dirty_snapshot",
+            }));
             continue;
         }
 
         if let Some(content) = explicit_dirty_content {
             resolved_dirty_files.insert(normalized_path.clone(), content);
+            path_diagnostics.push(json!({
+                "path": normalized_path.as_str(),
+                "outcome": "included",
+                "reason": "explicit_dirty_text_snapshot",
+            }));
             files.push(normalized_path);
             continue;
         }
@@ -604,13 +690,48 @@ fn resolve_explicit_path_execution(
         if is_text_file(working_log, &normalized_path)
             || (is_deleted && is_text_file_in_head(repo, &normalized_path))
         {
+            path_diagnostics.push(json!({
+                "path": normalized_path.as_str(),
+                "outcome": "included",
+                "reason": if is_deleted { "deleted_text_file_in_head" } else { "current_text_file" },
+            }));
             files.push(normalized_path);
+        } else {
+            path_diagnostics.push(json!({
+                "path": normalized_path,
+                "outcome": "dropped",
+                "reason": "not_a_text_file_or_missing",
+            }));
         }
     }
 
     if files.is_empty() {
+        append_explicit_path_resolution_debug(
+            repo,
+            base_commit,
+            kind,
+            is_pre_commit,
+            explicit_paths.len(),
+            candidate_path_count,
+            0,
+            "no_resolved_files_after_status_and_text_filtering",
+            &path_diagnostics,
+        );
         Ok(None)
     } else {
+        if files.len() < explicit_paths.len() {
+            append_explicit_path_resolution_debug(
+                repo,
+                base_commit,
+                kind,
+                is_pre_commit,
+                explicit_paths.len(),
+                candidate_path_count,
+                files.len(),
+                "partial_explicit_path_resolution",
+                &path_diagnostics,
+            );
+        }
         Ok(Some(ResolvedCheckpointExecution {
             base_commit: base_commit.to_string(),
             ts,
@@ -618,6 +739,35 @@ fn resolve_explicit_path_execution(
             dirty_files: resolved_dirty_files,
         }))
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_explicit_path_resolution_debug(
+    repo: &Repository,
+    base_commit: &str,
+    kind: CheckpointKind,
+    is_pre_commit: bool,
+    explicit_path_count: usize,
+    candidate_path_count: usize,
+    resolved_file_count: usize,
+    reason: &'static str,
+    path_diagnostics: &[Value],
+) {
+    crate::diagnostics::append_debug_event(
+        "checkpoint_explicit_path_resolution",
+        json!({
+            "repo": repo.canonical_workdir().to_string_lossy().to_string(),
+            "baseCommit": base_commit,
+            "kind": kind.to_str(),
+            "isPreCommit": is_pre_commit,
+            "explicitPathCount": explicit_path_count,
+            "candidatePathCount": candidate_path_count,
+            "resolvedFileCount": resolved_file_count,
+            "reason": reason,
+            "pathDiagnostics": path_diagnostics.iter().take(50).collect::<Vec<_>>(),
+            "pathDiagnosticsTruncated": path_diagnostics.len() > 50,
+        }),
+    );
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -823,15 +973,33 @@ fn execute_resolved_checkpoint(
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        let too_soon = checkpoints.iter().rev().any(|cp| {
-            cp.kind.is_ai()
-                && now_secs.saturating_sub(cp.timestamp) < KNOWN_HUMAN_MIN_SECS_AFTER_AI
-                && cp.entries.iter().any(|e| resolved.files.contains(&e.file))
-        });
-        if too_soon {
+        let recent_ai_overlap = latest_recent_ai_checkpoint_overlap(
+            &checkpoints,
+            &resolved.files,
+            now_secs,
+            KNOWN_HUMAN_MIN_SECS_AFTER_AI,
+        );
+        if let Some(previous_checkpoint) = recent_ai_overlap {
             tracing::debug!(
                 "[KnownHuman] Rejected: fired within {}s of an AI checkpoint on the same file",
                 KNOWN_HUMAN_MIN_SECS_AFTER_AI
+            );
+            crate::diagnostics::append_debug_event(
+                "known_human_checkpoint_rejected",
+                json!({
+                    "repo": repo.canonical_workdir().to_string_lossy().to_string(),
+                    "baseCommit": resolved.base_commit,
+                    "kind": kind.to_str(),
+                    "candidateFileCount": resolved.files.len(),
+                    "candidateFilesSample": sample_strings(resolved.files.iter().map(String::as_str), 50),
+                    "agent": agent_debug_entry(agent_run_result.as_ref()),
+                    "reason": "known_human_within_recent_ai_checkpoint_window",
+                    "knownHumanSuppression": {
+                        "windowSecs": KNOWN_HUMAN_MIN_SECS_AFTER_AI,
+                        "status": "rejected_recent_ai_overlap",
+                    },
+                    "matchedPreviousCheckpoint": previous_checkpoint_debug_json(&previous_checkpoint),
+                }),
             );
             return Ok((0, 0, 0));
         }
@@ -861,7 +1029,7 @@ fn execute_resolved_checkpoint(
     );
 
     let entries_start = Instant::now();
-    let (entries, file_stats) = smol::block_on(get_checkpoint_entries(
+    let (entries, file_stats, file_diagnostics) = smol::block_on(get_checkpoint_entries(
         kind,
         author,
         repo,
@@ -952,6 +1120,7 @@ fn execute_resolved_checkpoint(
             &resolved.files,
             &entries,
             &file_stats,
+            &file_diagnostics,
             checkpoints.len(),
             agent_run_result.as_ref(),
         );
@@ -990,10 +1159,11 @@ fn execute_resolved_checkpoint(
                 "candidateFilesSample": sample_strings(resolved.files.iter().map(String::as_str), 50),
                 "priorCheckpointCount": checkpoints.len(),
                 "reason": "get_checkpoint_entries_returned_no_entries",
-                "diagnosticHints": [
-                    "candidate_files_may_have_been_unchanged_ignored_binary_or_already_checkpointed",
-                    "check_previous_checkpoint_attribution_decision_events_for_the_same_base_commit"
-                ],
+                "explicitCapture": explicit_capture_debug(kind, agent_run_result.as_ref()),
+                "agent": agent_debug_entry(agent_run_result.as_ref()),
+                "fileDiagnostics": file_diagnostics_debug_entries(&file_diagnostics, 50),
+                "fileDiagnosticsTruncated": file_diagnostics.len() > 50,
+                "diagnosticHints": checkpoint_no_entry_diagnostic_hints(kind, &file_diagnostics),
             }),
         );
     }
@@ -1651,6 +1821,7 @@ fn build_previous_file_state_maps(
                 PreviousFileState {
                     blob_sha: entry.blob_sha.clone(),
                     attributions: entry.attributions.clone(),
+                    checkpoint: previous_checkpoint_diagnostic(checkpoint, entry),
                 },
             );
 
@@ -1661,6 +1832,103 @@ fn build_previous_file_state_maps(
     }
 
     (previous_file_state_by_file, ai_touched_files)
+}
+
+fn previous_checkpoint_diagnostic(
+    checkpoint: &Checkpoint,
+    entry: &WorkingLogEntry,
+) -> PreviousCheckpointDiagnostic {
+    PreviousCheckpointDiagnostic {
+        kind: checkpoint.kind,
+        timestamp: checkpoint.timestamp,
+        author: checkpoint.author.clone(),
+        agent_tool: checkpoint.agent_id.as_ref().map(|agent| agent.tool.clone()),
+        agent_model: checkpoint
+            .agent_id
+            .as_ref()
+            .map(|agent| agent.model.clone()),
+        agent_id_hash: checkpoint
+            .agent_id
+            .as_ref()
+            .map(|agent| generate_short_hash(&agent.id, &agent.tool)),
+        known_human_editor: checkpoint
+            .known_human_metadata
+            .as_ref()
+            .map(|metadata| metadata.editor.clone()),
+        known_human_editor_version: checkpoint
+            .known_human_metadata
+            .as_ref()
+            .map(|metadata| metadata.editor_version.clone()),
+        known_human_extension_version: checkpoint
+            .known_human_metadata
+            .as_ref()
+            .map(|metadata| metadata.extension_version.clone()),
+        attribution_entry_count: entry.attributions.len(),
+        line_attribution_count: entry.line_attributions.len(),
+    }
+}
+
+fn file_checkpoint_diagnostic(
+    path: &str,
+    outcome: &'static str,
+    reason: &'static str,
+    requested_kind: CheckpointKind,
+    previous_state: Option<&PreviousFileState>,
+    has_prior_ai_edits: bool,
+    initial_attribution_count: usize,
+    current_blob_sha: &str,
+    current_content: Option<&str>,
+    previous_content: Option<&str>,
+) -> FileCheckpointDiagnostic {
+    let previous_checkpoint = previous_state.map(|state| state.checkpoint.clone());
+    let root_cause_hint =
+        file_checkpoint_root_cause_hint(requested_kind, reason, previous_checkpoint.as_ref());
+
+    FileCheckpointDiagnostic {
+        path: path.to_string(),
+        outcome,
+        reason,
+        root_cause_hint,
+        has_prior_ai_edits,
+        initial_attribution_count,
+        has_previous_checkpoint: previous_state.is_some(),
+        previous_checkpoint,
+        current_blob_sha: current_blob_sha.to_string(),
+        current_line_count: current_content.map(|content| content.lines().count()),
+        previous_line_count: previous_content.map(|content| content.lines().count()),
+        content_equal_normalized: current_content
+            .zip(previous_content)
+            .map(|(current, previous)| content_eq_normalized(current, previous)),
+        byte_identical_to_previous: current_content
+            .zip(previous_content)
+            .map(|(current, previous)| current == previous),
+    }
+}
+
+fn file_checkpoint_root_cause_hint(
+    requested_kind: CheckpointKind,
+    reason: &str,
+    previous_checkpoint: Option<&PreviousCheckpointDiagnostic>,
+) -> Option<&'static str> {
+    let previous_checkpoint = previous_checkpoint?;
+    match (requested_kind, previous_checkpoint.kind, reason) {
+        (
+            CheckpointKind::AiAgent | CheckpointKind::AiTab,
+            CheckpointKind::KnownHuman,
+            "unchanged_from_previous_checkpoint",
+        ) => Some("ai_checkpoint_arrived_after_known_human_already_captured_same_file"),
+        (
+            CheckpointKind::AiAgent | CheckpointKind::AiTab,
+            CheckpointKind::Human,
+            "unchanged_from_previous_checkpoint",
+        ) => Some("ai_checkpoint_arrived_after_human_checkpoint_already_captured_same_file"),
+        (CheckpointKind::KnownHuman, previous_kind, "unchanged_from_previous_checkpoint")
+            if previous_kind.is_ai() =>
+        {
+            Some("known_human_save_event_after_ai_checkpoint_no_new_changes")
+        }
+        _ => None,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1679,7 +1947,7 @@ fn get_checkpoint_entry_for_file(
     initial_attributions: Arc<HashMap<String, Vec<LineAttribution>>>,
     initial_snapshot_contents: Arc<HashMap<String, String>>,
     ts: u128,
-) -> Result<Option<(WorkingLogEntry, FileLineStats)>, GitAiError> {
+) -> Result<FileCheckpointResult, GitAiError> {
     let feature_flag_inter_commit_move = Config::get().get_feature_flags().inter_commit_move;
 
     let file_start = Instant::now();
@@ -1696,7 +1964,21 @@ fn get_checkpoint_entry_for_file(
     // If this file has no prior AI attribution and no INITIAL attribution,
     // we can skip it entirely. Human-only files do not affect AI authorship.
     if is_pre_commit && !kind.is_ai() && !has_prior_ai_edits && initial_attrs_for_file.is_empty() {
-        return Ok(None);
+        return Ok(FileCheckpointResult {
+            entry: None,
+            diagnostic: file_checkpoint_diagnostic(
+                &file_path,
+                "skipped",
+                "pre_commit_human_without_prior_ai_or_initial_attribution",
+                kind,
+                previous_state.as_ref(),
+                has_prior_ai_edits,
+                initial_attrs_for_file.len(),
+                &file_content_hash,
+                None,
+                None,
+            ),
+        });
     }
 
     let current_content = working_log
@@ -1718,12 +2000,41 @@ fn get_checkpoint_entry_for_file(
         };
 
         if content_eq_normalized(&current_content, &previous_content) {
-            return Ok(None);
+            return Ok(FileCheckpointResult {
+                entry: None,
+                diagnostic: file_checkpoint_diagnostic(
+                    &file_path,
+                    "skipped",
+                    "human_checkpoint_no_content_change",
+                    kind,
+                    previous_state.as_ref(),
+                    has_prior_ai_edits,
+                    initial_attrs_for_file.len(),
+                    &file_content_hash,
+                    Some(&current_content),
+                    Some(&previous_content),
+                ),
+            });
         }
 
         let stats = compute_file_line_stats(&previous_content, &current_content);
+        let diagnostic = file_checkpoint_diagnostic(
+            &file_path,
+            "written",
+            "human_checkpoint_human_only_file_changed",
+            kind,
+            previous_state.as_ref(),
+            has_prior_ai_edits,
+            initial_attrs_for_file.len(),
+            &file_content_hash,
+            Some(&current_content),
+            Some(&previous_content),
+        );
         let entry = WorkingLogEntry::new(file_path, file_content_hash, Vec::new(), Vec::new());
-        return Ok(Some((entry, stats)));
+        return Ok(FileCheckpointResult {
+            entry: Some((entry, stats)),
+            diagnostic,
+        });
     }
 
     let from_checkpoint = previous_state.as_ref().map(|state| {
@@ -1749,7 +2060,21 @@ fn get_checkpoint_entry_for_file(
         if content_eq_normalized(&current_content, &previous_content)
             && initial_attrs_for_file.is_empty()
         {
-            return Ok(None);
+            return Ok(FileCheckpointResult {
+                entry: None,
+                diagnostic: file_checkpoint_diagnostic(
+                    &file_path,
+                    "skipped",
+                    "unchanged_from_head_without_initial_attribution",
+                    kind,
+                    previous_state.as_ref(),
+                    has_prior_ai_edits,
+                    initial_attrs_for_file.len(),
+                    &file_content_hash,
+                    Some(&current_content),
+                    Some(&previous_content),
+                ),
+            });
         }
 
         // Build a set of lines covered by INITIAL attributions
@@ -1868,7 +2193,21 @@ fn get_checkpoint_entry_for_file(
     if is_from_checkpoint && content_eq_normalized(&current_content, &previous_content) {
         if current_content == previous_content {
             // Byte-identical — truly no change.
-            return Ok(None);
+            return Ok(FileCheckpointResult {
+                entry: None,
+                diagnostic: file_checkpoint_diagnostic(
+                    &file_path,
+                    "skipped",
+                    "unchanged_from_previous_checkpoint",
+                    kind,
+                    previous_state.as_ref(),
+                    has_prior_ai_edits,
+                    initial_attrs_for_file.len(),
+                    &file_content_hash,
+                    Some(&current_content),
+                    Some(&previous_content),
+                ),
+            });
         }
         // Content differs only in line endings (CRLF ↔ LF). Update the stored blob
         // to the current content so future diffs compare LF-vs-LF. Without this,
@@ -1888,14 +2227,45 @@ fn get_checkpoint_entry_for_file(
                 ts,
             );
         let entry = WorkingLogEntry::new(
-            file_path,
-            file_content_hash,
+            file_path.clone(),
+            file_content_hash.clone(),
             remapped_attributions,
             line_attributions,
         );
-        return Ok(Some((entry, FileLineStats::default())));
+        return Ok(FileCheckpointResult {
+            entry: Some((entry, FileLineStats::default())),
+            diagnostic: file_checkpoint_diagnostic(
+                &file_path,
+                "written",
+                "line_endings_only_since_previous_checkpoint",
+                kind,
+                previous_state.as_ref(),
+                has_prior_ai_edits,
+                initial_attrs_for_file.len(),
+                &file_content_hash,
+                Some(&current_content),
+                Some(&previous_content),
+            ),
+        });
     }
 
+    let write_reason = if is_from_checkpoint {
+        "content_changed_from_previous_checkpoint"
+    } else {
+        "content_changed_from_head_or_initial_attribution"
+    };
+    let diagnostic = file_checkpoint_diagnostic(
+        &file_path,
+        "written",
+        write_reason,
+        kind,
+        previous_state.as_ref(),
+        has_prior_ai_edits,
+        initial_attrs_for_file.len(),
+        &file_content_hash,
+        Some(&current_content),
+        Some(&previous_content),
+    );
     let (entry, stats) = make_entry_for_file(FileEntryInput {
         file_path: &file_path,
         blob_sha: &file_content_hash,
@@ -1911,7 +2281,10 @@ fn get_checkpoint_entry_for_file(
         file_path,
         file_start.elapsed()
     );
-    Ok(Some((entry, stats)))
+    Ok(FileCheckpointResult {
+        entry: Some((entry, stats)),
+        diagnostic,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1927,7 +2300,14 @@ async fn get_checkpoint_entries(
     ts: u128,
     is_pre_commit: bool,
     head_commit_override: Option<&str>,
-) -> Result<(Vec<WorkingLogEntry>, Vec<FileLineStats>), GitAiError> {
+) -> Result<
+    (
+        Vec<WorkingLogEntry>,
+        Vec<FileLineStats>,
+        Vec<FileCheckpointDiagnostic>,
+    ),
+    GitAiError,
+> {
     let entries_fn_start = Instant::now();
 
     // Read INITIAL attributions from working log (empty if file doesn't exist)
@@ -2075,13 +2455,16 @@ async fn get_checkpoint_entries(
     let results_count = results.len();
     let mut entries = Vec::new();
     let mut file_stats = Vec::new();
+    let mut file_diagnostics = Vec::new();
     for result in results {
         match result {
-            Ok(Some((entry, stats))) => {
-                entries.push(entry);
-                file_stats.push(stats);
+            Ok(file_result) => {
+                if let Some((entry, stats)) = file_result.entry {
+                    entries.push(entry);
+                    file_stats.push(stats);
+                }
+                file_diagnostics.push(file_result.diagnostic);
             }
-            Ok(None) => {} // File had no changes
             Err(e) => return Err(e),
         }
     }
@@ -2095,7 +2478,7 @@ async fn get_checkpoint_entries(
         entries_fn_start.elapsed()
     );
 
-    Ok((entries, file_stats))
+    Ok((entries, file_stats, file_diagnostics))
 }
 
 struct FileEntryInput<'a> {
@@ -2249,21 +2632,17 @@ fn append_attribution_debug_log(
     candidate_files: &[String],
     entries: &[WorkingLogEntry],
     file_stats: &[FileLineStats],
+    file_diagnostics: &[FileCheckpointDiagnostic],
     prior_checkpoint_count: usize,
     agent_run_result: Option<&AgentRunResult>,
 ) {
-    let explicit_capture =
-        explicit_capture_target_paths(kind, agent_run_result).map(|(role, paths)| {
-            serde_json::json!({
-                "role": format!("{:?}", role),
-                "pathCount": paths.len(),
-                "samplePaths": sample_strings(paths.iter().map(String::as_str), 25),
-            })
-        });
+    let mut diagnostic_hints =
+        checkpoint_diagnostic_hints(kind, agent_run_result, candidate_files.len(), entries.len());
+    add_file_diagnostic_hints(&mut diagnostic_hints, file_diagnostics);
 
     crate::diagnostics::append_debug_event(
         "checkpoint_attribution_decision",
-        serde_json::json!({
+        json!({
             "repo": repo.canonical_workdir().to_string_lossy().to_string(),
             "baseCommit": base_commit,
             "checkpointTimestamp": checkpoint.timestamp,
@@ -2279,8 +2658,8 @@ fn append_attribution_debug_log(
             "checkpointFilesSample": sample_strings(entries.iter().map(|entry| entry.file.as_str()), 50),
             "filesTruncated": entries.len() > 50,
             "priorCheckpointCount": prior_checkpoint_count,
-            "explicitCapture": explicit_capture,
-            "diagnosticHints": checkpoint_diagnostic_hints(kind, agent_run_result, candidate_files.len(), entries.len()),
+            "explicitCapture": explicit_capture_debug(kind, agent_run_result),
+            "diagnosticHints": diagnostic_hints,
             "lineStats": {
                 "additions": checkpoint.line_stats.additions,
                 "deletions": checkpoint.line_stats.deletions,
@@ -2288,22 +2667,9 @@ fn append_attribution_debug_log(
                 "deletionsSloc": checkpoint.line_stats.deletions_sloc,
             },
             "files": checkpoint_file_debug_entries(entries, file_stats),
-            "agent": agent_run_result.map(|result| serde_json::json!({
-                "tool": result.agent_id.tool.as_str(),
-                "model": result.agent_id.model.as_str(),
-                "agentIdHash": generate_short_hash(&result.agent_id.id, &result.agent_id.tool),
-                "checkpointKind": result.checkpoint_kind.to_str(),
-                "hasTranscript": result.transcript.is_some(),
-                "hasDirtyFiles": result.dirty_files.as_ref().is_some_and(|files| !files.is_empty()),
-                "dirtyFileCount": result.dirty_files.as_ref().map(|files| files.len()).unwrap_or(0),
-                "editedFilepathCount": result.edited_filepaths.as_ref().map(|paths| paths.len()).unwrap_or(0),
-                "willEditFilepathCount": result.will_edit_filepaths.as_ref().map(|paths| paths.len()).unwrap_or(0),
-                "metadataKeys": result.agent_metadata.as_ref().map(|metadata| {
-                    let mut keys = metadata.keys().cloned().collect::<Vec<_>>();
-                    keys.sort();
-                    keys
-                }).unwrap_or_default(),
-            })),
+            "fileDiagnostics": file_diagnostics_debug_entries(file_diagnostics, 50),
+            "fileDiagnosticsTruncated": file_diagnostics.len() > 50,
+            "agent": agent_debug_entry(agent_run_result),
         }),
     );
 }
@@ -2339,7 +2705,7 @@ fn checkpoint_diagnostic_hints(
 fn checkpoint_file_debug_entries(
     entries: &[WorkingLogEntry],
     file_stats: &[FileLineStats],
-) -> Vec<serde_json::Value> {
+) -> Vec<Value> {
     entries
         .iter()
         .zip(file_stats.iter())
@@ -2358,6 +2724,190 @@ fn checkpoint_file_debug_entries(
             })
         })
         .collect()
+}
+
+fn checkpoint_no_entry_diagnostic_hints(
+    kind: CheckpointKind,
+    file_diagnostics: &[FileCheckpointDiagnostic],
+) -> Vec<&'static str> {
+    let mut hints = vec!["get_checkpoint_entries_returned_no_entries"];
+    if file_diagnostics.is_empty() {
+        hints.push("no_candidate_file_diagnostics_collected");
+    } else {
+        hints.push("inspect_fileDiagnostics_for_exact_skip_reason_per_candidate_file");
+    }
+    if kind == CheckpointKind::KnownHuman {
+        hints.push("known_human_save_checkpoint");
+        hints.push("if_this_precedes_ai_agent_for_same_file_it_can_claim_the_changes_first");
+    }
+    add_file_diagnostic_hints(&mut hints, file_diagnostics);
+    hints
+}
+
+fn add_file_diagnostic_hints(
+    hints: &mut Vec<&'static str>,
+    file_diagnostics: &[FileCheckpointDiagnostic],
+) {
+    for diagnostic in file_diagnostics {
+        if let Some(root_cause_hint) = diagnostic.root_cause_hint {
+            push_unique_hint(hints, root_cause_hint);
+        }
+    }
+    if file_diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.reason == "unchanged_from_previous_checkpoint")
+    {
+        push_unique_hint(hints, "candidate_file_unchanged_since_previous_checkpoint");
+    }
+    if file_diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .previous_checkpoint
+            .as_ref()
+            .is_some_and(|previous| previous.kind == CheckpointKind::KnownHuman)
+    }) {
+        push_unique_hint(
+            hints,
+            "previous_checkpoint_for_candidate_file_was_known_human",
+        );
+    }
+}
+
+fn push_unique_hint(hints: &mut Vec<&'static str>, hint: &'static str) {
+    if !hints.contains(&hint) {
+        hints.push(hint);
+    }
+}
+
+fn explicit_capture_debug(
+    kind: CheckpointKind,
+    agent_run_result: Option<&AgentRunResult>,
+) -> Option<Value> {
+    explicit_capture_target_paths(kind, agent_run_result).map(|(role, paths)| {
+        json!({
+            "role": format!("{:?}", role),
+            "pathCount": paths.len(),
+            "samplePaths": sample_strings(paths.iter().map(String::as_str), 25),
+        })
+    })
+}
+
+fn agent_debug_entry(agent_run_result: Option<&AgentRunResult>) -> Option<Value> {
+    agent_run_result.map(|result| {
+        json!({
+            "tool": result.agent_id.tool.as_str(),
+            "model": result.agent_id.model.as_str(),
+            "agentIdHash": generate_short_hash(&result.agent_id.id, &result.agent_id.tool),
+            "checkpointKind": result.checkpoint_kind.to_str(),
+            "hasTranscript": result.transcript.is_some(),
+            "repoWorkingDir": result.repo_working_dir.as_deref(),
+            "hasDirtyFiles": result.dirty_files.as_ref().is_some_and(|files| !files.is_empty()),
+            "dirtyFileCount": result.dirty_files.as_ref().map(|files| files.len()).unwrap_or(0),
+            "dirtyFilePathsSample": result.dirty_files.as_ref().map(|files| {
+                sample_strings(files.keys().map(String::as_str), 25)
+            }).unwrap_or_default(),
+            "editedFilepathCount": result.edited_filepaths.as_ref().map(|paths| paths.len()).unwrap_or(0),
+            "editedFilepathsSample": result.edited_filepaths.as_ref().map(|paths| {
+                sample_strings(paths.iter().map(String::as_str), 25)
+            }).unwrap_or_default(),
+            "willEditFilepathCount": result.will_edit_filepaths.as_ref().map(|paths| paths.len()).unwrap_or(0),
+            "willEditFilepathsSample": result.will_edit_filepaths.as_ref().map(|paths| {
+                sample_strings(paths.iter().map(String::as_str), 25)
+            }).unwrap_or_default(),
+            "metadataKeys": result.agent_metadata.as_ref().map(|metadata| {
+                let mut keys = metadata.keys().cloned().collect::<Vec<_>>();
+                keys.sort();
+                keys
+            }).unwrap_or_default(),
+            "knownHumanMetadata": known_human_agent_metadata_debug(result),
+        })
+    })
+}
+
+fn known_human_agent_metadata_debug(agent_run_result: &AgentRunResult) -> Option<Value> {
+    if agent_run_result.checkpoint_kind != CheckpointKind::KnownHuman
+        && agent_run_result.agent_id.tool != "known_human"
+    {
+        return None;
+    }
+
+    let metadata = agent_run_result.agent_metadata.as_ref()?;
+    Some(json!({
+        "editor": metadata.get("kh_editor").map(String::as_str),
+        "editorVersion": metadata.get("kh_editor_version").map(String::as_str),
+        "extensionVersion": metadata.get("kh_extension_version").map(String::as_str),
+    }))
+}
+
+fn file_diagnostics_debug_entries(
+    file_diagnostics: &[FileCheckpointDiagnostic],
+    limit: usize,
+) -> Vec<Value> {
+    file_diagnostics
+        .iter()
+        .take(limit)
+        .map(|diagnostic| {
+            json!({
+                "path": diagnostic.path.as_str(),
+                "outcome": diagnostic.outcome,
+                "reason": diagnostic.reason,
+                "rootCauseHint": diagnostic.root_cause_hint,
+                "hasPriorAiEdits": diagnostic.has_prior_ai_edits,
+                "initialAttributionCount": diagnostic.initial_attribution_count,
+                "hasPreviousCheckpoint": diagnostic.has_previous_checkpoint,
+                "previousCheckpoint": diagnostic.previous_checkpoint.as_ref().map(previous_checkpoint_debug_json),
+                "currentBlobHashPrefix": hash_prefix(&diagnostic.current_blob_sha),
+                "currentLineCount": diagnostic.current_line_count,
+                "previousLineCount": diagnostic.previous_line_count,
+                "contentEqualNormalized": diagnostic.content_equal_normalized,
+                "byteIdenticalToPrevious": diagnostic.byte_identical_to_previous,
+            })
+        })
+        .collect()
+}
+
+fn previous_checkpoint_debug_json(previous_checkpoint: &PreviousCheckpointDiagnostic) -> Value {
+    json!({
+        "kind": previous_checkpoint.kind.to_str(),
+        "timestamp": previous_checkpoint.timestamp,
+        "author": previous_checkpoint.author.as_str(),
+        "agent": {
+            "tool": previous_checkpoint.agent_tool.as_deref(),
+            "model": previous_checkpoint.agent_model.as_deref(),
+            "agentIdHash": previous_checkpoint.agent_id_hash.as_deref(),
+        },
+        "knownHumanMetadata": {
+            "editor": previous_checkpoint.known_human_editor.as_deref(),
+            "editorVersion": previous_checkpoint.known_human_editor_version.as_deref(),
+            "extensionVersion": previous_checkpoint.known_human_extension_version.as_deref(),
+        },
+        "attributionEntryCount": previous_checkpoint.attribution_entry_count,
+        "lineAttributionCount": previous_checkpoint.line_attribution_count,
+    })
+}
+
+fn hash_prefix(hash: &str) -> String {
+    hash.chars().take(12).collect()
+}
+
+#[cfg(not(any(test, feature = "test-support")))]
+fn latest_recent_ai_checkpoint_overlap(
+    checkpoints: &[Checkpoint],
+    files: &[String],
+    now_secs: u64,
+    window_secs: u64,
+) -> Option<PreviousCheckpointDiagnostic> {
+    checkpoints.iter().rev().find_map(|checkpoint| {
+        if !checkpoint.kind.is_ai() || now_secs.saturating_sub(checkpoint.timestamp) >= window_secs
+        {
+            return None;
+        }
+
+        checkpoint
+            .entries
+            .iter()
+            .find(|entry| files.contains(&entry.file))
+            .map(|entry| previous_checkpoint_diagnostic(checkpoint, entry))
+    })
 }
 
 fn sample_strings<'a>(values: impl Iterator<Item = &'a str>, limit: usize) -> Vec<String> {
@@ -2451,7 +3001,7 @@ fn upsert_checkpoint_prompt_to_db(
 mod tests {
     use super::*;
     use crate::authorship::transcript::AiTranscript;
-    use crate::authorship::working_log::AgentId;
+    use crate::authorship::working_log::{AgentId, KnownHumanMetadata};
     use crate::commands::checkpoint_agent::agent_presets::AgentRunResult;
     use crate::git::test_utils::TmpRepo;
     use std::collections::HashMap;
@@ -2584,6 +3134,99 @@ mod tests {
             explicit_capture_target_paths(CheckpointKind::AiAgent, Some(&ai_result)),
             None
         );
+    }
+
+    #[test]
+    fn test_file_diagnostics_explain_ai_checkpoint_after_known_human_skip() {
+        let entry = WorkingLogEntry::new(
+            "src/demo.rs".to_string(),
+            "previous_blob".to_string(),
+            vec![Attribution::new(0, 3, "h_example".to_string(), 42)],
+            vec![LineAttribution::new(1, 1, "h_example".to_string(), None)],
+        );
+        let mut checkpoint = Checkpoint::new(
+            CheckpointKind::KnownHuman,
+            String::new(),
+            "human".to_string(),
+            vec![entry.clone()],
+        );
+        checkpoint.timestamp = 123;
+        checkpoint.agent_id = Some(AgentId {
+            tool: "known_human".to_string(),
+            id: "known_human_session".to_string(),
+            model: "unknown".to_string(),
+        });
+        checkpoint.known_human_metadata = Some(KnownHumanMetadata {
+            editor: "vscode".to_string(),
+            editor_version: "1.99.0".to_string(),
+            extension_version: "2.0.9".to_string(),
+        });
+
+        let previous_checkpoint = previous_checkpoint_diagnostic(&checkpoint, &entry);
+        let previous_state = PreviousFileState {
+            blob_sha: entry.blob_sha.clone(),
+            attributions: entry.attributions.clone(),
+            checkpoint: previous_checkpoint,
+        };
+
+        let diagnostic = file_checkpoint_diagnostic(
+            "src/demo.rs",
+            "skipped",
+            "unchanged_from_previous_checkpoint",
+            CheckpointKind::AiAgent,
+            Some(&previous_state),
+            false,
+            0,
+            "current_blob",
+            Some("one\n"),
+            Some("one\n"),
+        );
+
+        assert_eq!(
+            diagnostic.root_cause_hint,
+            Some("ai_checkpoint_arrived_after_known_human_already_captured_same_file")
+        );
+        let debug_entries = file_diagnostics_debug_entries(&[diagnostic], 10);
+        assert_eq!(debug_entries[0]["path"], "src/demo.rs");
+        assert_eq!(debug_entries[0]["outcome"], "skipped");
+        assert_eq!(
+            debug_entries[0]["reason"],
+            "unchanged_from_previous_checkpoint"
+        );
+        assert_eq!(
+            debug_entries[0]["previousCheckpoint"]["kind"],
+            "known_human"
+        );
+        assert_eq!(
+            debug_entries[0]["previousCheckpoint"]["knownHumanMetadata"]["editor"],
+            "vscode"
+        );
+    }
+
+    #[test]
+    fn test_agent_debug_entry_includes_known_human_metadata_values() {
+        let mut agent_run_result = test_agent_run_result(
+            CheckpointKind::KnownHuman,
+            Some(vec!["src/demo.rs"]),
+            None,
+            None,
+        );
+        agent_run_result.agent_id.tool = "known_human".to_string();
+        agent_run_result.agent_metadata = Some(HashMap::from([
+            ("kh_editor".to_string(), "vscode".to_string()),
+            ("kh_editor_version".to_string(), "1.99.0".to_string()),
+            ("kh_extension_version".to_string(), "2.0.9".to_string()),
+        ]));
+
+        let debug_entry = agent_debug_entry(Some(&agent_run_result)).unwrap();
+
+        assert_eq!(debug_entry["tool"], "known_human");
+        assert_eq!(debug_entry["knownHumanMetadata"]["editor"], "vscode");
+        assert_eq!(
+            debug_entry["knownHumanMetadata"]["extensionVersion"],
+            "2.0.9"
+        );
+        assert_eq!(debug_entry["editedFilepathsSample"][0], "src/demo.rs");
     }
 
     #[test]
