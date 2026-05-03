@@ -1,0 +1,24 @@
+install.ps1
+  16cdf5490fecfa3c 104-105,107,109
+---
+{
+  "schema_version": "authorship/3.1.0",
+  "git_ai_version": "2.0.4",
+  "x_user_id": "108",
+  "base_commit_sha": "ab071e87e46ec1f6b581283995ac79910bf2db1a",
+  "prompts": {
+    "16cdf5490fecfa3c": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "5e23c044-15b3-40cf-a386-8f3c73e969a6",
+        "model": "copilot/gpt-5.4"
+      },
+      "human_author": "gaoang",
+      "messages": [],
+      "total_additions": 8,
+      "total_deletions": 8,
+      "accepted_lines": 651,
+      "overriden_lines": 0
+    }
+  }
+}

@@ -1,0 +1,15 @@
+.github/workflows/release.yml
+  h_602db118073c06 426,434,441,447,476,486
+---
+{
+  "schema_version": "authorship/3.1.0",
+  "git_ai_version": "development:1.3.5",
+  "x_user_id": "108",
+  "base_commit_sha": "bcf2155490013f2e0badbc4d2496ed645865fe16",
+  "prompts": {},
+  "humans": {
+    "h_602db118073c06": {
+      "author": "gaoang"
+    }
+  }
+}

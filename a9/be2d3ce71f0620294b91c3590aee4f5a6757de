@@ -1,0 +1,17 @@
+flake.nix
+  h_602db118073c06 39
+Cargo.toml
+  h_602db118073c06 3
+---
+{
+  "schema_version": "authorship/3.1.0",
+  "git_ai_version": "development:2.0.7",
+  "x_user_id": "108",
+  "base_commit_sha": "a9be2d3ce71f0620294b91c3590aee4f5a6757de",
+  "prompts": {},
+  "humans": {
+    "h_602db118073c06": {
+      "author": "gaoang"
+    }
+  }
+}

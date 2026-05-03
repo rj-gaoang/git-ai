@@ -1,0 +1,35 @@
+src/daemon.rs
+  h_602db118073c06 86,220-224,251-290,335-341
+src/commands/install_hooks.rs
+  h_602db118073c06 1103-1135
+  12ec1409edf255cf 10,208-240,242-255,264,277-285,289
+src/commands/daemon.rs
+  h_602db118073c06 125,209,246,248,255,257-260,262,265-266,277,282-293,296-306,308-313,654-660,790-793,795
+  12ec1409edf255cf 294-295
+---
+{
+  "schema_version": "authorship/3.1.0",
+  "git_ai_version": "2.0.8",
+  "x_user_id": "108",
+  "base_commit_sha": "eab002d91fd52cf326bb04b064b9776b3833b8f5",
+  "prompts": {
+    "12ec1409edf255cf": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "943cc490-bbc0-4f90-8bf5-3383c5a602f2",
+        "model": "copilot/gpt-5.4"
+      },
+      "human_author": "gaoang",
+      "messages": [],
+      "total_additions": 8,
+      "total_deletions": 12,
+      "accepted_lines": 1211,
+      "overriden_lines": 0
+    }
+  },
+  "humans": {
+    "h_602db118073c06": {
+      "author": "gaoang"
+    }
+  }
+}

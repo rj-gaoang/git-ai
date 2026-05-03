@@ -1,0 +1,51 @@
+tests/integration/main.rs
+  81c04e2faeb93d7b 48
+src/authorship/post_commit.rs
+  81c04e2faeb93d7b 331-340
+src/authorship/attribution_tracker.rs
+  81c04e2faeb93d7b 11,900,904-915,957,1003-1004,1021,1075,1091,1101-1109,1111-1113,1125-1128,1151,1156-1162,1928-2046,2897-2981
+src/integration/ide_mcp.rs
+  81c04e2faeb93d7b 50-54,69-72,102-106,329-332,351
+src/integration/upload_stats.rs
+  81c04e2faeb93d7b 1-611
+src/git/authorship_traversal.rs
+  81c04e2faeb93d7b 3
+src/feature_flags.rs
+  h_602db118073c06 62,138-139,149-150,260-261,282-283
+  81c04e2faeb93d7b 61
+tests/integration/format_only_attribution.rs
+  81c04e2faeb93d7b 1-168
+tests/integration/performance.rs
+  81c04e2faeb93d7b 25
+  h_602db118073c06 26
+src/git/refs.rs
+  81c04e2faeb93d7b 2
+src/integration/mod.rs
+  81c04e2faeb93d7b 1-2
+---
+{
+  "schema_version": "authorship/3.1.0",
+  "git_ai_version": "development:1.3.3",
+  "x_user_id": "108",
+  "base_commit_sha": "bdd8be8fa6a2b531ee961422cf08f453450f076c",
+  "prompts": {
+    "81c04e2faeb93d7b": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "37feb803-d98a-485e-b689-6f8a808ffa8c",
+        "model": "copilot/claude-opus-4.7"
+      },
+      "human_author": "gaoang <gaoang@ruijie.com.cn>",
+      "messages": [],
+      "total_additions": 245,
+      "total_deletions": 42,
+      "accepted_lines": 6153,
+      "overriden_lines": 0
+    }
+  },
+  "humans": {
+    "h_602db118073c06": {
+      "author": "gaoang"
+    }
+  }
+}
