@@ -1,0 +1,31 @@
+src/commands/checkpoint.rs
+  h_c122390aeb95ca 99-100,1818-1819,1826-1828,1940-1989,1991-1992,2002,2020-2024,2038,2051-2057,3384-3444
+docs/design-doc/git-ai看板方案.md
+  96e6006e1e5f0855 2632
+---
+{
+  "schema_version": "authorship/3.1.0",
+  "git_ai_version": "2.0.15",
+  "x_user_id": "108",
+  "base_commit_sha": "457bb82a2e8db1606e8b57f1a6f0b11e12026b2a",
+  "prompts": {
+    "96e6006e1e5f0855": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "c6a1eca2-8f6f-460a-99cd-3c1e523c21b4",
+        "model": "copilot/gpt-5.4"
+      },
+      "human_author": "shunfei",
+      "messages": [],
+      "total_additions": 5,
+      "total_deletions": 1,
+      "accepted_lines": 1,
+      "overriden_lines": 0
+    }
+  },
+  "humans": {
+    "h_c122390aeb95ca": {
+      "author": "shunfei"
+    }
+  }
+}
