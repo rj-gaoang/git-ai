@@ -1,0 +1,10 @@
+docs/design-doc/git-ai看板方案.md
+  h_c122390aeb95ca 51
+---
+{
+  "schema_version": "authorship/3.1.0",
+  "git_ai_version": "2.0.13",
+  "x_user_id": "108",
+  "base_commit_sha": "dbb7ad112f8ddd4bac9a99bd0d5c40644e38cac6",
+  "prompts": {}
+}
