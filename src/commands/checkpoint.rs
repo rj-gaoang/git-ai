@@ -571,6 +571,7 @@ fn resolve_explicit_path_execution(
     ts: u128,
     explicit_paths: &[String],
     ignore_matcher: &IgnoreMatcher,
+    explicit_path_role: PreparedPathRole,
     kind: CheckpointKind,
     is_pre_commit: bool,
 ) -> Result<Option<ResolvedCheckpointExecution>, GitAiError> {
@@ -636,7 +637,7 @@ fn resolve_explicit_path_execution(
         .into_iter()
         .map(|entry| (entry.path.clone(), entry))
         .collect::<HashMap<_, _>>();
-    let preserve_unchanged_explicit_paths = kind == CheckpointKind::Human && is_pre_commit;
+    let preserve_unchanged_explicit_paths = explicit_path_role == PreparedPathRole::WillEdit;
 
     let mut files = Vec::new();
     let mut resolved_dirty_files = HashMap::new();
@@ -893,6 +894,9 @@ fn resolve_live_checkpoint_execution(
                 ts,
                 explicit_paths,
                 &ignore_matcher,
+                explicit_capture_target_paths(kind, agent_run_result)
+                    .map(|(role, _)| role)
+                    .expect("explicit path execution requires an explicit path role"),
                 kind,
                 is_pre_commit,
             )
@@ -3133,6 +3137,87 @@ mod tests {
         assert_eq!(
             explicit_capture_target_paths(CheckpointKind::AiAgent, Some(&ai_result)),
             None
+        );
+    }
+
+    #[test]
+    fn test_resolve_explicit_path_execution_keeps_clean_text_for_will_edit_scope() {
+        let repo = TmpRepo::new().unwrap();
+        repo.write_file("simple.txt", "one\n", true).unwrap();
+        repo.commit_with_message("base commit").unwrap();
+
+        let gitai_repo = crate::git::repository::find_repository_in_path(
+            repo.path().to_str().unwrap(),
+        )
+        .expect("Repository should exist");
+        let base_commit = gitai_repo
+            .head()
+            .ok()
+            .and_then(|head| head.target().ok())
+            .unwrap_or_else(|| "initial".to_string());
+        let working_log = gitai_repo
+            .storage
+            .working_log_for_base_commit(&base_commit)
+            .unwrap();
+        let ignore_patterns = effective_ignore_patterns(&gitai_repo, &[], &[]);
+        let ignore_matcher = build_ignore_matcher(&ignore_patterns);
+
+        let resolved = resolve_explicit_path_execution(
+            &gitai_repo,
+            &working_log,
+            &base_commit,
+            1,
+            &["simple.txt".to_string()],
+            &ignore_matcher,
+            PreparedPathRole::WillEdit,
+            CheckpointKind::Human,
+            false,
+        )
+        .unwrap()
+        .expect("will_edit scoped checkpoints should keep clean text files as baseline");
+
+        assert_eq!(resolved.files, vec!["simple.txt".to_string()]);
+        assert!(resolved.dirty_files.is_empty());
+    }
+
+    #[test]
+    fn test_resolve_explicit_path_execution_still_drops_clean_text_for_edited_scope() {
+        let repo = TmpRepo::new().unwrap();
+        repo.write_file("simple.txt", "one\n", true).unwrap();
+        repo.commit_with_message("base commit").unwrap();
+
+        let gitai_repo = crate::git::repository::find_repository_in_path(
+            repo.path().to_str().unwrap(),
+        )
+        .expect("Repository should exist");
+        let base_commit = gitai_repo
+            .head()
+            .ok()
+            .and_then(|head| head.target().ok())
+            .unwrap_or_else(|| "initial".to_string());
+        let working_log = gitai_repo
+            .storage
+            .working_log_for_base_commit(&base_commit)
+            .unwrap();
+        let ignore_patterns = effective_ignore_patterns(&gitai_repo, &[], &[]);
+        let ignore_matcher = build_ignore_matcher(&ignore_patterns);
+
+        let resolved = resolve_explicit_path_execution(
+            &gitai_repo,
+            &working_log,
+            &base_commit,
+            1,
+            &["simple.txt".to_string()],
+            &ignore_matcher,
+            PreparedPathRole::Edited,
+            CheckpointKind::AiAgent,
+            false,
+        )
+        .unwrap();
+
+        assert!(
+            resolved.is_none(),
+            "edited scoped checkpoints should still require dirty state or an explicit snapshot"
         );
     }
 
