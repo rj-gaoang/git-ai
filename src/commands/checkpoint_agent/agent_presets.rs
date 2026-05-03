@@ -226,6 +226,56 @@ mod tests {
     }
 
     #[test]
+    fn test_github_copilot_native_hook_fallback_accepts_vscode_suffix_tool_use_id() {
+        let temp = tempfile::tempdir().unwrap();
+        let cwd = temp.path().join("repo");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let transcript_dir = temp
+            .path()
+            .join("workspaceStorage")
+            .join("abc")
+            .join("GitHub.copilot-chat")
+            .join("transcripts");
+        std::fs::create_dir_all(&transcript_dir).unwrap();
+        let transcript_path = transcript_dir.join("session.jsonl");
+        let transcript = r#"{"type":"session.start","data":{"sessionId":"session-1","producer":"copilot-agent"}}
+{"type":"assistant.message","data":{"toolRequests":[{"toolCallId":"call_exact","name":"apply_patch","arguments":"{\"input\":\"*** Begin Patch\\n*** Update File: src/main.rs\\n+fn main() {}\\n*** End Patch\"}"}]}}
+{"type":"tool.execution_start","data":{"toolCallId":"call_exact","toolName":"apply_patch","arguments":{"input":"..."}}}
+"#;
+        std::fs::write(&transcript_path, transcript).unwrap();
+
+        let hook_input = serde_json::json!({
+            "hook_event_name": "PostToolUse",
+            "cwd": cwd.to_string_lossy(),
+            "session_id": "session-1",
+            "tool_name": "apply_patch",
+            "tool_use_id": "call_exact__vscode-1777821655374",
+            "transcript_path": transcript_path.to_string_lossy(),
+            "tool_input": "...",
+            "tool_response": ""
+        })
+        .to_string();
+
+        let result = GithubCopilotPreset
+            .run(AgentCheckpointFlags {
+                hook_input: Some(hook_input),
+            })
+            .expect("VS Code suffixed tool_use_id should still match the exact transcript tool call");
+
+        let expected = cwd.join("src/main.rs").to_string_lossy().replace('\\', "/");
+        assert_eq!(result.edited_filepaths, Some(vec![expected]));
+        assert_eq!(result.checkpoint_kind, CheckpointKind::AiAgent);
+    }
+
+    #[test]
+    fn test_copilot_tool_call_id_matches_keeps_distinct_vscode_suffix_ids_distinct() {
+        assert!(!GithubCopilotPreset::copilot_tool_call_id_matches(
+            "call_exact__vscode-1",
+            "call_exact__vscode-2",
+        ));
+    }
+
+    #[test]
     fn test_github_copilot_native_hook_fallback_ignores_other_tool_calls() {
         let temp = tempfile::tempdir().unwrap();
         let cwd = temp.path().join("repo");
@@ -3411,6 +3461,33 @@ impl GithubCopilotPreset {
         Vec::new()
     }
 
+    fn copilot_tool_call_id_matches(candidate_id: &str, tool_use_id: &str) -> bool {
+        if candidate_id == tool_use_id {
+            return true;
+        }
+
+        let normalized_tool_use_id = Self::strip_vscode_tool_call_suffix(tool_use_id);
+        if normalized_tool_use_id != tool_use_id && candidate_id == normalized_tool_use_id {
+            return true;
+        }
+
+        let normalized_candidate_id = Self::strip_vscode_tool_call_suffix(candidate_id);
+        normalized_candidate_id != candidate_id && normalized_candidate_id == tool_use_id
+    }
+
+    fn strip_vscode_tool_call_suffix(id: &str) -> &str {
+        match id.rsplit_once("__vscode-") {
+            Some((prefix, suffix))
+                if !prefix.is_empty()
+                    && !suffix.is_empty()
+                    && suffix.chars().all(|ch| ch.is_ascii_digit()) =>
+            {
+                prefix
+            }
+            _ => id,
+        }
+    }
+
     fn extract_filepaths_from_matching_copilot_tool_call(
         value: &serde_json::Value,
         id_keys: &[&str],
@@ -3420,7 +3497,7 @@ impl GithubCopilotPreset {
         cwd: &str,
     ) -> Option<Vec<String>> {
         let id = Self::string_field_from_keys(value, id_keys)?;
-        if id != tool_use_id {
+        if !Self::copilot_tool_call_id_matches(id, tool_use_id) {
             return None;
         }
 
