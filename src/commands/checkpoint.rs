@@ -96,6 +96,8 @@ const AGENT_USAGE_MIN_INTERVAL_SECS: u64 = 150;
 #[cfg(not(any(test, feature = "test-support")))]
 const KNOWN_HUMAN_MIN_SECS_AFTER_AI: u64 = 1;
 
+const AI_RECLAIM_RECENT_KNOWN_HUMAN_SECS: u64 = 10;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PreparedPathRole {
@@ -1813,21 +1815,21 @@ fn working_log_entry_has_non_human_attribution(entry: &WorkingLogEntry) -> bool 
 fn build_previous_file_state_maps(
     previous_checkpoints: &[Checkpoint],
     initial_attributions: &HashMap<String, Vec<LineAttribution>>,
-) -> (HashMap<String, PreviousFileState>, HashSet<String>) {
-    let mut previous_file_state_by_file: HashMap<String, PreviousFileState> = HashMap::new();
+) -> (HashMap<String, Vec<PreviousFileState>>, HashSet<String>) {
+    let mut previous_file_state_by_file: HashMap<String, Vec<PreviousFileState>> =
+        HashMap::new();
     let mut ai_touched_files: HashSet<String> = initial_attributions.keys().cloned().collect();
 
-    // Keep only the latest entry for each file.
     for checkpoint in previous_checkpoints {
         for entry in &checkpoint.entries {
-            previous_file_state_by_file.insert(
-                entry.file.clone(),
-                PreviousFileState {
+            previous_file_state_by_file
+                .entry(entry.file.clone())
+                .or_default()
+                .push(PreviousFileState {
                     blob_sha: entry.blob_sha.clone(),
                     attributions: entry.attributions.clone(),
                     checkpoint: previous_checkpoint_diagnostic(checkpoint, entry),
-                },
-            );
+                });
 
             if checkpoint.kind.is_ai() || working_log_entry_has_non_human_attribution(entry) {
                 ai_touched_files.insert(entry.file.clone());
@@ -1935,6 +1937,61 @@ fn file_checkpoint_root_cause_hint(
     }
 }
 
+fn should_ignore_recent_known_human_for_ai_checkpoint(
+    kind: CheckpointKind,
+    previous_states: &[PreviousFileState],
+    working_log: &PersistedWorkingLog,
+    current_content: &str,
+    ts: u128,
+) -> bool {
+    if !kind.is_ai() {
+        return false;
+    }
+
+    let Some(latest_previous_state) = previous_states.last() else {
+        return false;
+    };
+
+    if latest_previous_state.checkpoint.kind != CheckpointKind::KnownHuman {
+        return false;
+    }
+
+    if latest_previous_state.checkpoint.known_human_editor.is_none() {
+        return false;
+    }
+
+    let latest_previous_content = working_log
+        .get_file_version(&latest_previous_state.blob_sha)
+        .unwrap_or_default();
+    if !content_eq_normalized(current_content, &latest_previous_content) {
+        return false;
+    }
+
+    let now_secs = (ts / 1000) as u64;
+    now_secs.saturating_sub(latest_previous_state.checkpoint.timestamp)
+        <= AI_RECLAIM_RECENT_KNOWN_HUMAN_SECS
+}
+
+fn select_previous_state_for_checkpoint(
+    kind: CheckpointKind,
+    previous_states: &[PreviousFileState],
+    working_log: &PersistedWorkingLog,
+    current_content: &str,
+    ts: u128,
+) -> Option<PreviousFileState> {
+    if should_ignore_recent_known_human_for_ai_checkpoint(
+        kind,
+        previous_states,
+        working_log,
+        current_content,
+        ts,
+    ) {
+        return previous_states.iter().rev().nth(1).cloned();
+    }
+
+    previous_states.last().cloned()
+}
+
 #[allow(clippy::too_many_arguments)]
 fn get_checkpoint_entry_for_file(
     file_path: String,
@@ -1942,7 +1999,7 @@ fn get_checkpoint_entry_for_file(
     is_pre_commit: bool,
     repo: Repository,
     working_log: PersistedWorkingLog,
-    previous_file_state_by_file: Arc<HashMap<String, PreviousFileState>>,
+    previous_file_state_by_file: Arc<HashMap<String, Vec<PreviousFileState>>>,
     ai_touched_files: Arc<HashSet<String>>,
     file_content_hash: String,
     author_id: Arc<String>,
@@ -1960,8 +2017,11 @@ fn get_checkpoint_entry_for_file(
         .cloned()
         .unwrap_or_default();
     let initial_snapshot_content = initial_snapshot_contents.get(&file_path).cloned();
-
-    let previous_state = previous_file_state_by_file.get(&file_path).cloned();
+    let previous_states = previous_file_state_by_file
+        .get(&file_path)
+        .cloned()
+        .unwrap_or_default();
+    let latest_previous_state = previous_states.last().cloned();
     let has_prior_ai_edits = ai_touched_files.contains(&file_path);
 
     // Pre-commit fast path:
@@ -1975,7 +2035,7 @@ fn get_checkpoint_entry_for_file(
                 "skipped",
                 "pre_commit_human_without_prior_ai_or_initial_attribution",
                 kind,
-                previous_state.as_ref(),
+                latest_previous_state.as_ref(),
                 has_prior_ai_edits,
                 initial_attrs_for_file.len(),
                 &file_content_hash,
@@ -1988,6 +2048,13 @@ fn get_checkpoint_entry_for_file(
     let current_content = working_log
         .read_current_file_content(&file_path)
         .unwrap_or_default();
+    let previous_state = select_previous_state_for_checkpoint(
+        kind,
+        &previous_states,
+        &working_log,
+        &current_content,
+        ts,
+    );
 
     // Non-pre-commit fast path:
     // Preserve existing `git-ai checkpoint` behavior for human-only files by writing an
@@ -3312,6 +3379,69 @@ mod tests {
             "2.0.9"
         );
         assert_eq!(debug_entry["editedFilepathsSample"][0], "src/demo.rs");
+    }
+
+    #[test]
+    fn test_ai_checkpoint_reclaims_recent_known_human_file_capture() {
+        let repo = TmpRepo::new().unwrap();
+        repo.write_file("README.md", "base\n", true).unwrap();
+        repo.commit_with_message("base commit").unwrap();
+
+        let file_path = "src/SimpleThirdTest.java";
+        let file_content = "class SimpleThirdTest {}\n";
+        repo.write_file(file_path, file_content, false).unwrap();
+
+        let mut known_human = test_agent_run_result(
+            CheckpointKind::KnownHuman,
+            Some(vec![file_path]),
+            None,
+            Some(HashMap::from([(file_path, file_content)])),
+        );
+        known_human.agent_id.tool = "known_human".to_string();
+        known_human.agent_metadata = Some(HashMap::from([
+            ("kh_editor".to_string(), "vscode".to_string()),
+            ("kh_editor_version".to_string(), "1.118.1".to_string()),
+            ("kh_extension_version".to_string(), "0.1.20".to_string()),
+        ]));
+
+        let known_human_result = repo
+            .trigger_checkpoint_with_agent_result("gaoang", Some(known_human))
+            .unwrap();
+        assert_eq!(known_human_result.0, 1);
+
+        let ai_result = test_agent_run_result(
+            CheckpointKind::AiAgent,
+            Some(vec![file_path]),
+            None,
+            Some(HashMap::from([(file_path, file_content)])),
+        );
+        let ai_checkpoint_result = repo
+            .trigger_checkpoint_with_agent_result("gaoang", Some(ai_result))
+            .unwrap();
+        assert_eq!(
+            ai_checkpoint_result.0, 1,
+            "AI checkpoint should write an entry instead of inheriting a recent KnownHuman save"
+        );
+
+        let gitai_repo = crate::git::repository::find_repository_in_path(
+            repo.path().to_str().unwrap(),
+        )
+        .expect("Repository should exist");
+        let base_commit = gitai_repo
+            .head()
+            .ok()
+            .and_then(|head| head.target().ok())
+            .unwrap_or_else(|| "initial".to_string());
+        let working_log = gitai_repo
+            .storage
+            .working_log_for_base_commit(&base_commit)
+            .unwrap();
+        let checkpoints = working_log.read_all_checkpoints().unwrap();
+        let latest = checkpoints.last().unwrap();
+
+        assert!(latest.kind.is_ai());
+        assert_eq!(latest.entries.len(), 1);
+        assert_eq!(latest.entries[0].file, file_path);
     }
 
     #[test]
