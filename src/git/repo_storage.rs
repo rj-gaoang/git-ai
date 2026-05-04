@@ -391,58 +391,8 @@ impl PersistedWorkingLog {
         // Read existing checkpoints
         let mut checkpoints = self.read_all_checkpoints().unwrap_or_default();
 
-        // Create a copy, potentially without transcript to reduce storage size.
-        // Transcripts are refetched in update_prompts_to_latest() before post-commit
-        // using tool-specific sources (transcript_path for Claude, cursor_db_path for Cursor, etc.)
-        //
-        // Tools that DON'T support refetch (transcript must be kept):
-        // - "mock_ai" - test preset, transcript not stored externally
-        // - Any other agent-v1 custom tools (detected by lack of tool-specific metadata)
-        let mut storage_checkpoint = checkpoint.clone();
-        let tool = checkpoint
-            .agent_id
-            .as_ref()
-            .map(|a| a.tool.as_str())
-            .unwrap_or("");
-        let metadata = &checkpoint.agent_metadata;
-
-        // Blacklist: tools that cannot refetch transcripts
-        let cannot_refetch = match tool {
-            "mock_ai" => true,
-            // human checkpoints have no transcript anyway
-            "human" => false,
-            // For other tools, check if they have the necessary metadata for refetching
-            // cursor can always refetch from its database
-            "cursor" => false,
-            // claude, codex, gemini, continue-cli, amp, windsurf, droid need transcript_path
-            "claude" | "codex" | "gemini" | "continue-cli" | "amp" | "windsurf" | "droid" => {
-                metadata
-                    .as_ref()
-                    .and_then(|m| m.get("transcript_path"))
-                    .is_none()
-            }
-            // opencode can always refetch from its session storage
-            "opencode" => false,
-            // pi needs session_path metadata for prompt refresh
-            "pi" => metadata
-                .as_ref()
-                .and_then(|m| m.get("session_path"))
-                .is_none(),
-            // github-copilot needs chat_session_path
-            "github-copilot" => metadata
-                .as_ref()
-                .and_then(|m| m.get("chat_session_path"))
-                .is_none(),
-            // Unknown tools (like custom agent-v1 tools) can't refetch
-            _ => true,
-        };
-
-        if !cannot_refetch {
-            storage_checkpoint.transcript = None;
-        }
-
         // Add the new checkpoint
-        checkpoints.push(storage_checkpoint);
+        checkpoints.push(checkpoint.clone());
 
         // Prune char-level attributions from older checkpoints for the same files
         // Only the most recent checkpoint per file needs char-level precision
@@ -771,7 +721,7 @@ impl PersistedWorkingLog {
 #[cfg(test)]
 mod tests {
 
-    use crate::authorship::transcript::AiTranscript;
+    use crate::authorship::transcript::{AiTranscript, Message};
     use crate::authorship::working_log::AgentId;
     use crate::git::test_utils::TmpRepo;
 
@@ -1201,7 +1151,7 @@ mod tests {
     }
 
     #[test]
-    fn test_pi_transcript_refetch_requires_session_path_metadata() {
+    fn test_refetchable_ai_checkpoints_keep_inline_transcript_snapshots() {
         let tmp_repo = TmpRepo::new().expect("Failed to create tmp repo");
         let repo_storage =
             RepoStorage::for_repo_path(tmp_repo.repo().path(), tmp_repo.repo().workdir().unwrap())
@@ -1221,7 +1171,9 @@ mod tests {
             id: "session-1".to_string(),
             model: "anthropic/claude-sonnet-4-5".to_string(),
         });
-        checkpoint_with_session_path.transcript = Some(AiTranscript::new());
+        checkpoint_with_session_path.transcript = Some(AiTranscript {
+            messages: vec![Message::user("pi prompt".to_string(), None)],
+        });
         checkpoint_with_session_path.agent_metadata = Some(HashMap::from([(
             "session_path".to_string(),
             "/tmp/pi-session.jsonl".to_string(),
@@ -1235,34 +1187,53 @@ mod tests {
             .read_all_checkpoints()
             .expect("read checkpoints with session_path");
         assert!(
-            checkpoints[0].transcript.is_none(),
-            "Pi checkpoints with session_path should drop inline transcript"
+            checkpoints[0].transcript.is_some(),
+            "Pi checkpoints with session_path should keep inline transcript snapshots"
+        );
+        assert_eq!(
+            checkpoints[0].transcript,
+            checkpoint_with_session_path.transcript,
+            "Pi checkpoint transcript snapshot should round-trip through storage"
         );
 
-        let mut checkpoint_without_session_path = Checkpoint::new(
+        let mut checkpoint_with_chat_session_path = Checkpoint::new(
             CheckpointKind::AiAgent,
             "diff-2".to_string(),
             "author".to_string(),
             vec![],
         );
-        checkpoint_without_session_path.agent_id = Some(AgentId {
-            tool: "pi".to_string(),
+        checkpoint_with_chat_session_path.agent_id = Some(AgentId {
+            tool: "github-copilot".to_string(),
             id: "session-2".to_string(),
-            model: "anthropic/claude-sonnet-4-5".to_string(),
+            model: "gpt-5.4".to_string(),
         });
-        checkpoint_without_session_path.transcript = Some(AiTranscript::new());
-        checkpoint_without_session_path.agent_metadata = Some(HashMap::new());
+        checkpoint_with_chat_session_path.transcript = Some(AiTranscript {
+            messages: vec![
+                Message::user("first prompt".to_string(), None),
+                Message::assistant("assistant reply".to_string(), None),
+                Message::user("second prompt".to_string(), None),
+            ],
+        });
+        checkpoint_with_chat_session_path.agent_metadata = Some(HashMap::from([(
+            "chat_session_path".to_string(),
+            "/tmp/copilot-session.json".to_string(),
+        )]));
 
         working_log
-            .append_checkpoint(&checkpoint_without_session_path)
-            .expect("append checkpoint without session_path");
+            .append_checkpoint(&checkpoint_with_chat_session_path)
+            .expect("append checkpoint with chat_session_path");
 
         let checkpoints = working_log
             .read_all_checkpoints()
-            .expect("read checkpoints without session_path");
+            .expect("read checkpoints with chat_session_path");
         assert!(
             checkpoints[1].transcript.is_some(),
-            "Pi checkpoints without session_path should keep inline transcript"
+            "GitHub Copilot checkpoints with chat_session_path should keep inline transcript snapshots"
+        );
+        assert_eq!(
+            checkpoints[1].transcript,
+            checkpoint_with_chat_session_path.transcript,
+            "GitHub Copilot checkpoint transcript snapshot should round-trip through storage"
         );
     }
 
