@@ -1568,11 +1568,37 @@ mod tests {
         assert_eq!(stats_filtered.git_diff_added_lines, 1);
         assert_eq!(stats_filtered.ai_additions, 1);
     }
+
+    fn seed_repo_for_added_lines(added_lines_by_file: &HashMap<String, Vec<u32>>) -> (TmpRepo, String) {
+        let tmp_repo = TmpRepo::new().unwrap();
+
+        if added_lines_by_file.is_empty() {
+            tmp_repo.write_file("seed.txt", "seed\n", true).unwrap();
+        } else {
+            for (file_path, added_lines) in added_lines_by_file {
+                let line_count = added_lines.iter().copied().max().unwrap_or(1);
+                let mut content = String::new();
+
+                for line_number in 1..=line_count {
+                    content.push_str(&format!("line {line_number}\n"));
+                }
+
+                tmp_repo.write_file(file_path, &content, true).unwrap();
+            }
+        }
+
+        tmp_repo.commit_with_message("Seed repo").unwrap();
+        let head_sha = tmp_repo.get_head_commit_sha().unwrap();
+
+        (tmp_repo, head_sha)
+    }
+
     #[test]
     fn test_accepted_lines_no_authorship_log() {
         let added_lines: HashMap<String, Vec<u32>> = HashMap::new();
+        let (tmp_repo, head_sha) = seed_repo_for_added_lines(&added_lines);
         let (accepted, known_human, per_tool) =
-            accepted_lines_from_attestations(None, &added_lines, false);
+            accepted_lines_from_attestations(tmp_repo.gitai_repo(), &head_sha, None, &added_lines, false);
         assert_eq!(accepted, 0);
         assert_eq!(known_human, 0);
         assert!(per_tool.is_empty());
@@ -1619,9 +1645,16 @@ mod tests {
 
         let mut added_lines: HashMap<String, Vec<u32>> = HashMap::new();
         added_lines.insert("foo.rs".to_string(), vec![1, 2, 3]);
+        let (tmp_repo, head_sha) = seed_repo_for_added_lines(&added_lines);
 
         let (accepted, known_human, per_tool) =
-            accepted_lines_from_attestations(Some(&log), &added_lines, true);
+            accepted_lines_from_attestations(
+                tmp_repo.gitai_repo(),
+                &head_sha,
+                Some(&log),
+                &added_lines,
+                true,
+            );
         assert_eq!(accepted, 0);
         assert_eq!(known_human, 0);
         assert!(per_tool.is_empty());
@@ -1668,9 +1701,16 @@ mod tests {
         // added_lines has "bar.rs" but NOT "foo.rs"
         let mut added_lines: HashMap<String, Vec<u32>> = HashMap::new();
         added_lines.insert("bar.rs".to_string(), vec![1, 2, 3]);
+        let (tmp_repo, head_sha) = seed_repo_for_added_lines(&added_lines);
 
         let (accepted, known_human, per_tool) =
-            accepted_lines_from_attestations(Some(&log), &added_lines, false);
+            accepted_lines_from_attestations(
+                tmp_repo.gitai_repo(),
+                &head_sha,
+                Some(&log),
+                &added_lines,
+                false,
+            );
         assert_eq!(accepted, 0);
         assert_eq!(known_human, 0);
         assert!(per_tool.is_empty());
@@ -1716,9 +1756,16 @@ mod tests {
 
         let mut added_lines: HashMap<String, Vec<u32>> = HashMap::new();
         added_lines.insert("foo.rs".to_string(), vec![1, 2, 3]);
+        let (tmp_repo, head_sha) = seed_repo_for_added_lines(&added_lines);
 
         let (accepted, known_human, per_tool) =
-            accepted_lines_from_attestations(Some(&log), &added_lines, false);
+            accepted_lines_from_attestations(
+                tmp_repo.gitai_repo(),
+                &head_sha,
+                Some(&log),
+                &added_lines,
+                false,
+            );
         assert_eq!(accepted, 3);
         assert_eq!(known_human, 0);
 

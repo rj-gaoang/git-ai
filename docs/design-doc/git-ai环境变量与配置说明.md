@@ -73,6 +73,26 @@ tail -n 50 ~/.git-ai/logs/debug.jsonl
 
 当前 `debug.jsonl` 默认开启。每条日志都会包含 `timestampMs` 和人类可读的北京时间 `timestamp`（固定 `UTC+08:00`，例如 `2026-05-04T22:31:45.123+08:00`）。其中 `timestampMs` 仍然是 Unix epoch 毫秒值，便于机器排序和跨时区比对。当文件超过 2GB 时，`git-ai` 会尽力只保留最近约 512MB 内容后继续写入，避免无限占用用户磁盘。日志写入失败、裁剪失败都不会阻断 commit、stats 或上传主流程。
 
+### 5. 查看 Windows Rust 工具链当前命中的是哪一套
+
+PowerShell：
+
+```powershell
+cargo -vV
+rustc -vV
+Get-Command cargo
+Get-Command rustc
+Get-Command x86_64-w64-mingw32-gcc
+```
+
+重点看两件事：
+
+1. `cargo -vV` / `rustc -vV` 里的 `host`。
+2. `Get-Command` 命中的实际路径。
+
+如果当前显示的是 `host: x86_64-pc-windows-gnullvm`，通常说明你已经走到 LLVM Rust。  
+如果显示的是 `host: x86_64-pc-windows-gnu`，并且 `x86_64-w64-mingw32-gcc` 命中的是旧 `D:\MinGW\mingw64\bin`，那就很容易在链接阶段遇到 `_Unwind_Resume` / `_GCC_specific_handler`。
+
 ## 三、怎么设置变量
 
 ### 1. 只对当前 PowerShell 窗口生效
@@ -235,3 +255,22 @@ git-ai --version
 ```
 
 确认当前命中的 binary 路径、版本，以及安装脚本是否被 release/tag/local binary 覆盖。
+
+### Rust Windows 链接失败
+
+```powershell
+cargo -vV
+rustc -vV
+Get-Command cargo
+Get-Command rustc
+Get-Command x86_64-w64-mingw32-gcc
+```
+
+如果报的是 `_Unwind_Resume`、`_GCC_specific_handler` 这类符号，先不要急着怀疑业务代码，优先确认是不是命中了 `windows-gnu` + 旧 MinGW runtime 组合。
+
+当前仓库已经在 `git-ai/.vscode/settings.json` 里，为新开的 VS Code 终端和 rust-analyzer 的 cargo/check 默认前置了 `Rust stable LLVM 1.95` 与 LLVM-MinGW 路径。实际排查中，这个设置已经让 `cargo test debug_timestamp_uses_beijing_time --lib` 从 GNU 链接失败恢复到正常执行并通过。
+
+注意两点：
+
+1. 修改 `.vscode/settings.json` 后，需要新开一个终端，旧终端不会自动切换 PATH。
+2. LLVM-MinGW 是通过 WinGet 安装到带版本号的目录里的；如果后面升级到了新的版本目录，需要同步更新 `.vscode/settings.json` 里的那段路径。

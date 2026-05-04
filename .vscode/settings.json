@@ -1,5 +1,14 @@
 {
     "cursorGitAi.enableCheckpointLogging": false,
     "cursor.composer.shouldChimeAfterChatFinishes": false,
-    "editor.accessibilitySupport": "off"
+    "editor.accessibilitySupport": "off",
+    "terminal.integrated.env.windows": {
+        "PATH": "${env:ProgramFiles}\\Rust stable LLVM 1.95\\bin;${env:LOCALAPPDATA}\\Microsoft\\WinGet\\Packages\\MartinStorsjo.LLVM-MinGW.MSVCRT_Microsoft.Winget.Source_8wekyb3d8bbwe\\llvm-mingw-20260421-msvcrt-x86_64\\bin;${env:PATH}"
+    },
+    "rust-analyzer.cargo.extraEnv": {
+        "PATH": "${env:ProgramFiles}\\Rust stable LLVM 1.95\\bin;${env:LOCALAPPDATA}\\Microsoft\\WinGet\\Packages\\MartinStorsjo.LLVM-MinGW.MSVCRT_Microsoft.Winget.Source_8wekyb3d8bbwe\\llvm-mingw-20260421-msvcrt-x86_64\\bin;${env:PATH}"
+    },
+    "rust-analyzer.check.extraEnv": {
+        "PATH": "${env:ProgramFiles}\\Rust stable LLVM 1.95\\bin;${env:LOCALAPPDATA}\\Microsoft\\WinGet\\Packages\\MartinStorsjo.LLVM-MinGW.MSVCRT_Microsoft.Winget.Source_8wekyb3d8bbwe\\llvm-mingw-20260421-msvcrt-x86_64\\bin;${env:PATH}"
+    }
 }
