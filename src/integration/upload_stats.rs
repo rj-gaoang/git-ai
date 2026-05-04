@@ -1119,6 +1119,8 @@ fn line_range_count(range: &LineRange) -> u32 {
 
 fn git_diff_tree_numstat(workdir: &Path, commit_sha: &str) -> Vec<(String, u32, u32)> {
     let output = std::process::Command::new("git")
+        .arg("-c")
+        .arg("core.quotepath=false")
         .arg("-C")
         .arg(workdir)
         .args(["diff-tree", "--no-commit-id", "--numstat", "-r", commit_sha])
@@ -1257,6 +1259,8 @@ mod tests {
     use super::*;
     use crate::authorship::working_log::AgentId;
     use std::collections::HashMap;
+    use std::fs;
+    use std::process::Command;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex, MutexGuard, mpsc};
     use std::time::Duration;
@@ -1504,6 +1508,74 @@ mod tests {
             .recv_timeout(Duration::from_secs(1))
             .expect("background upload task should complete");
         assert!(ran.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn git_diff_tree_numstat_returns_unquoted_utf8_paths() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo_path = temp.path();
+
+        run_git(repo_path, &["init"]);
+        run_git(repo_path, &["config", "user.name", "Test User"]);
+        run_git(repo_path, &["config", "user.email", "test@example.com"]);
+        run_git(repo_path, &["config", "core.autocrlf", "false"]);
+
+        let seed_file = repo_path.join("README.md");
+        fs::write(&seed_file, "seed\n").expect("write seed file");
+        run_git(repo_path, &["add", "README.md"]);
+        run_git(repo_path, &["commit", "-m", "seed repo"]);
+
+        let file_path = repo_path
+            .join("docs")
+            .join("design-doc")
+            .join("git-ai环境变量与配置说明.md");
+        fs::create_dir_all(file_path.parent().expect("parent dir")).expect("create dir tree");
+        fs::write(&file_path, "line 1\nline 2\n").expect("write utf8 file");
+
+        run_git(repo_path, &["add", "."]);
+        run_git(repo_path, &["commit", "-m", "add utf8 file"]);
+
+        let commit_sha = git_stdout(repo_path, &["rev-parse", "HEAD"]);
+        let numstat = git_diff_tree_numstat(repo_path, commit_sha.trim());
+
+        assert_eq!(numstat.len(), 1);
+        assert_eq!(numstat[0].0, "docs/design-doc/git-ai环境变量与配置说明.md");
+        assert_eq!(numstat[0].1, 2);
+        assert_eq!(numstat[0].2, 0);
+    }
+
+    fn run_git(repo_path: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(repo_path)
+            .args(args)
+            .output()
+            .expect("run git command");
+
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn git_stdout(repo_path: &Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(repo_path)
+            .args(args)
+            .output()
+            .expect("run git command");
+
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        String::from_utf8(output.stdout).expect("git stdout should be utf8")
     }
 
     /// Serialize and restore upload-related env vars so URL resolution tests do
