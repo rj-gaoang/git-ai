@@ -1813,6 +1813,7 @@ fn working_log_entry_has_non_human_attribution(entry: &WorkingLogEntry) -> bool 
 }
 
 fn build_previous_file_state_maps(
+    working_log: &PersistedWorkingLog,
     previous_checkpoints: &[Checkpoint],
     initial_attributions: &HashMap<String, Vec<LineAttribution>>,
 ) -> (HashMap<String, Vec<PreviousFileState>>, HashSet<String>) {
@@ -1821,12 +1822,29 @@ fn build_previous_file_state_maps(
 
     for checkpoint in previous_checkpoints {
         for entry in &checkpoint.entries {
+            let entry_attributions = if entry.attributions.is_empty()
+                && !entry.line_attributions.is_empty()
+            {
+                working_log
+                    .get_file_version(&entry.blob_sha)
+                    .map(|content| {
+                        crate::authorship::attribution_tracker::line_attributions_to_attributions(
+                            &entry.line_attributions,
+                            &content,
+                            u128::from(checkpoint.timestamp) * 1000,
+                        )
+                    })
+                    .unwrap_or_default()
+            } else {
+                entry.attributions.clone()
+            };
+
             previous_file_state_by_file
                 .entry(entry.file.clone())
                 .or_default()
                 .push(PreviousFileState {
                     blob_sha: entry.blob_sha.clone(),
-                    attributions: entry.attributions.clone(),
+                    attributions: entry_attributions,
                     checkpoint: previous_checkpoint_diagnostic(checkpoint, entry),
                 });
 
@@ -2404,7 +2422,7 @@ async fn get_checkpoint_entries(
 
     let precompute_start = Instant::now();
     let (previous_file_state_by_file, ai_touched_files) =
-        build_previous_file_state_maps(previous_checkpoints, &initial_attributions);
+        build_previous_file_state_maps(working_log, previous_checkpoints, &initial_attributions);
     tracing::debug!(
         "[BENCHMARK] Precomputing previous state maps took {:?}",
         precompute_start.elapsed()
@@ -3442,6 +3460,125 @@ mod tests {
         assert!(latest.kind.is_ai());
         assert_eq!(latest.entries.len(), 1);
         assert_eq!(latest.entries[0].file, file_path);
+    }
+
+    #[test]
+    fn test_ai_follow_up_checkpoint_preserves_previous_ai_ranges() {
+        let repo = TmpRepo::new().unwrap();
+        repo.write_file("README.md", "base\n", true).unwrap();
+        repo.commit_with_message("base commit").unwrap();
+
+        let file_path = "src/generated_suite.rs";
+        let mut generated_block = String::from("fn generated_suite() {\n");
+        for case_index in 0..40 {
+            generated_block.push_str(&format!(
+                "    assert_generated_case({}, \"case-{}\");\n",
+                case_index, case_index
+            ));
+        }
+        generated_block.push_str("}\n");
+
+        let ai_big_content = format!(
+            "fn keep_header() {{\n    println!(\"header\");\n}}\n\n{}\nfn keep_footer() {{\n    println!(\"footer\");\n}}\n",
+            generated_block.trim_end()
+        );
+        let ai_small_content = ai_big_content
+            .replace(
+                "    assert_generated_case(19, \"case-19\");",
+                "    assert_generated_case(19, \"case-19-follow-up\");",
+            )
+            .replace(
+                "    assert_generated_case(20, \"case-20\");",
+                "    assert_generated_case(20, \"case-20-follow-up\");",
+            );
+
+        repo.write_file(file_path, &ai_big_content, false).unwrap();
+
+        let mut known_human_big = test_agent_run_result(
+            CheckpointKind::KnownHuman,
+            Some(vec![file_path]),
+            None,
+            Some(HashMap::from([(file_path, ai_big_content.as_str())])),
+        );
+        known_human_big.agent_id.tool = "known_human".to_string();
+        known_human_big.agent_metadata = Some(HashMap::from([
+            ("kh_editor".to_string(), "vscode".to_string()),
+            ("kh_editor_version".to_string(), "1.118.1".to_string()),
+            ("kh_extension_version".to_string(), "0.1.20".to_string()),
+        ]));
+        repo.trigger_checkpoint_with_agent_result("gaoang", Some(known_human_big))
+            .unwrap();
+
+        let mut ai_big = test_agent_run_result(
+            CheckpointKind::AiAgent,
+            Some(vec![file_path]),
+            None,
+            Some(HashMap::from([(file_path, ai_big_content.as_str())])),
+        );
+        ai_big.agent_id.tool = "github-copilot".to_string();
+        ai_big.agent_id.model = "gpt-5.4".to_string();
+        repo.trigger_checkpoint_with_agent_result("gaoang", Some(ai_big))
+            .unwrap();
+
+        repo.write_file(file_path, &ai_small_content, false).unwrap();
+
+        let mut known_human_small = test_agent_run_result(
+            CheckpointKind::KnownHuman,
+            Some(vec![file_path]),
+            None,
+            Some(HashMap::from([(file_path, ai_small_content.as_str())])),
+        );
+        known_human_small.agent_id.tool = "known_human".to_string();
+        known_human_small.agent_metadata = Some(HashMap::from([
+            ("kh_editor".to_string(), "vscode".to_string()),
+            ("kh_editor_version".to_string(), "1.118.1".to_string()),
+            ("kh_extension_version".to_string(), "0.1.20".to_string()),
+        ]));
+        repo.trigger_checkpoint_with_agent_result("gaoang", Some(known_human_small))
+            .unwrap();
+
+        let mut ai_small = test_agent_run_result(
+            CheckpointKind::AiAgent,
+            Some(vec![file_path]),
+            None,
+            Some(HashMap::from([(file_path, ai_small_content.as_str())])),
+        );
+        ai_small.agent_id.tool = "github-copilot".to_string();
+        ai_small.agent_id.model = "gpt-5.4".to_string();
+        repo.trigger_checkpoint_with_agent_result("gaoang", Some(ai_small))
+            .unwrap();
+
+        let gitai_repo =
+            crate::git::repository::find_repository_in_path(repo.path().to_str().unwrap())
+                .expect("Repository should exist");
+        let base_commit = gitai_repo
+            .head()
+            .ok()
+            .and_then(|head| head.target().ok())
+            .unwrap_or_else(|| "initial".to_string());
+        let working_log = gitai_repo
+            .storage
+            .working_log_for_base_commit(&base_commit)
+            .unwrap();
+        let checkpoints = working_log.read_all_checkpoints().unwrap();
+        let latest = checkpoints.last().unwrap();
+        let latest_entry = latest
+            .entries
+            .iter()
+            .find(|entry| entry.file == file_path)
+            .expect("latest AI checkpoint should contain the generated file");
+
+        let total_ai_lines: u32 = latest_entry
+            .line_attributions
+            .iter()
+            .map(LineAttribution::line_count)
+            .sum();
+
+        assert!(
+            total_ai_lines >= 40,
+            "expected the follow-up AI checkpoint to preserve the earlier generated block, got {:?}",
+            latest_entry.line_attributions
+        );
     }
 
     #[test]
