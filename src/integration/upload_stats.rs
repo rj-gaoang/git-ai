@@ -773,12 +773,43 @@ fn perform_upload(
         }),
     );
     if (200..300).contains(&response.status_code) {
+        match inspect_backend_response_body(response.as_bytes()) {
+            Ok(Some((backend_code, backend_msg))) => {
+                crate::diagnostics::append_debug_event(
+                    "upload_stats_http_body_checked",
+                    json!({
+                        "commitSha": debug_context.commit_sha.as_str(),
+                        "commitShort": debug_context.commit_short.as_str(),
+                        "source": debug_context.source.as_str(),
+                        "mode": debug_context.mode.as_str(),
+                        "url": url,
+                        "statusCode": response.status_code,
+                        "backendCode": backend_code,
+                        "backendMsg": backend_msg,
+                    }),
+                );
+            }
+            Ok(None) => {}
+            Err(error) => {
+                crate::diagnostics::append_debug_event(
+                    "upload_stats_http_body_rejected",
+                    json!({
+                        "commitSha": debug_context.commit_sha.as_str(),
+                        "commitShort": debug_context.commit_short.as_str(),
+                        "source": debug_context.source.as_str(),
+                        "mode": debug_context.mode.as_str(),
+                        "url": url,
+                        "statusCode": response.status_code,
+                        "error": error,
+                        "bodyExcerpt": response_body_excerpt(response.as_bytes()),
+                    }),
+                );
+                return Err(error);
+            }
+        }
         Ok(response.status_code)
     } else {
-        let body_excerpt = response
-            .as_str()
-            .map(|s| s.chars().take(200).collect::<String>())
-            .unwrap_or_default();
+        let body_excerpt = response_body_excerpt(response.as_bytes());
         crate::diagnostics::append_debug_event(
             "upload_stats_http_non_success",
             json!({
@@ -793,6 +824,39 @@ fn perform_upload(
         );
         Err(format!("HTTP {}: {}", response.status_code, body_excerpt))
     }
+}
+
+fn inspect_backend_response_body(body: &[u8]) -> Result<Option<(i64, Option<String>)>, String> {
+    if body.is_empty() {
+        return Ok(None);
+    }
+
+    let value: Value = match serde_json::from_slice(body) {
+        Ok(value) => value,
+        Err(_) => return Ok(None),
+    };
+
+    let Some(code) = value.get("code").and_then(Value::as_i64) else {
+        return Ok(None);
+    };
+    let msg = value
+        .get("msg")
+        .and_then(Value::as_str)
+        .and_then(trim_non_empty);
+
+    if code == 200 {
+        Ok(Some((code, msg)))
+    } else if let Some(message) = msg {
+        Err(format!("backend returned code {}: {}", code, message))
+    } else {
+        Err(format!("backend returned code {}", code))
+    }
+}
+
+fn response_body_excerpt(body: &[u8]) -> String {
+    std::str::from_utf8(body)
+        .map(|text| text.chars().take(200).collect::<String>())
+        .unwrap_or_else(|_| format!("<{} bytes non-utf8>", body.len()))
 }
 
 /// Build the batch JSON payload for a single commit (matches the spec-kit
@@ -1442,6 +1506,31 @@ mod tests {
             std::env::remove_var("GIT_AI_REPORT_REMOTE_PATH");
         }
         assert_eq!(resolve_upload_url(), DEFAULT_UPLOAD_URL);
+    }
+
+    #[test]
+    fn inspect_backend_response_body_accepts_success_code() {
+        let result = inspect_backend_response_body("{\"code\":200,\"msg\":\"操作成功\"}".as_bytes())
+            .expect("success body should pass");
+
+        assert_eq!(result, Some((200, Some("操作成功".to_string()))));
+    }
+
+    #[test]
+    fn inspect_backend_response_body_rejects_failure_code() {
+        let error = inspect_backend_response_body(
+            "{\"code\":500,\"msg\":\"数据库中已存在该记录，请联系管理员确认\"}".as_bytes(),
+        )
+        .expect_err("non-200 backend code should fail upload");
+
+        assert_eq!(error, "backend returned code 500: 数据库中已存在该记录，请联系管理员确认");
+    }
+
+    #[test]
+    fn inspect_backend_response_body_ignores_non_standard_success_body() {
+        let result = inspect_backend_response_body(b"ok").expect("non-json success body should not fail");
+
+        assert_eq!(result, None);
     }
 
     #[test]
