@@ -1,0 +1,24 @@
+docs/design-doc/git-ai环境变量与配置说明.md
+  96e6006e1e5f0855 1-237
+---
+{
+  "schema_version": "authorship/3.1.0",
+  "git_ai_version": "2.0.16",
+  "x_user_id": "108",
+  "base_commit_sha": "d9d879dc43a6b519041069e5c97f0d664e438a6c",
+  "prompts": {
+    "96e6006e1e5f0855": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "c6a1eca2-8f6f-460a-99cd-3c1e523c21b4",
+        "model": "copilot/gpt-5.4"
+      },
+      "human_author": "shunfei",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 237,
+      "overriden_lines": 0
+    }
+  }
+}
