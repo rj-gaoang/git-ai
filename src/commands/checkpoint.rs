@@ -1816,8 +1816,7 @@ fn build_previous_file_state_maps(
     previous_checkpoints: &[Checkpoint],
     initial_attributions: &HashMap<String, Vec<LineAttribution>>,
 ) -> (HashMap<String, Vec<PreviousFileState>>, HashSet<String>) {
-    let mut previous_file_state_by_file: HashMap<String, Vec<PreviousFileState>> =
-        HashMap::new();
+    let mut previous_file_state_by_file: HashMap<String, Vec<PreviousFileState>> = HashMap::new();
     let mut ai_touched_files: HashSet<String> = initial_attributions.keys().cloned().collect();
 
     for checkpoint in previous_checkpoints {
@@ -1956,7 +1955,11 @@ fn should_ignore_recent_known_human_for_ai_checkpoint(
         return false;
     }
 
-    if latest_previous_state.checkpoint.known_human_editor.is_none() {
+    if latest_previous_state
+        .checkpoint
+        .known_human_editor
+        .is_none()
+    {
         return false;
     }
 
@@ -3213,10 +3216,9 @@ mod tests {
         repo.write_file("simple.txt", "one\n", true).unwrap();
         repo.commit_with_message("base commit").unwrap();
 
-        let gitai_repo = crate::git::repository::find_repository_in_path(
-            repo.path().to_str().unwrap(),
-        )
-        .expect("Repository should exist");
+        let gitai_repo =
+            crate::git::repository::find_repository_in_path(repo.path().to_str().unwrap())
+                .expect("Repository should exist");
         let base_commit = gitai_repo
             .head()
             .ok()
@@ -3253,10 +3255,9 @@ mod tests {
         repo.write_file("simple.txt", "one\n", true).unwrap();
         repo.commit_with_message("base commit").unwrap();
 
-        let gitai_repo = crate::git::repository::find_repository_in_path(
-            repo.path().to_str().unwrap(),
-        )
-        .expect("Repository should exist");
+        let gitai_repo =
+            crate::git::repository::find_repository_in_path(repo.path().to_str().unwrap())
+                .expect("Repository should exist");
         let base_commit = gitai_repo
             .head()
             .ok()
@@ -3423,10 +3424,9 @@ mod tests {
             "AI checkpoint should write an entry instead of inheriting a recent KnownHuman save"
         );
 
-        let gitai_repo = crate::git::repository::find_repository_in_path(
-            repo.path().to_str().unwrap(),
-        )
-        .expect("Repository should exist");
+        let gitai_repo =
+            crate::git::repository::find_repository_in_path(repo.path().to_str().unwrap())
+                .expect("Repository should exist");
         let base_commit = gitai_repo
             .head()
             .ok()

@@ -260,7 +260,9 @@ mod tests {
             .run(AgentCheckpointFlags {
                 hook_input: Some(hook_input),
             })
-            .expect("VS Code suffixed tool_use_id should still match the exact transcript tool call");
+            .expect(
+                "VS Code suffixed tool_use_id should still match the exact transcript tool call",
+            );
 
         let expected = cwd.join("src/main.rs").to_string_lossy().replace('\\', "/");
         assert_eq!(result.edited_filepaths, Some(vec![expected]));

@@ -50,6 +50,14 @@ pub enum ManualUploadOutcome {
     },
 }
 
+#[derive(Debug, Clone)]
+struct UploadDebugContext {
+    commit_sha: String,
+    commit_short: String,
+    source: String,
+    mode: String,
+}
+
 impl ManualUploadOutcome {
     pub fn commit_sha(&self) -> &str {
         match self {
@@ -107,6 +115,21 @@ pub fn maybe_upload_after_commit(
 ) {
     let config = crate::config::Config::fresh();
     let feature_flags = config.feature_flags();
+    let commit_short = short_sha(commit_sha).to_string();
+    crate::diagnostics::append_debug_event(
+        "upload_stats_auto_entered",
+        json!({
+            "commitSha": commit_sha,
+            "commitShort": commit_short,
+            "source": "auto",
+            "repo": repo.canonical_workdir().to_string_lossy().to_string(),
+            "autoUploadEnabled": feature_flags.auto_upload_ai_stats,
+            "asyncMode": feature_flags.async_mode,
+            "hasStats": stats.is_some(),
+            "promptCount": authorship_log.metadata.prompts.len(),
+            "attestationFileCount": authorship_log.attestations.len(),
+        }),
+    );
 
     if !feature_flags.auto_upload_ai_stats {
         crate::diagnostics::append_debug_event(
@@ -147,6 +170,19 @@ pub fn maybe_upload_after_commit(
         return;
     };
 
+    crate::diagnostics::append_debug_event(
+        "upload_stats_payload_build_started",
+        json!({
+            "commitSha": commit_sha,
+            "commitShort": commit_short,
+            "source": "auto",
+            "repo": repo.canonical_workdir().to_string_lossy().to_string(),
+            "statsSummary": upload_stats_summary(stats),
+            "promptCount": authorship_log.metadata.prompts.len(),
+            "attestationFileCount": authorship_log.attestations.len(),
+        }),
+    );
+
     let payload = match build_payload(repo, commit_sha, authorship_log, stats) {
         Ok(payload) => payload,
         Err(err) => {
@@ -169,6 +205,16 @@ pub fn maybe_upload_after_commit(
             return;
         }
     };
+    crate::diagnostics::append_debug_event(
+        "upload_stats_payload_build_succeeded",
+        json!({
+            "commitSha": commit_sha,
+            "commitShort": commit_short,
+            "source": "auto",
+            "repo": repo.canonical_workdir().to_string_lossy().to_string(),
+            "payloadSummary": upload_payload_summary(&payload),
+        }),
+    );
 
     let (url, url_source) = resolve_upload_url_with_source();
     let api_key = env_non_empty("GIT_AI_REPORT_REMOTE_API_KEY");
@@ -176,7 +222,6 @@ pub fn maybe_upload_after_commit(
     let user_id = explicit_user_id
         .clone()
         .or_else(|| resolve_x_user_id(Some(repo.canonical_workdir())));
-    let commit_short = short_sha(commit_sha).to_string();
     crate::diagnostics::append_debug_event(
         "upload_stats_ready",
         json!({
@@ -213,6 +258,17 @@ pub fn upload_local_commit_stats(
     source: &str,
 ) -> Result<ManualUploadOutcome, String> {
     let commit_short = short_sha(commit_sha).to_string();
+    crate::diagnostics::append_debug_event(
+        "upload_stats_manual_entered",
+        json!({
+            "commitSha": commit_sha,
+            "commitShort": commit_short,
+            "source": source,
+            "repo": repo.canonical_workdir().to_string_lossy().to_string(),
+            "dryRun": dry_run,
+            "ignorePatternCount": ignore_patterns.len(),
+        }),
+    );
 
     let Some(authorship_log) = get_authorship(repo, commit_sha) else {
         crate::diagnostics::append_debug_event(
@@ -231,6 +287,18 @@ pub fn upload_local_commit_stats(
         });
     };
 
+    crate::diagnostics::append_debug_event(
+        "upload_stats_manual_authorship_note_loaded",
+        json!({
+            "commitSha": commit_sha,
+            "commitShort": commit_short,
+            "source": source,
+            "repo": repo.canonical_workdir().to_string_lossy().to_string(),
+            "promptCount": authorship_log.metadata.prompts.len(),
+            "attestationFileCount": authorship_log.attestations.len(),
+        }),
+    );
+
     let stats = stats_for_commit_stats(repo, commit_sha, ignore_patterns).map_err(|err| {
         let error = err.to_string();
         crate::diagnostics::append_debug_event(
@@ -247,6 +315,30 @@ pub fn upload_local_commit_stats(
         error
     })?;
 
+    crate::diagnostics::append_debug_event(
+        "upload_stats_manual_stats_computed",
+        json!({
+            "commitSha": commit_sha,
+            "commitShort": commit_short,
+            "source": source,
+            "repo": repo.canonical_workdir().to_string_lossy().to_string(),
+            "statsSummary": upload_stats_summary(&stats),
+        }),
+    );
+
+    crate::diagnostics::append_debug_event(
+        "upload_stats_payload_build_started",
+        json!({
+            "commitSha": commit_sha,
+            "commitShort": commit_short,
+            "source": source,
+            "repo": repo.canonical_workdir().to_string_lossy().to_string(),
+            "statsSummary": upload_stats_summary(&stats),
+            "promptCount": authorship_log.metadata.prompts.len(),
+            "attestationFileCount": authorship_log.attestations.len(),
+        }),
+    );
+
     let payload = build_payload_with_source(repo, commit_sha, &authorship_log, &stats, source)
         .map_err(|error| {
             crate::diagnostics::append_debug_event(
@@ -262,6 +354,16 @@ pub fn upload_local_commit_stats(
             );
             error
         })?;
+    crate::diagnostics::append_debug_event(
+        "upload_stats_payload_build_succeeded",
+        json!({
+            "commitSha": commit_sha,
+            "commitShort": commit_short,
+            "source": source,
+            "repo": repo.canonical_workdir().to_string_lossy().to_string(),
+            "payloadSummary": upload_payload_summary(&payload),
+        }),
+    );
 
     let (url, url_source) = resolve_upload_url_with_source();
     let api_key = env_non_empty("GIT_AI_REPORT_REMOTE_API_KEY");
@@ -293,6 +395,18 @@ pub fn upload_local_commit_stats(
             "prepared dry-run upload for {} source={} url={}",
             commit_short, source, url
         ));
+        crate::diagnostics::append_debug_event(
+            "upload_stats_dry_run_prepared",
+            json!({
+                "commitSha": commit_sha,
+                "commitShort": commit_short,
+                "source": source,
+                "mode": "manual_dry_run",
+                "url": url,
+                "urlSource": url_source,
+                "payloadSummary": upload_payload_summary(&payload),
+            }),
+        );
         return Ok(ManualUploadOutcome::DryRun {
             commit_sha: commit_sha.to_string(),
             url,
@@ -323,7 +437,20 @@ pub fn upload_local_commit_stats(
         }),
     );
 
-    match perform_upload(&url, &payload, api_key.as_deref(), user_id.as_deref()) {
+    let debug_context = UploadDebugContext {
+        commit_sha: commit_sha.to_string(),
+        commit_short: commit_short.clone(),
+        source: source.to_string(),
+        mode: "manual".to_string(),
+    };
+
+    match perform_upload(
+        &url,
+        &payload,
+        api_key.as_deref(),
+        user_id.as_deref(),
+        &debug_context,
+    ) {
         Ok(status_code) => {
             crate::diagnostics::append_debug_event(
                 "upload_stats_succeeded",
@@ -384,6 +511,12 @@ fn dispatch_upload(
     } else {
         "inline"
     };
+    let debug_context = UploadDebugContext {
+        commit_sha: commit_sha.clone(),
+        commit_short: commit_short.clone(),
+        source: source.clone(),
+        mode: upload_mode.to_string(),
+    };
 
     run_upload_task(run_in_background, move || {
         log_info(&format!(
@@ -407,7 +540,13 @@ fn dispatch_upload(
                 "payloadSummary": upload_payload_summary(&payload),
             }),
         );
-        match perform_upload(&url, &payload, api_key.as_deref(), user_id.as_deref()) {
+        match perform_upload(
+            &url,
+            &payload,
+            api_key.as_deref(),
+            user_id.as_deref(),
+            &debug_context,
+        ) {
             Err(err) => {
                 crate::diagnostics::append_debug_event(
                     "upload_stats_failed",
@@ -472,9 +611,24 @@ fn log_warn(message: &str) {
 }
 
 fn emit_debug_stderr(message: &str) {
-    if cfg!(debug_assertions) || crate::diagnostics::debug_enabled() {
+    if crate::diagnostics::debug_stderr_enabled() {
         eprintln!("[git-ai] upload-ai-stats: {}", message);
     }
+}
+
+fn upload_stats_summary(stats: &CommitStats) -> Value {
+    json!({
+        "humanAdditions": stats.human_additions,
+        "unknownAdditions": stats.unknown_additions,
+        "mixedAdditions": stats.mixed_additions,
+        "aiAdditions": stats.ai_additions,
+        "aiAccepted": stats.ai_accepted,
+        "totalAiAdditions": stats.total_ai_additions,
+        "totalAiDeletions": stats.total_ai_deletions,
+        "gitDiffAddedLines": stats.git_diff_added_lines,
+        "gitDiffDeletedLines": stats.git_diff_deleted_lines,
+        "toolModelBreakdownCount": stats.tool_model_breakdown.len(),
+    })
 }
 
 fn upload_payload_summary(payload: &Value) -> Value {
@@ -527,6 +681,7 @@ fn perform_upload(
     payload: &Value,
     api_key: Option<&str>,
     user_id: Option<&str>,
+    debug_context: &UploadDebugContext,
 ) -> Result<u16, String> {
     log_debug(&format!(
         "perform_upload url={} has_api_key={} has_user_id={}",
@@ -534,6 +689,19 @@ fn perform_upload(
         api_key.is_some(),
         user_id.is_some()
     ));
+    crate::diagnostics::append_debug_event(
+        "upload_stats_http_prepare_started",
+        json!({
+            "commitSha": debug_context.commit_sha.as_str(),
+            "commitShort": debug_context.commit_short.as_str(),
+            "source": debug_context.source.as_str(),
+            "mode": debug_context.mode.as_str(),
+            "url": url,
+            "timeoutSecs": UPLOAD_TIMEOUT_SECS,
+            "hasApiKey": api_key.is_some(),
+            "hasUserId": user_id.is_some(),
+        }),
+    );
 
     let agent = http::build_agent(Some(UPLOAD_TIMEOUT_SECS));
     let mut request = agent.post(url).set("Content-Type", "application/json");
@@ -544,12 +712,64 @@ fn perform_upload(
         request = request.set("X-USER-ID", id);
     }
 
-    let body = serde_json::to_string(payload).map_err(|e| e.to_string())?;
-    let response = http::send_with_body(request, &body)?;
+    let body = serde_json::to_string(payload).map_err(|e| {
+        let error = e.to_string();
+        crate::diagnostics::append_debug_event(
+            "upload_stats_http_body_serialize_failed",
+            json!({
+                "commitSha": debug_context.commit_sha.as_str(),
+                "commitShort": debug_context.commit_short.as_str(),
+                "source": debug_context.source.as_str(),
+                "mode": debug_context.mode.as_str(),
+                "url": url,
+                "error": error,
+            }),
+        );
+        error
+    })?;
+    crate::diagnostics::append_debug_event(
+        "upload_stats_http_request_ready",
+        json!({
+            "commitSha": debug_context.commit_sha.as_str(),
+            "commitShort": debug_context.commit_short.as_str(),
+            "source": debug_context.source.as_str(),
+            "mode": debug_context.mode.as_str(),
+            "url": url,
+            "bodyBytes": body.len(),
+            "hasApiKey": api_key.is_some(),
+            "hasUserId": user_id.is_some(),
+        }),
+    );
+    let response = http::send_with_body(request, &body).map_err(|error| {
+        crate::diagnostics::append_debug_event(
+            "upload_stats_http_send_failed",
+            json!({
+                "commitSha": debug_context.commit_sha.as_str(),
+                "commitShort": debug_context.commit_short.as_str(),
+                "source": debug_context.source.as_str(),
+                "mode": debug_context.mode.as_str(),
+                "url": url,
+                "error": error,
+            }),
+        );
+        error
+    })?;
     log_debug(&format!(
         "perform_upload response status={} url={}",
         response.status_code, url
     ));
+    crate::diagnostics::append_debug_event(
+        "upload_stats_http_response_received",
+        json!({
+            "commitSha": debug_context.commit_sha.as_str(),
+            "commitShort": debug_context.commit_short.as_str(),
+            "source": debug_context.source.as_str(),
+            "mode": debug_context.mode.as_str(),
+            "url": url,
+            "statusCode": response.status_code,
+            "successStatus": (200..300).contains(&response.status_code),
+        }),
+    );
     if (200..300).contains(&response.status_code) {
         Ok(response.status_code)
     } else {
@@ -557,6 +777,18 @@ fn perform_upload(
             .as_str()
             .map(|s| s.chars().take(200).collect::<String>())
             .unwrap_or_default();
+        crate::diagnostics::append_debug_event(
+            "upload_stats_http_non_success",
+            json!({
+                "commitSha": debug_context.commit_sha.as_str(),
+                "commitShort": debug_context.commit_short.as_str(),
+                "source": debug_context.source.as_str(),
+                "mode": debug_context.mode.as_str(),
+                "url": url,
+                "statusCode": response.status_code,
+                "bodyExcerpt": body_excerpt,
+            }),
+        );
         Err(format!("HTTP {}: {}", response.status_code, body_excerpt))
     }
 }

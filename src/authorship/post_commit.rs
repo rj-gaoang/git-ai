@@ -82,6 +82,17 @@ pub fn post_commit_with_final_state(
     // Use base_commit parameter if provided, otherwise use "initial" for empty repos
     // This matches the convention in checkpoint.rs
     let parent_sha = base_commit.unwrap_or_else(|| "initial".to_string());
+    crate::diagnostics::append_debug_event(
+        "post_commit_started",
+        serde_json::json!({
+            "repo": repo.canonical_workdir().to_string_lossy().to_string(),
+            "commitSha": commit_sha,
+            "parentSha": parent_sha,
+            "humanAuthor": human_author,
+            "suppressOutput": supress_output,
+            "hasFinalStateOverride": final_state_override.is_some(),
+        }),
+    );
 
     // Initialize the new storage system
     let repo_storage = &repo.storage;
@@ -93,6 +104,16 @@ pub fn post_commit_with_final_state(
         update_prompts_to_latest(checkpoints)?;
         Ok(())
     })?;
+    crate::diagnostics::append_debug_event(
+        "post_commit_working_log_loaded",
+        serde_json::json!({
+            "repo": repo.canonical_workdir().to_string_lossy().to_string(),
+            "commitSha": commit_sha,
+            "parentSha": parent_sha,
+            "checkpointCount": parent_working_log.len(),
+            "checkpointEntryCount": parent_working_log.iter().map(|checkpoint| checkpoint.entries.len()).sum::<usize>(),
+        }),
+    );
 
     // Batch upsert all prompts to database after refreshing (non-fatal if it fails)
     if let Err(e) = batch_upsert_prompts_to_db(&parent_working_log, &working_log, &commit_sha) {
@@ -146,6 +167,16 @@ pub fn post_commit_with_final_state(
     for file_path in initial_attributions_for_pathspecs.files.keys() {
         pathspecs.insert(file_path.clone());
     }
+    crate::diagnostics::append_debug_event(
+        "post_commit_pathspecs_prepared",
+        serde_json::json!({
+            "repo": repo.canonical_workdir().to_string_lossy().to_string(),
+            "commitSha": commit_sha,
+            "parentSha": parent_sha,
+            "pathspecCount": pathspecs.len(),
+            "initialAttributionFileCount": initial_attributions_for_pathspecs.files.len(),
+        }),
+    );
 
     let (mut authorship_log, initial_attributions) = working_va
         .to_authorship_log_and_initial_working_log(
@@ -155,6 +186,19 @@ pub fn post_commit_with_final_state(
             Some(&pathspecs),
             final_state_override,
         )?;
+    crate::diagnostics::append_debug_event(
+        "post_commit_authorship_log_built",
+        serde_json::json!({
+            "repo": repo.canonical_workdir().to_string_lossy().to_string(),
+            "commitSha": commit_sha,
+            "parentSha": parent_sha,
+            "attestationFileCount": authorship_log.attestations.len(),
+            "promptSummary": prompt_debug_summary(&authorship_log),
+            "initialCarryOverFileCount": initial_attributions.files.len(),
+            "initialCarryOverPromptCount": initial_attributions.prompts.len(),
+            "initialCarryOverHumanCount": initial_attributions.humans.len(),
+        }),
+    );
 
     authorship_log.metadata.base_commit_sha = commit_sha.clone();
     authorship_log.ensure_x_user_id_from_repo(repo);
@@ -228,6 +272,15 @@ pub fn post_commit_with_final_state(
         .serialize_to_string()
         .map_err(|_| GitAiError::Generic("Failed to serialize authorship log".to_string()))?;
 
+    crate::diagnostics::append_debug_event(
+        "post_commit_authorship_note_write_started",
+        serde_json::json!({
+            "repo": repo.canonical_workdir().to_string_lossy().to_string(),
+            "commitSha": commit_sha,
+            "parentSha": parent_sha,
+            "authorshipJsonBytes": authorship_json.len(),
+        }),
+    );
     notes_add(repo, &commit_sha, &authorship_json)?;
     crate::diagnostics::append_debug_event(
         "post_commit_authorship_note_written",
@@ -266,6 +319,15 @@ pub fn post_commit_with_final_state(
     };
 
     if skip_reason.is_none() {
+        crate::diagnostics::append_debug_event(
+            "post_commit_stats_compute_started",
+            serde_json::json!({
+                "repo": repo.canonical_workdir().to_string_lossy().to_string(),
+                "commitSha": commit_sha,
+                "parentSha": parent_sha,
+                "ignorePatternCount": ignore_patterns.len(),
+            }),
+        );
         let computed = stats_for_commit_stats(repo, &commit_sha, &ignore_patterns)?;
         crate::diagnostics::append_debug_event(
             "post_commit_stats_computed",
@@ -319,16 +381,38 @@ pub fn post_commit_with_final_state(
         let new_working_log = repo_storage.working_log_for_base_commit(&commit_sha)?;
         let initial_file_contents =
             working_va.snapshot_contents_for_files(initial_attributions.files.keys());
+        let initial_file_count = initial_attributions.files.len();
+        let initial_prompt_count = initial_attributions.prompts.len();
+        let initial_human_count = initial_attributions.humans.len();
         new_working_log.write_initial_attributions_with_contents(
             initial_attributions.files,
             initial_attributions.prompts,
             initial_attributions.humans,
             initial_file_contents,
         )?;
+        crate::diagnostics::append_debug_event(
+            "post_commit_initial_attributions_written",
+            serde_json::json!({
+                "repo": repo.canonical_workdir().to_string_lossy().to_string(),
+                "commitSha": commit_sha,
+                "parentSha": parent_sha,
+                "fileCount": initial_file_count,
+                "promptCount": initial_prompt_count,
+                "humanCount": initial_human_count,
+            }),
+        );
     }
 
     // // Clean up old working log
     repo_storage.delete_working_log_for_base_commit(&parent_sha)?;
+    crate::diagnostics::append_debug_event(
+        "post_commit_working_log_deleted",
+        serde_json::json!({
+            "repo": repo.canonical_workdir().to_string_lossy().to_string(),
+            "commitSha": commit_sha,
+            "parentSha": parent_sha,
+        }),
+    );
 
     // Use Config::fresh() to support runtime config updates
     if !supress_output && !Config::fresh().is_quiet() {
@@ -361,6 +445,16 @@ pub fn post_commit_with_final_state(
 
     // Best-effort upload of authorship stats to the team-managed remote.
     // Always non-blocking and silent on failure so it cannot disrupt commits.
+    crate::diagnostics::append_debug_event(
+        "post_commit_upload_dispatch_requested",
+        serde_json::json!({
+            "repo": repo.canonical_workdir().to_string_lossy().to_string(),
+            "commitSha": commit_sha,
+            "parentSha": parent_sha,
+            "hasStats": stats.is_some(),
+            "statsSkipReason": stats_skip_reason_debug(skip_reason.as_ref()),
+        }),
+    );
     crate::integration::upload_stats::maybe_upload_after_commit(
         repo,
         &commit_sha,
@@ -449,6 +543,20 @@ fn commit_stats_debug_summary(stats: &crate::authorship::stats::CommitStats) -> 
         "gitDiffDeletedLines": stats.git_diff_deleted_lines,
         "toolModelBreakdownCount": stats.tool_model_breakdown.len(),
     })
+}
+
+fn stats_skip_reason_debug(reason: Option<&StatsSkipReason>) -> serde_json::Value {
+    match reason {
+        Some(StatsSkipReason::MergeCommit) => serde_json::json!("merge_commit"),
+        Some(StatsSkipReason::Expensive(estimate)) => serde_json::json!({
+            "reason": "expensive_commit",
+            "filesWithAdditions": estimate.files_with_additions,
+            "addedLines": estimate.added_lines,
+            "deletedLines": estimate.deleted_lines,
+            "hunkRanges": estimate.hunk_ranges,
+        }),
+        None => serde_json::Value::Null,
+    }
 }
 
 fn should_skip_expensive_post_commit_stats(estimate: &StatsCostEstimate) -> bool {
