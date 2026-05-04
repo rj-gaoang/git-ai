@@ -111,7 +111,10 @@ impl PromptDbRecord {
         let agent_id = checkpoint.agent_id.as_ref()?;
         let transcript = checkpoint.transcript.as_ref()?;
 
-        let short_hash = generate_short_hash(&agent_id.id, &agent_id.tool);
+        let short_hash = checkpoint
+            .prompt_id
+            .clone()
+            .unwrap_or_else(|| generate_short_hash(&agent_id.id, &agent_id.tool));
 
         // Use first message timestamp for created_at, fall back to checkpoint timestamp
         let created_at = transcript

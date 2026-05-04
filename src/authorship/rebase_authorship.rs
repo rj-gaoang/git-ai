@@ -4182,7 +4182,10 @@ fn build_note_from_conflict_wl(
             None => continue,
         };
 
-        let author_id = generate_short_hash(&agent_id.id, &agent_id.tool);
+        let author_id = checkpoint
+            .prompt_id
+            .clone()
+            .unwrap_or_else(|| generate_short_hash(&agent_id.id, &agent_id.tool));
 
         // Record the prompt from this AI checkpoint in the metadata.
         authorship_log

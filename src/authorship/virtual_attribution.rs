@@ -2,7 +2,8 @@ use crate::authorship::attribution_tracker::{
     Attribution, LineAttribution, line_attributions_to_attributions,
 };
 use crate::authorship::authorship_log::{HumanRecord, LineRange, PromptRecord};
-use crate::authorship::working_log::CheckpointKind;
+use crate::authorship::transcript::Message;
+use crate::authorship::working_log::{Checkpoint, CheckpointKind};
 use crate::commands::blame::{GitAiBlameOptions, OLDEST_AI_BLAME_DATE};
 use crate::error::GitAiError;
 use crate::git::repository::Repository;
@@ -32,6 +33,60 @@ pub struct VirtualAttributions {
 }
 
 impl VirtualAttributions {
+    fn checkpoint_prompt_id(checkpoint: &Checkpoint) -> Option<String> {
+        checkpoint.prompt_id.clone().or_else(|| {
+            checkpoint.agent_id.as_ref().map(|agent_id| {
+                crate::authorship::authorship_log_serialization::generate_short_hash(
+                    &agent_id.id,
+                    &agent_id.tool,
+                )
+            })
+        })
+    }
+
+    fn checkpoint_new_user_messages(
+        checkpoint: &Checkpoint,
+        session_user_messages: &mut HashMap<String, Vec<Message>>,
+    ) -> Vec<Message> {
+        let Some(agent_id) = checkpoint.agent_id.as_ref() else {
+            return Vec::new();
+        };
+
+        let session_id = crate::authorship::authorship_log_serialization::generate_short_hash(
+            &agent_id.id,
+            &agent_id.tool,
+        );
+        let current_messages = checkpoint
+            .transcript
+            .as_ref()
+            .map(|transcript| {
+                transcript
+                    .messages()
+                    .iter()
+                    .filter(|message| matches!(message, Message::User { .. }))
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        if current_messages.is_empty() {
+            return Vec::new();
+        }
+
+        let new_messages = if let Some(previous_messages) = session_user_messages.get(&session_id) {
+            if current_messages.starts_with(previous_messages) {
+                current_messages[previous_messages.len()..].to_vec()
+            } else {
+                current_messages.clone()
+            }
+        } else {
+            current_messages.clone()
+        };
+
+        session_user_messages.insert(session_id, current_messages);
+        new_messages
+    }
+
     /// Create a new VirtualAttributions for the given base commit with initial pathspecs
     pub async fn new_for_base_commit(
         repo: Repository,
@@ -337,6 +392,7 @@ impl VirtualAttributions {
         // Track additions and deletions per session_id for metrics
         let mut session_additions: HashMap<String, u32> = HashMap::new();
         let mut session_deletions: HashMap<String, u32> = HashMap::new();
+        let mut session_user_messages: HashMap<String, Vec<Message>> = HashMap::new();
 
         // Add prompts from INITIAL attributions
         // These are uncommitted prompts, so we use an empty string as the commit_sha
@@ -376,23 +432,16 @@ impl VirtualAttributions {
         // Collect attributions from all checkpoints (later checkpoints override earlier ones)
         for checkpoint in &checkpoints {
             // Add prompts from checkpoint
-            if let Some(agent_id) = &checkpoint.agent_id {
-                let author_id =
-                    crate::authorship::authorship_log_serialization::generate_short_hash(
-                        &agent_id.id,
-                        &agent_id.tool,
-                    );
-                // For working log checkpoints, use empty string as commit_sha since they're uncommitted
-                // Always overwrite with the latest checkpoint for this agent so refreshed
-                // transcripts/models from post-commit aren't lost.
+            if let Some(agent_id) = &checkpoint.agent_id
+                && let Some(prompt_id) = Self::checkpoint_prompt_id(checkpoint)
+            {
                 let prompt_record = crate::authorship::authorship_log::PromptRecord {
                     agent_id: agent_id.clone(),
                     human_author: human_author.clone(),
-                    messages: checkpoint
-                        .transcript
-                        .as_ref()
-                        .map(|t| t.messages().to_vec())
-                        .unwrap_or_default(),
+                    messages: Self::checkpoint_new_user_messages(
+                        checkpoint,
+                        &mut session_user_messages,
+                    ),
                     total_additions: 0,
                     total_deletions: 0,
                     accepted_lines: 0,
@@ -402,17 +451,17 @@ impl VirtualAttributions {
                 };
 
                 prompts
-                    .entry(author_id.clone())
+                    .entry(prompt_id.clone())
                     .or_insert_with(BTreeMap::new)
                     .insert(String::new(), prompt_record);
                 // This prompt was actively used in a checkpoint, so it's not
                 // INITIAL-only (even if it was also in INITIAL).
-                initial_only_prompt_ids.remove(&author_id);
+                initial_only_prompt_ids.remove(&prompt_id);
 
                 // Track additions and deletions from checkpoint line_stats
-                *session_additions.entry(author_id.clone()).or_insert(0) +=
+                *session_additions.entry(prompt_id.clone()).or_insert(0) +=
                     checkpoint.line_stats.additions;
-                *session_deletions.entry(author_id.clone()).or_insert(0) +=
+                *session_deletions.entry(prompt_id.clone()).or_insert(0) +=
                     checkpoint.line_stats.deletions;
             }
 
@@ -513,6 +562,7 @@ impl VirtualAttributions {
 
         let mut session_additions: HashMap<String, u32> = HashMap::new();
         let mut session_deletions: HashMap<String, u32> = HashMap::new();
+        let mut session_user_messages: HashMap<String, Vec<Message>> = HashMap::new();
 
         for (prompt_id, prompt_record) in &initial_attributions.prompts {
             prompts
@@ -544,20 +594,16 @@ impl VirtualAttributions {
         }
 
         for checkpoint in &checkpoints {
-            if let Some(agent_id) = &checkpoint.agent_id {
-                let author_id =
-                    crate::authorship::authorship_log_serialization::generate_short_hash(
-                        &agent_id.id,
-                        &agent_id.tool,
-                    );
+            if let Some(agent_id) = &checkpoint.agent_id
+                && let Some(prompt_id) = Self::checkpoint_prompt_id(checkpoint)
+            {
                 let prompt_record = crate::authorship::authorship_log::PromptRecord {
                     agent_id: agent_id.clone(),
                     human_author: human_author.clone(),
-                    messages: checkpoint
-                        .transcript
-                        .as_ref()
-                        .map(|t| t.messages().to_vec())
-                        .unwrap_or_default(),
+                    messages: Self::checkpoint_new_user_messages(
+                        checkpoint,
+                        &mut session_user_messages,
+                    ),
                     total_additions: 0,
                     total_deletions: 0,
                     accepted_lines: 0,
@@ -567,14 +613,14 @@ impl VirtualAttributions {
                 };
 
                 prompts
-                    .entry(author_id.clone())
+                    .entry(prompt_id.clone())
                     .or_insert_with(BTreeMap::new)
                     .insert(String::new(), prompt_record);
-                initial_only_prompt_ids.remove(&author_id);
+                initial_only_prompt_ids.remove(&prompt_id);
 
-                *session_additions.entry(author_id.clone()).or_insert(0) +=
+                *session_additions.entry(prompt_id.clone()).or_insert(0) +=
                     checkpoint.line_stats.additions;
-                *session_deletions.entry(author_id.clone()).or_insert(0) +=
+                *session_deletions.entry(prompt_id.clone()).or_insert(0) +=
                     checkpoint.line_stats.deletions;
             }
 
@@ -667,6 +713,7 @@ impl VirtualAttributions {
 
         let mut session_additions: HashMap<String, u32> = HashMap::new();
         let mut session_deletions: HashMap<String, u32> = HashMap::new();
+        let mut session_user_messages: HashMap<String, Vec<Message>> = HashMap::new();
 
         for (prompt_id, prompt_record) in &initial_attributions.prompts {
             prompts
@@ -698,20 +745,16 @@ impl VirtualAttributions {
         }
 
         for checkpoint in &checkpoints {
-            if let Some(agent_id) = &checkpoint.agent_id {
-                let author_id =
-                    crate::authorship::authorship_log_serialization::generate_short_hash(
-                        &agent_id.id,
-                        &agent_id.tool,
-                    );
+            if let Some(agent_id) = &checkpoint.agent_id
+                && let Some(prompt_id) = Self::checkpoint_prompt_id(checkpoint)
+            {
                 let prompt_record = crate::authorship::authorship_log::PromptRecord {
                     agent_id: agent_id.clone(),
                     human_author: human_author.clone(),
-                    messages: checkpoint
-                        .transcript
-                        .as_ref()
-                        .map(|t| t.messages().to_vec())
-                        .unwrap_or_default(),
+                    messages: Self::checkpoint_new_user_messages(
+                        checkpoint,
+                        &mut session_user_messages,
+                    ),
                     total_additions: 0,
                     total_deletions: 0,
                     accepted_lines: 0,
@@ -721,14 +764,14 @@ impl VirtualAttributions {
                 };
 
                 prompts
-                    .entry(author_id.clone())
+                    .entry(prompt_id.clone())
                     .or_insert_with(BTreeMap::new)
                     .insert(String::new(), prompt_record);
-                initial_only_prompt_ids.remove(&author_id);
+                initial_only_prompt_ids.remove(&prompt_id);
 
-                *session_additions.entry(author_id.clone()).or_insert(0) +=
+                *session_additions.entry(prompt_id.clone()).or_insert(0) +=
                     checkpoint.line_stats.additions;
-                *session_deletions.entry(author_id.clone()).or_insert(0) +=
+                *session_deletions.entry(prompt_id.clone()).or_insert(0) +=
                     checkpoint.line_stats.deletions;
             }
 
@@ -2725,7 +2768,29 @@ fn file_exists_in_commit(
 mod tests {
 
     use super::*;
+    use crate::authorship::transcript::{AiTranscript, Message};
+    use crate::authorship::working_log::{AgentId, CheckpointKind};
+    use crate::commands::checkpoint_agent::agent_presets::AgentRunResult;
     use crate::git::test_utils::TmpRepo;
+    use std::collections::HashSet as StdHashSet;
+
+    fn ai_agent_run_result(session_id: &str, messages: Vec<Message>) -> AgentRunResult {
+        AgentRunResult {
+            agent_id: AgentId {
+                tool: "github-copilot".to_string(),
+                id: session_id.to_string(),
+                model: "gpt-5.4".to_string(),
+            },
+            agent_metadata: None,
+            checkpoint_kind: CheckpointKind::AiAgent,
+            transcript: Some(AiTranscript { messages }),
+            repo_working_dir: None,
+            edited_filepaths: None,
+            will_edit_filepaths: None,
+            dirty_files: None,
+            captured_checkpoint_id: None,
+        }
+    }
 
     #[test]
     fn test_virtual_attributions() {
@@ -2778,5 +2843,88 @@ mod tests {
         }
 
         assert!(!virtual_attributions.files().is_empty());
+    }
+
+    #[test]
+    fn test_commit_keeps_multiple_prompt_segments_from_same_session() {
+        let repo = TmpRepo::new().unwrap();
+
+        repo.write_file("test_file.rs", "fn main() {}\n", true)
+            .unwrap();
+        repo.trigger_checkpoint_with_author("test_user").unwrap();
+        repo.commit_with_message("Initial commit").unwrap();
+
+        repo.write_file(
+            "test_file.rs",
+            "fn main() {\n    println!(\"first\");\n}\n",
+            true,
+        )
+        .unwrap();
+        repo.trigger_checkpoint_with_agent_result(
+            "copilot",
+            Some(ai_agent_run_result(
+                "shared-session",
+                vec![Message::user("first prompt".to_string(), None)],
+            )),
+        )
+        .unwrap();
+
+        repo.write_file(
+            "test_file.rs",
+            "fn main() {\n    println!(\"first\");\n}\n\nfn helper() {\n    println!(\"second\");\n}\n",
+            true,
+        )
+        .unwrap();
+        repo.trigger_checkpoint_with_agent_result(
+            "copilot",
+            Some(ai_agent_run_result(
+                "shared-session",
+                vec![
+                    Message::user("first prompt".to_string(), None),
+                    Message::assistant("assistant reply".to_string(), None),
+                    Message::user("second prompt".to_string(), None),
+                ],
+            )),
+        )
+        .unwrap();
+
+        let log = repo.commit_with_message("AI commit").unwrap();
+
+        assert_eq!(log.metadata.prompts.len(), 2);
+
+        let prompt_texts: StdHashSet<String> = log
+            .metadata
+            .prompts
+            .values()
+            .map(|prompt| {
+                prompt
+                    .messages
+                    .iter()
+                    .filter_map(|message| match message {
+                        Message::User { text, .. } => Some(text.clone()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .collect();
+
+        assert!(prompt_texts.contains("first prompt"));
+        assert!(prompt_texts.contains("second prompt"));
+        assert!(log
+            .metadata
+            .prompts
+            .values()
+            .all(|prompt| prompt.messages.len() == 1));
+
+        let attested_prompt_ids: StdHashSet<String> = log
+            .attestations
+            .iter()
+            .flat_map(|file| file.entries.iter().map(|entry| entry.hash.clone()))
+            .collect();
+        let metadata_prompt_ids: StdHashSet<String> =
+            log.metadata.prompts.keys().cloned().collect();
+
+        assert_eq!(attested_prompt_ids, metadata_prompt_ids);
     }
 }

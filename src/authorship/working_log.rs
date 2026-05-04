@@ -126,6 +126,8 @@ pub struct Checkpoint {
     pub timestamp: u64,
     pub transcript: Option<AiTranscript>,
     pub agent_id: Option<AgentId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_id: Option<String>,
     #[serde(default)]
     pub agent_metadata: Option<HashMap<String, String>>,
     #[serde(default)]
@@ -158,6 +160,7 @@ impl Checkpoint {
             timestamp,
             transcript: None,
             agent_id: None,
+            prompt_id: None,
             agent_metadata: None,
             line_stats: CheckpointLineStats::default(),
             api_version: CHECKPOINT_API_VERSION.to_string(),

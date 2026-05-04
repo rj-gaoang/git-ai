@@ -435,19 +435,19 @@ impl AuthorshipLog {
             session_entries.sort_by(|a, b| a.0.cmp(&b.0));
 
             let mut combined_line_attributions: Vec<LineAttribution> = Vec::new();
-            let mut session_prompt_records: Vec<PromptRecord> = Vec::new();
+            let mut session_prompt_records: Vec<(String, PromptRecord)> = Vec::new();
 
-            for (session_hash, ranges) in &session_entries {
+            for (prompt_hash, ranges) in &session_entries {
                 // Skip known-human attestations — they don't have prompt records
-                if session_hash.starts_with("h_") {
+                if prompt_hash.starts_with("h_") {
                     continue;
                 }
 
                 let prompt_record = self
                     .metadata
                     .prompts
-                    .get(session_hash)
-                    .ok_or_else(|| format!("Missing prompt record for hash: {}", session_hash))?
+                    .get(prompt_hash)
+                    .ok_or_else(|| format!("Missing prompt record for hash: {}", prompt_hash))?
                     .clone();
 
                 // Expand ranges to individual lines, then compress to working log format
@@ -461,16 +461,14 @@ impl AuthorshipLog {
                 all_lines.sort_unstable();
                 all_lines.dedup();
 
-                // IMPORTANT: Use the session_hash that will be regenerated from agent_id when applying checkpoint
-                // This ensures line attributions match the prompts in metadata after apply_checkpoint
-                let prompt_hash =
-                    generate_short_hash(&prompt_record.agent_id.id, &prompt_record.agent_id.tool);
+                // Preserve the prompt hash already referenced by the note's line attestations
+                // so amend/rebase round-trips keep prompt segments distinct.
                 // TODO Update authorship to store overridden state for line ranges
                 let line_attributions =
-                    compress_lines_to_working_log_format(&all_lines, &prompt_hash, None);
+                    compress_lines_to_working_log_format(&all_lines, prompt_hash, None);
 
                 combined_line_attributions.extend(line_attributions);
-                session_prompt_records.push(prompt_record);
+                session_prompt_records.push((prompt_hash.clone(), prompt_record));
             }
 
             if combined_line_attributions.is_empty() {
@@ -490,7 +488,7 @@ impl AuthorshipLog {
                 ts,
             );
 
-            for prompt_record in session_prompt_records {
+            for (prompt_hash, prompt_record) in session_prompt_records {
                 let entry = WorkingLogEntry::new(
                     file_path.clone(),
                     String::new(), // Empty blob_sha - will be set by caller
@@ -505,6 +503,7 @@ impl AuthorshipLog {
                     vec![entry],
                 );
                 ai_checkpoint.agent_id = Some(prompt_record.agent_id.clone());
+                ai_checkpoint.prompt_id = Some(prompt_hash.clone());
 
                 // TODO Fill in the LineStats
 

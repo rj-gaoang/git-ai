@@ -205,7 +205,7 @@ pub struct HumanRecord {
     pub author: String,
 }
 
-/// Prompt session details stored in the top-level prompts map keyed by short hash (agent_id + tool)
+/// Prompt segment details stored in the top-level prompts map keyed by prompt hash.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PromptRecord {
     pub agent_id: AgentId,

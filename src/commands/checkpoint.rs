@@ -160,13 +160,16 @@ fn build_checkpoint_attrs(
     repo: &Repository,
     base_commit: &str,
     agent_id: Option<&AgentId>,
+    prompt_id: Option<&str>,
 ) -> crate::metrics::EventAttributes {
     let mut attrs = crate::metrics::EventAttributes::with_version(env!("CARGO_PKG_VERSION"))
         .base_commit_sha(base_commit);
 
     // Add AI-specific attributes
     if let Some(agent_id) = agent_id {
-        let prompt_id = generate_short_hash(&agent_id.id, &agent_id.tool);
+        let prompt_id = prompt_id
+            .map(str::to_owned)
+            .unwrap_or_else(|| generate_short_hash(&agent_id.id, &agent_id.tool));
         attrs = attrs
             .tool(&agent_id.tool)
             .model(&agent_id.model)
@@ -221,6 +224,27 @@ pub(crate) fn should_emit_agent_usage(agent_id: &AgentId) -> bool {
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) fn should_emit_agent_usage(_agent_id: &AgentId) -> bool {
     false
+}
+
+fn generate_prompt_segment_hash(
+    agent_id: &AgentId,
+    ts: u128,
+    combined_hash: &str,
+    captured_checkpoint_id: Option<&str>,
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(agent_id.tool.as_bytes());
+    hasher.update(b":");
+    hasher.update(agent_id.id.as_bytes());
+    hasher.update(b":");
+    hasher.update(ts.to_string().as_bytes());
+    hasher.update(b":");
+    hasher.update(combined_hash.as_bytes());
+    if let Some(captured_checkpoint_id) = captured_checkpoint_id {
+        hasher.update(b":");
+        hasher.update(captured_checkpoint_id.as_bytes());
+    }
+    format!("{:x}", hasher.finalize())[..16].to_string()
 }
 
 pub fn explicit_capture_target_paths(
@@ -1034,6 +1058,19 @@ fn execute_resolved_checkpoint(
         hash_compute_start.elapsed()
     );
 
+    let prompt_id = if kind.is_ai() {
+        agent_run_result.as_ref().map(|result| {
+            generate_prompt_segment_hash(
+                &result.agent_id,
+                resolved.ts,
+                &combined_hash,
+                result.captured_checkpoint_id.as_deref(),
+            )
+        })
+    } else {
+        None
+    };
+
     let entries_start = Instant::now();
     let (entries, file_stats, file_diagnostics) = smol::block_on(get_checkpoint_entries(
         kind,
@@ -1044,6 +1081,7 @@ fn execute_resolved_checkpoint(
         &file_content_hashes,
         &checkpoints,
         agent_run_result.as_ref(),
+        prompt_id.as_deref(),
         resolved.ts,
         is_pre_commit,
         Some(resolved.base_commit.as_str()),
@@ -1069,6 +1107,7 @@ fn execute_resolved_checkpoint(
             if let Some(agent_run) = &agent_run_result {
                 checkpoint.transcript = Some(agent_run.transcript.clone().unwrap_or_default());
                 checkpoint.agent_id = Some(agent_run.agent_id.clone());
+                checkpoint.prompt_id = prompt_id.clone();
                 checkpoint.agent_metadata = agent_run.agent_metadata.clone();
             }
         } else if kind == CheckpointKind::KnownHuman
@@ -1136,8 +1175,12 @@ fn execute_resolved_checkpoint(
         );
         checkpoints.push(checkpoint.clone());
 
-        let attrs =
-            build_checkpoint_attrs(repo, &resolved.base_commit, checkpoint.agent_id.as_ref());
+        let attrs = build_checkpoint_attrs(
+            repo,
+            &resolved.base_commit,
+            checkpoint.agent_id.as_ref(),
+            checkpoint.prompt_id.as_deref(),
+        );
 
         for (entry, file_stat) in entries.iter().zip(file_stats.iter()) {
             let values = crate::metrics::CheckpointValues::new()
@@ -2389,6 +2432,7 @@ async fn get_checkpoint_entries(
     file_content_hashes: &HashMap<String, String>,
     previous_checkpoints: &[Checkpoint],
     agent_run_result: Option<&AgentRunResult>,
+    prompt_id: Option<&str>,
     ts: u128,
     is_pre_commit: bool,
     head_commit_override: Option<&str>,
@@ -2435,13 +2479,17 @@ async fn get_checkpoint_entries(
             crate::authorship::authorship_log_serialization::generate_human_short_hash(author)
         }
         _ => {
-            // AI kinds: use session hash
-            agent_run_result
-                .map(|result| {
-                    crate::authorship::authorship_log_serialization::generate_short_hash(
-                        &result.agent_id.id,
-                        &result.agent_id.tool,
-                    )
+            // AI kinds: use prompt segment hash when present, fall back to the legacy
+            // session hash for older checkpoints or callers that don't provide one.
+            prompt_id
+                .map(str::to_owned)
+                .or_else(|| {
+                    agent_run_result.map(|result| {
+                        crate::authorship::authorship_log_serialization::generate_short_hash(
+                            &result.agent_id.id,
+                            &result.agent_id.tool,
+                        )
+                    })
                 })
                 .unwrap_or_else(|| kind.to_str())
         }
