@@ -1,4 +1,5 @@
 use crate::authorship::authorship_log::LineRange;
+use crate::authorship::authorship_log_serialization::AuthorshipLog;
 use crate::authorship::ignore::{build_ignore_matcher, should_ignore_file_with_matcher};
 use crate::authorship::transcript::Message;
 use crate::error::GitAiError;
@@ -47,6 +48,19 @@ pub struct CommitStats {
     pub git_diff_added_lines: u32,
     #[serde(default)]
     pub tool_model_breakdown: BTreeMap<String, ToolModelHeadlineStats>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct FileAcceptedLineStats {
+    pub ai_accepted: u32,
+    pub known_human_accepted: u32,
+    pub ai_accepted_by_tool: BTreeMap<String, u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AddedLineOwner {
+    Human,
+    Ai(String),
 }
 
 pub fn stats_command(
@@ -563,6 +577,8 @@ pub fn stats_for_commit_stats(
 
     // Step 4: derive accepted lines directly from note attestations for lines added in this commit.
     let (ai_accepted, known_human_accepted, ai_accepted_by_tool) = accepted_lines_from_attestations(
+        repo,
+        commit_sha,
         authorship_log.as_ref(),
         &added_lines_by_file,
         is_merge_commit,
@@ -579,62 +595,91 @@ pub fn stats_for_commit_stats(
     ))
 }
 
-fn accepted_lines_from_attestations(
-    authorship_log: Option<&crate::authorship::authorship_log_serialization::AuthorshipLog>,
+pub(crate) fn accepted_lines_from_attestations_by_file(
+    repo: &Repository,
+    commit_sha: &str,
+    authorship_log: Option<&AuthorshipLog>,
     added_lines_by_file: &HashMap<String, Vec<u32>>,
     is_merge_commit: bool,
-) -> (u32, u32, BTreeMap<String, u32>) {
-    // returns (ai_accepted, known_human_accepted, per_tool_model)
+) -> BTreeMap<String, FileAcceptedLineStats> {
     if is_merge_commit {
-        return (0, 0, BTreeMap::new());
+        return BTreeMap::new();
     }
 
-    let mut total_ai_accepted = 0u32;
-    let mut known_human_accepted = 0u32;
-    let mut per_tool_model = BTreeMap::new();
-
     let Some(log) = authorship_log else {
-        return (0, 0, per_tool_model);
+        return BTreeMap::new();
     };
+
+    let mut accepted_by_file = BTreeMap::new();
 
     for file_attestation in &log.attestations {
         let Some(added_lines) = added_lines_by_file.get(&file_attestation.file_path) else {
             continue;
         };
 
+        let mut file_stats = FileAcceptedLineStats::default();
+        let mut direct_owners: HashMap<u32, AddedLineOwner> = HashMap::new();
+
         for entry in &file_attestation.entries {
-            // KnownHuman entries (h_ prefix): count as known-human-attested lines.
-            if entry.hash.starts_with("h_") {
-                let accepted = entry
-                    .line_ranges
-                    .iter()
-                    .map(|line_range| line_range_overlap_len(line_range, added_lines))
-                    .sum::<u32>();
-                if accepted > 0 {
-                    known_human_accepted += accepted;
+            let owner = owner_for_entry(log, &entry.hash);
+            for line_range in &entry.line_ranges {
+                let overlap_start = line_range_overlap_start_index(line_range, added_lines);
+                let overlap_end = line_range_overlap_end_index(line_range, added_lines);
+
+                if overlap_start >= overlap_end {
+                    continue;
                 }
-                continue;
+
+                let accepted = (overlap_end - overlap_start) as u32;
+                add_owner_counts(&mut file_stats, &owner, accepted);
+
+                for line in &added_lines[overlap_start..overlap_end] {
+                    direct_owners.entry(*line).or_insert_with(|| owner.clone());
+                }
             }
+        }
 
-            let accepted = entry
-                .line_ranges
-                .iter()
-                .map(|line_range| line_range_overlap_len(line_range, added_lines))
-                .sum::<u32>();
+        infer_whitespace_only_added_lines(
+            repo,
+            commit_sha,
+            &file_attestation.file_path,
+            added_lines,
+            &mut direct_owners,
+            &mut file_stats,
+        );
 
-            if accepted == 0 {
-                continue;
-            }
+        if file_stats.ai_accepted > 0 || file_stats.known_human_accepted > 0 {
+            accepted_by_file.insert(file_attestation.file_path.clone(), file_stats);
+        }
+    }
 
-            total_ai_accepted += accepted;
+    accepted_by_file
+}
 
-            if let Some(prompt_record) = log.metadata.prompts.get(&entry.hash) {
-                let tool_model = format!(
-                    "{}::{}",
-                    prompt_record.agent_id.tool, prompt_record.agent_id.model
-                );
-                *per_tool_model.entry(tool_model).or_insert(0) += accepted;
-            }
+fn accepted_lines_from_attestations(
+    repo: &Repository,
+    commit_sha: &str,
+    authorship_log: Option<&AuthorshipLog>,
+    added_lines_by_file: &HashMap<String, Vec<u32>>,
+    is_merge_commit: bool,
+) -> (u32, u32, BTreeMap<String, u32>) {
+    let per_file = accepted_lines_from_attestations_by_file(
+        repo,
+        commit_sha,
+        authorship_log,
+        added_lines_by_file,
+        is_merge_commit,
+    );
+
+    let mut total_ai_accepted = 0u32;
+    let mut known_human_accepted = 0u32;
+    let mut per_tool_model = BTreeMap::new();
+
+    for file_stats in per_file.values() {
+        total_ai_accepted += file_stats.ai_accepted;
+        known_human_accepted += file_stats.known_human_accepted;
+        for (tool_model, accepted) in &file_stats.ai_accepted_by_tool {
+            *per_tool_model.entry(tool_model.clone()).or_insert(0) += *accepted;
         }
     }
 
@@ -650,6 +695,124 @@ fn line_range_overlap_len(range: &LineRange, added_lines: &[u32]) -> u32 {
             end_idx.saturating_sub(start_idx) as u32
         }
     }
+}
+
+fn line_range_overlap_start_index(range: &LineRange, added_lines: &[u32]) -> usize {
+    match range {
+        LineRange::Single(line) => added_lines.partition_point(|candidate| *candidate < *line),
+        LineRange::Range(start, _) => added_lines.partition_point(|candidate| *candidate < *start),
+    }
+}
+
+fn line_range_overlap_end_index(range: &LineRange, added_lines: &[u32]) -> usize {
+    match range {
+        LineRange::Single(line) => added_lines.partition_point(|candidate| *candidate <= *line),
+        LineRange::Range(_, end) => added_lines.partition_point(|candidate| *candidate <= *end),
+    }
+}
+
+fn owner_for_entry(log: &AuthorshipLog, entry_hash: &str) -> AddedLineOwner {
+    if entry_hash.starts_with("h_") {
+        return AddedLineOwner::Human;
+    }
+
+    let tool_model = if let Some(prompt_record) = log.metadata.prompts.get(entry_hash) {
+        format!(
+            "{}::{}",
+            prompt_record.agent_id.tool, prompt_record.agent_id.model
+        )
+    } else {
+        "unknown".to_string()
+    };
+
+    AddedLineOwner::Ai(tool_model)
+}
+
+fn add_owner_counts(file_stats: &mut FileAcceptedLineStats, owner: &AddedLineOwner, count: u32) {
+    match owner {
+        AddedLineOwner::Human => {
+            file_stats.known_human_accepted += count;
+        }
+        AddedLineOwner::Ai(tool_model) => {
+            file_stats.ai_accepted += count;
+            *file_stats
+                .ai_accepted_by_tool
+                .entry(tool_model.clone())
+                .or_insert(0) += count;
+        }
+    }
+}
+
+fn infer_whitespace_only_added_lines(
+    repo: &Repository,
+    commit_sha: &str,
+    file_path: &str,
+    added_lines: &[u32],
+    direct_owners: &mut HashMap<u32, AddedLineOwner>,
+    file_stats: &mut FileAcceptedLineStats,
+) {
+    if added_lines.is_empty()
+        || added_lines.iter().all(|line| direct_owners.contains_key(line))
+        || direct_owners.is_empty()
+    {
+        return;
+    }
+
+    let Ok(content_bytes) = repo.get_file_content(file_path, commit_sha) else {
+        return;
+    };
+    let content = String::from_utf8_lossy(&content_bytes).to_string();
+    let file_lines = content.lines().collect::<Vec<_>>();
+
+    let mut index = 0usize;
+    while index < added_lines.len() {
+        let line = added_lines[index];
+        if direct_owners.contains_key(&line) || !is_whitespace_only_line(&file_lines, line) {
+            index += 1;
+            continue;
+        }
+
+        let run_start = index;
+        while index < added_lines.len() {
+            let candidate = added_lines[index];
+            if direct_owners.contains_key(&candidate)
+                || !is_whitespace_only_line(&file_lines, candidate)
+            {
+                break;
+            }
+            index += 1;
+        }
+
+        let previous_owner = run_start
+            .checked_sub(1)
+            .and_then(|neighbor_index| direct_owners.get(&added_lines[neighbor_index]).cloned());
+        let next_owner = if index < added_lines.len() {
+            direct_owners.get(&added_lines[index]).cloned()
+        } else {
+            None
+        };
+
+        let inferred_owner = match (previous_owner, next_owner) {
+            (Some(left), Some(right)) if left == right => Some(left),
+            (Some(owner), None) | (None, Some(owner)) => Some(owner),
+            _ => None,
+        };
+
+        let Some(owner) = inferred_owner else {
+            continue;
+        };
+
+        for line in &added_lines[run_start..index] {
+            direct_owners.insert(*line, owner.clone());
+            add_owner_counts(file_stats, &owner, 1);
+        }
+    }
+}
+
+fn is_whitespace_only_line(file_lines: &[&str], line_number: u32) -> bool {
+    file_lines
+        .get(line_number.saturating_sub(1) as usize)
+        .is_some_and(|line| line.trim().is_empty())
 }
 
 /// Get git diff statistics between commit and its parent
@@ -1159,6 +1322,35 @@ mod tests {
             stats.git_diff_deleted_lines, 0,
             "Git diff shows 0 deleted lines"
         );
+    }
+
+    #[test]
+    fn test_stats_attributes_trailing_blank_line_to_neighboring_known_human_block() {
+        let tmp_repo = TmpRepo::new().unwrap();
+
+        let mut file = tmp_repo.write_file("test.txt", "seed\n", true).unwrap();
+
+        tmp_repo
+            .trigger_checkpoint_with_author("test_user")
+            .unwrap();
+        tmp_repo.commit_with_message("Initial commit").unwrap();
+
+        file.append("\nHuman line 1\nHuman line 2\n\n").unwrap();
+        tmp_repo
+            .trigger_checkpoint_with_author("test_user")
+            .unwrap();
+        tmp_repo.commit_with_message("Human block with separator").unwrap();
+
+        let head_sha = tmp_repo.get_head_commit_sha().unwrap();
+        let stats = stats_for_commit_stats(tmp_repo.gitai_repo(), &head_sha, &[]).unwrap();
+
+        assert_eq!(stats.git_diff_added_lines, 4, "Git diff should count blank separator lines");
+        assert_eq!(
+            stats.human_additions, 4,
+            "Whitespace-only lines adjacent to a KnownHuman block should count as human"
+        );
+        assert_eq!(stats.unknown_additions, 0);
+        assert_eq!(stats.ai_additions, 0);
     }
 
     #[test]

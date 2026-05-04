@@ -15,16 +15,18 @@
 //! Uploads are best-effort: failures are logged and never propagated to the
 //! caller, so a network outage cannot break a `git commit`.
 
-use crate::authorship::authorship_log::{LineRange, PromptRecord};
+use crate::authorship::authorship_log::PromptRecord;
 use crate::authorship::authorship_log_serialization::{AUTHORSHIP_LOG_VERSION, AuthorshipLog};
-use crate::authorship::stats::{CommitStats, stats_for_commit_stats};
+use crate::authorship::stats::{
+    CommitStats, accepted_lines_from_attestations_by_file, stats_for_commit_stats,
+};
 use crate::authorship::transcript::Message;
 use crate::git::refs::get_authorship;
 use crate::git::repository::Repository;
 use crate::http;
 use crate::integration::ide_mcp::resolve_x_user_id;
 use serde_json::{Map, Value, json};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
 const DEFAULT_UPLOAD_URL: &str =
@@ -819,7 +821,7 @@ fn build_payload_with_source(
         git_commit_metadata(&workdir, commit_sha)
             .ok_or_else(|| "failed to read commit metadata".to_string())?;
 
-    let file_stats = build_file_stats(&workdir, commit_sha, authorship_log);
+    let file_stats = build_file_stats(repo, commit_sha, authorship_log);
     let stats_json = stats_to_camel_case(stats, file_stats);
     let prompt_stats = build_prompt_stats(&authorship_log.metadata.prompts);
 
@@ -1011,75 +1013,43 @@ fn split_tool_model(key: &str) -> (String, Option<String>) {
     }
 }
 
-fn build_file_stats(
-    workdir: &Path,
-    commit_sha: &str,
-    authorship_log: &AuthorshipLog,
-) -> Vec<Value> {
-    let numstat = git_diff_tree_numstat(workdir, commit_sha);
+fn build_file_stats(repo: &Repository, commit_sha: &str, authorship_log: &AuthorshipLog) -> Vec<Value> {
+    let workdir = repo.canonical_workdir().to_path_buf();
+    let numstat = git_diff_tree_numstat(&workdir, commit_sha);
     if numstat.is_empty() {
         return Vec::new();
     }
 
-    // Per-file (ai_lines, human_lines, breakdown)
-    let mut ai_per_file: BTreeMap<String, u32> = BTreeMap::new();
-    let mut human_per_file: BTreeMap<String, u32> = BTreeMap::new();
-    let mut breakdown_per_file: BTreeMap<String, BTreeMap<String, u32>> = BTreeMap::new();
-
-    for attestation in &authorship_log.attestations {
-        for entry in &attestation.entries {
-            let count: u32 = entry.line_ranges.iter().map(line_range_count).sum();
-            if count == 0 {
-                continue;
-            }
-
-            if entry.hash.starts_with("h_") {
-                *human_per_file
-                    .entry(attestation.file_path.clone())
-                    .or_insert(0) += count;
-            } else {
-                *ai_per_file
-                    .entry(attestation.file_path.clone())
-                    .or_insert(0) += count;
-
-                // Resolve tool/model via metadata.prompts entry
-                let key = if let Some(prompt) = authorship_log.metadata.prompts.get(&entry.hash) {
-                    let (tool, model) = normalize_tool_model(
-                        Some(prompt.agent_id.tool.as_str()),
-                        Some(prompt.agent_id.model.as_str()),
-                    );
-                    if model.is_none() {
-                        tool
-                    } else {
-                        format!("{}::{}", tool, model.unwrap())
-                    }
-                } else {
-                    "unknown".to_string()
-                };
-
-                let bucket = breakdown_per_file
-                    .entry(attestation.file_path.clone())
-                    .or_default();
-                *bucket.entry(key).or_insert(0) += count;
-            }
-        }
-    }
+    let accepted_by_file = build_added_lines_by_file(repo, commit_sha)
+        .map(|added_lines_by_file| {
+            accepted_lines_from_attestations_by_file(
+                repo,
+                commit_sha,
+                Some(authorship_log),
+                &added_lines_by_file,
+                false,
+            )
+        })
+        .unwrap_or_default();
 
     let mut files = Vec::with_capacity(numstat.len());
     for (file_path, added, deleted) in numstat {
-        let ai_attr = ai_per_file.get(&file_path).copied().unwrap_or(0);
-        let human_attr = human_per_file.get(&file_path).copied().unwrap_or(0);
+        let accepted = accepted_by_file.get(&file_path);
+        let ai_attr = accepted.map(|value| value.ai_accepted).unwrap_or(0);
+        let human_attr = accepted.map(|value| value.known_human_accepted).unwrap_or(0);
 
         let ai_add = ai_attr.min(added);
         let human_add = human_attr.min(added.saturating_sub(ai_add));
         let unknown_add = added.saturating_sub(ai_add).saturating_sub(human_add);
 
-        let breakdown = breakdown_per_file
-            .get(&file_path)
+        let breakdown = accepted
+            .map(|value| &value.ai_accepted_by_tool)
             .map(|map| {
                 map.iter()
                     .map(|(key, count)| {
-                        let (tool, model) = split_tool_model(key);
+                        let (split_tool, split_model) = split_tool_model(key);
+                        let (tool, model) =
+                            normalize_tool_model(Some(split_tool.as_str()), split_model.as_deref());
                         json!({
                             "tool": tool,
                             "model": model,
@@ -1104,17 +1074,24 @@ fn build_file_stats(
     files
 }
 
-fn line_range_count(range: &LineRange) -> u32 {
-    match range {
-        LineRange::Single(_) => 1,
-        LineRange::Range(start, end) => {
-            if end >= start {
-                end - start + 1
-            } else {
-                0
-            }
-        }
+fn build_added_lines_by_file(
+    repo: &Repository,
+    commit_sha: &str,
+) -> Result<HashMap<String, Vec<u32>>, crate::error::GitAiError> {
+    let commit_obj = repo.revparse_single(commit_sha)?.peel_to_commit()?;
+    let parent_count = commit_obj.parent_count()?;
+
+    if parent_count > 1 {
+        return Ok(HashMap::new());
     }
+
+    let from_ref = if parent_count == 0 {
+        "4b825dc642cb6eb9a060e54bf8d69288fbee4904".to_string()
+    } else {
+        commit_obj.parent(0)?.id()
+    };
+
+    repo.diff_added_lines(&from_ref, commit_sha, None)
 }
 
 fn git_diff_tree_numstat(workdir: &Path, commit_sha: &str) -> Vec<(String, u32, u32)> {
@@ -1258,6 +1235,7 @@ fn short_sha(sha: &str) -> &str {
 mod tests {
     use super::*;
     use crate::authorship::working_log::AgentId;
+    use crate::git::test_utils::TmpRepo;
     use std::collections::HashMap;
     use std::fs;
     use std::process::Command;
@@ -1290,21 +1268,6 @@ mod tests {
         let (tool, model) = normalize_tool_model(Some("github-copilot"), Some("copilot/gpt-5.4"));
         assert_eq!(tool, "github-copilot");
         assert_eq!(model.as_deref(), Some("gpt-5.4"));
-    }
-
-    #[test]
-    fn line_range_count_single() {
-        assert_eq!(line_range_count(&LineRange::Single(5)), 1);
-    }
-
-    #[test]
-    fn line_range_count_range() {
-        assert_eq!(line_range_count(&LineRange::Range(3, 7)), 5);
-    }
-
-    #[test]
-    fn line_range_count_inverted() {
-        assert_eq!(line_range_count(&LineRange::Range(8, 5)), 0);
     }
 
     #[test]
@@ -1542,6 +1505,39 @@ mod tests {
         assert_eq!(numstat[0].0, "docs/design-doc/git-ai环境变量与配置说明.md");
         assert_eq!(numstat[0].1, 2);
         assert_eq!(numstat[0].2, 0);
+    }
+
+    #[test]
+    fn build_file_stats_attributes_trailing_blank_line_to_neighboring_human_block() {
+        let tmp_repo = TmpRepo::new().expect("tmp repo");
+
+        let mut file = tmp_repo
+            .write_file("test.txt", "seed\n", true)
+            .expect("seed file");
+        tmp_repo
+            .trigger_checkpoint_with_author("test_user")
+            .expect("seed checkpoint");
+        tmp_repo.commit_with_message("seed commit").expect("seed commit");
+
+        file.append("\nHuman line 1\nHuman line 2\n\n")
+            .expect("append human block");
+        tmp_repo
+            .trigger_checkpoint_with_author("test_user")
+            .expect("human checkpoint");
+        tmp_repo
+            .commit_with_message("human block")
+            .expect("human commit");
+
+        let head_sha = tmp_repo.get_head_commit_sha().expect("head sha");
+        let authorship_log = get_authorship(tmp_repo.gitai_repo(), &head_sha).expect("authorship note");
+        let file_stats = build_file_stats(tmp_repo.gitai_repo(), &head_sha, &authorship_log);
+
+        assert_eq!(file_stats.len(), 1);
+        assert_eq!(file_stats[0]["filePath"], "test.txt");
+        assert_eq!(file_stats[0]["gitDiffAddedLines"], 4);
+        assert_eq!(file_stats[0]["humanAdditions"], 4);
+        assert_eq!(file_stats[0]["unknownAdditions"], 0);
+        assert_eq!(file_stats[0]["aiAdditions"], 0);
     }
 
     fn run_git(repo_path: &Path, args: &[&str]) {

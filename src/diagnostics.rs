@@ -1,4 +1,4 @@
-use chrono::{SecondsFormat, Utc};
+use chrono::{FixedOffset, SecondsFormat, Utc};
 use serde_json::{Map, Value, json};
 use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 const DEBUG_LOG_FILE: &str = "debug.jsonl";
 const DEBUG_LOG_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const DEBUG_LOG_RETAIN_BYTES: u64 = 512 * 1024 * 1024;
+const DEBUG_LOG_BEIJING_OFFSET_SECONDS: i32 = 8 * 60 * 60;
 
 pub(crate) fn debug_enabled() -> bool {
     match std::env::var("GIT_AI_DEBUG") {
@@ -54,7 +55,7 @@ pub(crate) fn append_debug_event(event: &str, fields: Value) {
     record.insert("timestampMs".to_string(), json!(now.timestamp_millis()));
     record.insert(
         "timestamp".to_string(),
-        Value::String(now.to_rfc3339_opts(SecondsFormat::Millis, true)),
+        Value::String(debug_timestamp(now)),
     );
     record.insert("processId".to_string(), json!(std::process::id()));
 
@@ -81,6 +82,14 @@ pub(crate) fn append_debug_event(event: &str, fields: Value) {
 
 pub(crate) fn debug_log_path() -> Option<PathBuf> {
     crate::config::git_ai_dir_path().map(|dir| dir.join("logs").join(DEBUG_LOG_FILE))
+}
+
+fn debug_timestamp(now_utc: chrono::DateTime<Utc>) -> String {
+    let beijing_offset = FixedOffset::east_opt(DEBUG_LOG_BEIJING_OFFSET_SECONDS)
+        .expect("UTC+08:00 should always be a valid fixed offset");
+    now_utc
+        .with_timezone(&beijing_offset)
+        .to_rfc3339_opts(SecondsFormat::Millis, false)
 }
 
 fn enforce_debug_log_size_limit(log_path: &Path) {
@@ -171,5 +180,14 @@ mod tests {
 
         let retained = fs::read_to_string(&log_path).unwrap();
         assert_eq!(retained, "new\n");
+    }
+
+    #[test]
+    fn debug_timestamp_uses_beijing_time() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-05-04T06:30:00.123Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        assert_eq!(debug_timestamp(now), "2026-05-04T14:30:00.123+08:00");
     }
 }

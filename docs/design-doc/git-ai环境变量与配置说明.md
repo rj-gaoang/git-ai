@@ -71,7 +71,7 @@ Linux / macOS 默认路径：
 tail -n 50 ~/.git-ai/logs/debug.jsonl
 ```
 
-当前 `debug.jsonl` 默认开启。每条日志都会包含 `timestampMs` 和人类可读的 UTC `timestamp`。当文件超过 2GB 时，`git-ai` 会尽力只保留最近约 512MB 内容后继续写入，避免无限占用用户磁盘。日志写入失败、裁剪失败都不会阻断 commit、stats 或上传主流程。
+当前 `debug.jsonl` 默认开启。每条日志都会包含 `timestampMs` 和人类可读的北京时间 `timestamp`（固定 `UTC+08:00`，例如 `2026-05-04T22:31:45.123+08:00`）。其中 `timestampMs` 仍然是 Unix epoch 毫秒值，便于机器排序和跨时区比对。当文件超过 2GB 时，`git-ai` 会尽力只保留最近约 512MB 内容后继续写入，避免无限占用用户磁盘。日志写入失败、裁剪失败都不会阻断 commit、stats 或上传主流程。
 
 ## 三、怎么设置变量
 
