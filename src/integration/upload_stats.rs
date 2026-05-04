@@ -17,6 +17,7 @@
 
 use crate::authorship::authorship_log::PromptRecord;
 use crate::authorship::authorship_log_serialization::{AUTHORSHIP_LOG_VERSION, AuthorshipLog};
+use crate::authorship::internal_db::InternalDatabase;
 use crate::authorship::stats::{
     CommitStats, accepted_lines_from_attestations_by_file, stats_for_commit_stats,
 };
@@ -272,7 +273,7 @@ pub fn upload_local_commit_stats(
         }),
     );
 
-    let Some(authorship_log) = get_authorship(repo, commit_sha) else {
+    let Some(mut authorship_log) = get_authorship(repo, commit_sha) else {
         crate::diagnostics::append_debug_event(
             "upload_stats_skipped",
             json!({
@@ -288,6 +289,8 @@ pub fn upload_local_commit_stats(
             reason: "no_authorship_note",
         });
     };
+
+    hydrate_prompts_from_local_db(&mut authorship_log.metadata.prompts);
 
     crate::diagnostics::append_debug_event(
         "upload_stats_manual_authorship_note_loaded",
@@ -494,6 +497,76 @@ pub fn upload_local_commit_stats(
                 commit_short, source, error
             ));
             Err(error)
+        }
+    }
+}
+
+fn hydrate_prompts_from_local_db(prompts: &mut BTreeMap<String, PromptRecord>) {
+    if prompts.is_empty() {
+        return;
+    }
+
+    let Ok(db_mutex) = InternalDatabase::global() else {
+        return;
+    };
+    let Ok(db_guard) = db_mutex.lock() else {
+        return;
+    };
+
+    let mut hydrated_segments = Vec::new();
+
+    for (prompt_id, prompt) in prompts.iter() {
+        if !prompt.messages.is_empty() {
+            continue;
+        }
+
+        if let Ok(Some(db_record)) = db_guard.get_prompt(prompt_id) {
+            let user_messages = db_record
+                .messages
+                .messages()
+                .iter()
+                .filter(|message| matches!(message, Message::User { .. }))
+                .cloned()
+                .collect::<Vec<_>>();
+
+            if user_messages.is_empty() {
+                continue;
+            }
+
+            hydrated_segments.push((
+                prompt_id.clone(),
+                format!("{}::{}", db_record.tool, db_record.external_thread_id),
+                db_record.updated_at,
+                user_messages,
+            ));
+        }
+    }
+
+    hydrated_segments.sort_by(|left, right| {
+        left.1
+            .cmp(&right.1)
+            .then_with(|| left.2.cmp(&right.2))
+            .then_with(|| left.0.cmp(&right.0))
+    });
+
+    let mut previous_session_messages: HashMap<String, Vec<Message>> = HashMap::new();
+
+    for (prompt_id, session_key, _updated_at, user_messages) in hydrated_segments {
+        let new_messages = if let Some(previous_messages) = previous_session_messages.get(&session_key)
+        {
+            if user_messages.starts_with(previous_messages) {
+                user_messages[previous_messages.len()..].to_vec()
+            } else {
+                user_messages.clone()
+            }
+        } else {
+            user_messages.clone()
+        };
+
+        previous_session_messages.insert(session_key, user_messages);
+
+        if let Some(prompt) = prompts.get_mut(&prompt_id) {
+            prompt.messages = new_messages;
         }
     }
 }
@@ -1303,6 +1376,8 @@ fn short_sha(sha: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::authorship::internal_db::{InternalDatabase, PromptDbRecord};
+    use crate::authorship::transcript::AiTranscript;
     use crate::authorship::working_log::AgentId;
     use crate::git::test_utils::TmpRepo;
     use std::collections::HashMap;
@@ -1483,6 +1558,143 @@ mod tests {
         let payload = build_prompt_stats(&prompts);
         assert_eq!(payload[0]["tool"], "github-copilot");
         assert_eq!(payload[0]["model"], "gpt-5.4");
+    }
+
+    #[test]
+    fn hydrate_prompts_from_local_db_reconstructs_incremental_user_segments() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let prompt_a_id = format!("prompt-a-{unique}");
+        let prompt_b_id = format!("prompt-b-{unique}");
+        let session_id = format!("session-{unique}");
+
+        let mut transcript_a = AiTranscript::new();
+        transcript_a.add_message(Message::user(
+            "first prompt".to_string(),
+            Some("2026-05-05T01:00:00Z".to_string()),
+        ));
+        transcript_a.add_message(Message::assistant(
+            "assistant reply".to_string(),
+            Some("2026-05-05T01:00:01Z".to_string()),
+        ));
+
+        let mut transcript_b = AiTranscript::new();
+        transcript_b.add_message(Message::user(
+            "first prompt".to_string(),
+            Some("2026-05-05T01:00:00Z".to_string()),
+        ));
+        transcript_b.add_message(Message::assistant(
+            "assistant reply".to_string(),
+            Some("2026-05-05T01:00:01Z".to_string()),
+        ));
+        transcript_b.add_message(Message::user(
+            "second prompt".to_string(),
+            Some("2026-05-05T01:01:00Z".to_string()),
+        ));
+        transcript_b.add_message(Message::assistant(
+            "assistant follow-up".to_string(),
+            Some("2026-05-05T01:01:01Z".to_string()),
+        ));
+
+        let db = InternalDatabase::global().unwrap();
+        let mut db_guard = db.lock().unwrap();
+        db_guard
+            .batch_upsert_prompts(&[
+                PromptDbRecord {
+                    id: prompt_a_id.clone(),
+                    workdir: None,
+                    tool: "github-copilot".to_string(),
+                    model: "copilot/gpt-5.4".to_string(),
+                    external_thread_id: session_id.clone(),
+                    messages: transcript_a,
+                    commit_sha: None,
+                    agent_metadata: None,
+                    human_author: Some("shunfei".to_string()),
+                    total_additions: None,
+                    total_deletions: None,
+                    accepted_lines: None,
+                    overridden_lines: None,
+                    created_at: 100,
+                    updated_at: 101,
+                },
+                PromptDbRecord {
+                    id: prompt_b_id.clone(),
+                    workdir: None,
+                    tool: "github-copilot".to_string(),
+                    model: "copilot/gpt-5.4".to_string(),
+                    external_thread_id: session_id,
+                    messages: transcript_b,
+                    commit_sha: None,
+                    agent_metadata: None,
+                    human_author: Some("shunfei".to_string()),
+                    total_additions: None,
+                    total_deletions: None,
+                    accepted_lines: None,
+                    overridden_lines: None,
+                    created_at: 100,
+                    updated_at: 102,
+                },
+            ])
+            .unwrap();
+        drop(db_guard);
+
+        let mut prompts = BTreeMap::from([
+            (
+                prompt_a_id.clone(),
+                PromptRecord {
+                    agent_id: AgentId {
+                        tool: "github-copilot".to_string(),
+                        id: "session-a".to_string(),
+                        model: "copilot/gpt-5.4".to_string(),
+                    },
+                    human_author: Some("shunfei".to_string()),
+                    messages: Vec::new(),
+                    total_additions: 0,
+                    total_deletions: 0,
+                    accepted_lines: 0,
+                    overriden_lines: 0,
+                    messages_url: None,
+                    custom_attributes: None,
+                },
+            ),
+            (
+                prompt_b_id.clone(),
+                PromptRecord {
+                    agent_id: AgentId {
+                        tool: "github-copilot".to_string(),
+                        id: "session-a".to_string(),
+                        model: "copilot/gpt-5.4".to_string(),
+                    },
+                    human_author: Some("shunfei".to_string()),
+                    messages: Vec::new(),
+                    total_additions: 0,
+                    total_deletions: 0,
+                    accepted_lines: 0,
+                    overriden_lines: 0,
+                    messages_url: None,
+                    custom_attributes: None,
+                },
+            ),
+        ]);
+
+        hydrate_prompts_from_local_db(&mut prompts);
+
+        assert_eq!(
+            prompts[&prompt_a_id].messages,
+            vec![Message::user(
+                "first prompt".to_string(),
+                Some("2026-05-05T01:00:00Z".to_string()),
+            )]
+        );
+        assert_eq!(
+            prompts[&prompt_b_id].messages,
+            vec![Message::user(
+                "second prompt".to_string(),
+                Some("2026-05-05T01:01:00Z".to_string()),
+            )]
+        );
     }
 
     #[test]
