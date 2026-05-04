@@ -4,7 +4,9 @@ use crate::authorship::ignore::{
     build_ignore_matcher, effective_ignore_patterns, should_ignore_file_with_matcher,
 };
 use crate::authorship::prompt_utils::{PromptUpdateResult, update_prompt_from_tool};
-use crate::authorship::secrets::{redact_secrets_from_prompts, strip_prompt_messages};
+use crate::authorship::secrets::{
+    redact_secrets_from_prompts, retain_user_prompt_messages, strip_prompt_messages,
+};
 use crate::authorship::stats::{stats_for_commit_stats, write_stats_to_terminal};
 use crate::authorship::virtual_attribution::VirtualAttributions;
 use crate::authorship::working_log::{Checkpoint, CheckpointKind, WorkingLogEntry};
@@ -219,6 +221,9 @@ pub fn post_commit_with_final_state(
             pr.custom_attributes = Some(custom_attrs.clone());
         }
     }
+
+    // Persist and upload only the user's prompt inputs, not assistant/tool outputs.
+    retain_user_prompt_messages(&mut authorship_log.metadata.prompts);
 
     match effective_storage {
         PromptStorageMode::Local => {

@@ -492,6 +492,15 @@ pub fn redact_secrets_from_prompts(prompts: &mut BTreeMap<String, PromptRecord>)
     total_redactions
 }
 
+/// Keep only user-entered prompt text in each PromptRecord.
+pub fn retain_user_prompt_messages(prompts: &mut BTreeMap<String, PromptRecord>) {
+    for record in prompts.values_mut() {
+        record
+            .messages
+            .retain(|message| matches!(message, Message::User { .. }));
+    }
+}
+
 /// Strip all messages from prompts (used when sharing is disabled).
 pub fn strip_prompt_messages(prompts: &mut BTreeMap<String, PromptRecord>) {
     for record in prompts.values_mut() {
@@ -510,6 +519,42 @@ mod tests {
         // These should be detected as random
         assert!(p_random(b"pk_test_TYooMQauvdEDq54NiTphI7jx") > 1.0 / 1e4);
         assert!(p_random(b"sk_test_4eC39HqLyjWDarjtT1zdp7dc") > 1.0 / 1e4);
+    }
+
+    #[test]
+    fn retain_user_prompt_messages_drops_non_user_entries() {
+        let mut prompts = BTreeMap::from([(
+            "prompt-1".to_string(),
+            PromptRecord {
+                agent_id: crate::authorship::working_log::AgentId {
+                    tool: "github-copilot".to_string(),
+                    id: "session-1".to_string(),
+                    model: "gpt-5.4".to_string(),
+                },
+                human_author: Some("dev@example.com".to_string()),
+                messages: vec![
+                    Message::user("user prompt".to_string(), None),
+                    Message::assistant("assistant reply".to_string(), None),
+                    Message::tool_use("apply_patch".to_string(), serde_json::json!({"x": 1})),
+                    Message::User {
+                        text: "second prompt".to_string(),
+                        timestamp: Some("2026-05-04T00:00:00Z".to_string()),
+                    },
+                ],
+                total_additions: 0,
+                total_deletions: 0,
+                accepted_lines: 0,
+                overriden_lines: 0,
+                messages_url: None,
+                custom_attributes: None,
+            },
+        )]);
+
+        retain_user_prompt_messages(&mut prompts);
+
+        let messages = &prompts.get("prompt-1").unwrap().messages;
+        assert_eq!(messages.len(), 2);
+        assert!(messages.iter().all(|message| matches!(message, Message::User { .. })));
     }
 
     #[test]

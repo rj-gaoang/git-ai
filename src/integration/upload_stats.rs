@@ -990,7 +990,12 @@ fn extract_prompt_text(messages: &[Message]) -> Option<String> {
 }
 
 fn serialize_prompt_messages(messages: &[Message]) -> Value {
-    serde_json::to_value(messages).unwrap_or_else(|_| Value::Array(Vec::new()))
+    let user_messages = messages
+        .iter()
+        .filter(|message| matches!(message, Message::User { .. }))
+        .cloned()
+        .collect::<Vec<_>>();
+    serde_json::to_value(user_messages).unwrap_or_else(|_| Value::Array(Vec::new()))
 }
 
 fn trim_non_empty(value: &str) -> Option<String> {
@@ -1416,7 +1421,12 @@ mod tests {
         assert_eq!(prompt["acceptedLines"], 7);
         assert_eq!(prompt["customAttributes"]["language"], "rust");
         assert!(prompt["messages"].is_array());
-        assert_eq!(prompt["messages"].as_array().map(Vec::len), Some(3));
+        assert_eq!(prompt["messages"].as_array().map(Vec::len), Some(2));
+        assert!(prompt["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|message| message["type"] == "user"));
     }
 
     #[test]
