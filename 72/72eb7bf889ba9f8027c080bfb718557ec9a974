@@ -1,0 +1,43 @@
+src/authorship/authorship_log_serialization.rs
+  96e6006e1e5f0855 438,440,442,449-450,464-465,468,471,491,506
+src/authorship/virtual_attribution.rs
+  96e6006e1e5f0855 5-6,36-89,395,435-437,441-444,454,459,462,464,565,597-599,603-606,616,619,621,623,716,748-750,754-757,767,770,772,774,2771-2773,2775-2793,2847-2928
+src/authorship/authorship_log.rs
+  96e6006e1e5f0855 208
+src/authorship/internal_db.rs
+  96e6006e1e5f0855 114-117
+docs/design-doc/git-ai看板方案.md
+  96e6006e1e5f0855 73-74,2391,2665-2687
+src/commands/checkpoint.rs
+  96e6006e1e5f0855 163,170-172,229-249,1061-1073,1084,1110,1178-1183,2435,2482-2492
+src/authorship/working_log.rs
+  96e6006e1e5f0855 129-130,163
+src/authorship/rebase_authorship.rs
+  96e6006e1e5f0855 4185-4188
+---
+{
+  "schema_version": "authorship/3.1.0",
+  "git_ai_version": "2.0.23",
+  "x_user_id": "108",
+  "base_commit_sha": "7272eb7bf889ba9f8027c080bfb718557ec9a974",
+  "prompts": {
+    "96e6006e1e5f0855": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "c6a1eca2-8f6f-460a-99cd-3c1e523c21b4",
+        "model": "copilot/gpt-5.4"
+      },
+      "human_author": "shunfei",
+      "messages": [],
+      "total_additions": 322,
+      "total_deletions": 91,
+      "accepted_lines": 308,
+      "overriden_lines": 0
+    }
+  },
+  "humans": {
+    "h_c122390aeb95ca": {
+      "author": "shunfei"
+    }
+  }
+}
