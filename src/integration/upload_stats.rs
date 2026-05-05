@@ -17,12 +17,13 @@
 
 use crate::authorship::authorship_log::PromptRecord;
 use crate::authorship::authorship_log_serialization::{AUTHORSHIP_LOG_VERSION, AuthorshipLog};
+use crate::authorship::range_authorship::{self, RangeAuthorshipStats};
 use crate::authorship::stats::{
     CommitStats, accepted_lines_from_attestations_by_file, stats_for_commit_stats,
 };
 use crate::authorship::transcript::Message;
 use crate::git::refs::get_authorship;
-use crate::git::repository::Repository;
+use crate::git::repository::{CommitRange, Repository};
 use crate::http;
 use crate::integration::ide_mcp::resolve_x_user_id;
 use serde_json::{Map, Value, json};
@@ -31,6 +32,8 @@ use std::path::Path;
 
 const DEFAULT_UPLOAD_URL: &str =
     "https://service-gw.ruijie.com.cn/api/ai-cr-manage-service/api/public/upload/ai-stats";
+const DEFAULT_ONLINE_UPLOAD_URL: &str =
+    "https://service-gw.ruijie.com.cn/api/ai-cr-manage-service/api/public/upload/ai-online-stats";
 const UPLOAD_TIMEOUT_SECS: u64 = 10;
 
 #[derive(Debug, Clone)]
@@ -50,6 +53,40 @@ pub enum ManualUploadOutcome {
         commit_sha: String,
         reason: &'static str,
     },
+}
+
+#[derive(Debug, Clone)]
+pub enum OnlineUploadOutcome {
+    DryRun {
+        base_commit: String,
+        head_commit: String,
+        url: String,
+        url_source: &'static str,
+        payload_summary: Value,
+    },
+    Uploaded {
+        base_commit: String,
+        head_commit: String,
+        url: String,
+        status_code: u16,
+    },
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct OnlineUploadOptions {
+    pub dry_run: bool,
+    pub repo_url: Option<String>,
+    pub project_name: Option<String>,
+    pub target_branch: Option<String>,
+    pub environment: Option<String>,
+    pub metric_scope: Option<String>,
+    pub merge_commit: Option<String>,
+    pub source_head_commit: Option<String>,
+    pub mr_iid: Option<String>,
+    pub merge_strategy: Option<String>,
+    pub pipeline_id: Option<String>,
+    pub job_id: Option<String>,
+    pub source: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -94,6 +131,25 @@ fn resolve_upload_url_with_source() -> (String, &'static str) {
     }
 
     (DEFAULT_UPLOAD_URL.to_string(), "built_in_default")
+}
+
+fn resolve_online_upload_url_with_source() -> (String, &'static str) {
+    if let Some(url) = env_non_empty("GIT_AI_ONLINE_STATS_REMOTE_URL") {
+        return (url, "GIT_AI_ONLINE_STATS_REMOTE_URL");
+    }
+
+    let endpoint = env_non_empty("GIT_AI_ONLINE_STATS_REMOTE_ENDPOINT");
+    let path = env_non_empty("GIT_AI_ONLINE_STATS_REMOTE_PATH");
+    if let (Some(endpoint), Some(path)) = (endpoint.as_ref(), path.as_ref()) {
+        let endpoint = endpoint.trim_end_matches('/');
+        let path = path.trim_start_matches('/');
+        return (
+            format!("{}/{}", endpoint, path),
+            "GIT_AI_ONLINE_STATS_REMOTE_ENDPOINT+GIT_AI_ONLINE_STATS_REMOTE_PATH",
+        );
+    }
+
+    (DEFAULT_ONLINE_UPLOAD_URL.to_string(), "built_in_default")
 }
 
 fn env_non_empty(name: &str) -> Option<String> {
@@ -498,6 +554,110 @@ pub fn upload_local_commit_stats(
     }
 }
 
+pub fn upload_online_range_stats(
+    repo: &Repository,
+    base_rev: &str,
+    head_rev: &str,
+    ignore_patterns: &[String],
+    options: &OnlineUploadOptions,
+) -> Result<OnlineUploadOutcome, String> {
+    let range = CommitRange::new_infer_refname(
+        repo,
+        base_rev.to_string(),
+        head_rev.to_string(),
+        Some(head_rev.to_string()),
+    )
+    .map_err(|error| error.to_string())?;
+    let base_commit = range.start_oid.clone();
+    let head_commit = range.end_oid.clone();
+
+    crate::diagnostics::append_debug_event(
+        "upload_online_stats_entered",
+        json!({
+            "baseCommit": base_commit,
+            "headCommit": head_commit,
+            "repo": repo.canonical_workdir().to_string_lossy().to_string(),
+            "dryRun": options.dry_run,
+            "ignorePatternCount": ignore_patterns.len(),
+        }),
+    );
+
+    let range_stats = range_authorship::range_authorship(range, false, ignore_patterns, None)
+        .map_err(|error| {
+            let error = error.to_string();
+            crate::diagnostics::append_debug_event(
+                "upload_online_stats_skipped",
+                json!({
+                    "reason": "range_stats_failed",
+                    "baseCommit": base_commit,
+                    "headCommit": head_commit,
+                    "repo": repo.canonical_workdir().to_string_lossy().to_string(),
+                    "error": error,
+                }),
+            );
+            error
+        })?;
+
+    let payload = build_online_payload(repo, &base_commit, &head_commit, &range_stats, options)?;
+    let (url, url_source) = resolve_online_upload_url_with_source();
+    let api_key = env_non_empty("GIT_AI_REPORT_REMOTE_API_KEY");
+    let explicit_user_id = env_non_empty("GIT_AI_REPORT_REMOTE_USER_ID");
+    let user_id = explicit_user_id
+        .clone()
+        .or_else(|| resolve_x_user_id(Some(repo.canonical_workdir())));
+    let payload_summary = online_payload_summary(&payload);
+
+    crate::diagnostics::append_debug_event(
+        "upload_online_stats_ready",
+        json!({
+            "baseCommit": base_commit,
+            "headCommit": head_commit,
+            "repo": repo.canonical_workdir().to_string_lossy().to_string(),
+            "mode": if options.dry_run { "manual_dry_run" } else { "manual" },
+            "url": url,
+            "urlSource": url_source,
+            "hasApiKey": api_key.is_some(),
+            "hasUserId": user_id.is_some(),
+            "payloadSummary": payload_summary,
+        }),
+    );
+
+    if options.dry_run {
+        return Ok(OnlineUploadOutcome::DryRun {
+            base_commit,
+            head_commit,
+            url,
+            url_source,
+            payload_summary,
+        });
+    }
+
+    let debug_context = UploadDebugContext {
+        commit_sha: head_commit.clone(),
+        commit_short: short_sha(&head_commit).to_string(),
+        source: options
+            .source
+            .clone()
+            .unwrap_or_else(|| "git-ai-ci".to_string()),
+        mode: "online_manual".to_string(),
+    };
+
+    let status_code = perform_upload(
+        &url,
+        &payload,
+        api_key.as_deref(),
+        user_id.as_deref(),
+        &debug_context,
+    )?;
+
+    Ok(OnlineUploadOutcome::Uploaded {
+        base_commit,
+        head_commit,
+        url,
+        status_code,
+    })
+}
+
 fn dispatch_upload(
     run_in_background: bool,
     url: String,
@@ -631,6 +791,100 @@ fn upload_stats_summary(stats: &CommitStats) -> Value {
         "gitDiffDeletedLines": stats.git_diff_deleted_lines,
         "toolModelBreakdownCount": stats.tool_model_breakdown.len(),
     })
+}
+
+fn build_online_payload(
+    repo: &Repository,
+    base_commit: &str,
+    head_commit: &str,
+    range_stats: &RangeAuthorshipStats,
+    options: &OnlineUploadOptions,
+) -> Result<Value, String> {
+    let workdir = repo.canonical_workdir().to_path_buf();
+    let derived_repo_url = git_repo_url(&workdir);
+    let repo_url = options
+        .repo_url
+        .clone()
+        .or(derived_repo_url.clone())
+        .unwrap_or_default();
+    let project_name = options
+        .project_name
+        .clone()
+        .unwrap_or_else(|| derive_project_name(derived_repo_url.as_deref(), &workdir));
+    let target_branch = options
+        .target_branch
+        .clone()
+        .or_else(|| git_current_branch(&workdir))
+        .unwrap_or_default();
+    let stats = &range_stats.range_stats;
+    let total_add_lines = stats.git_diff_added_lines;
+    let ai_add_lines = stats.ai_additions;
+    let human_add_lines = stats.human_additions;
+    let unknown_add_lines = stats.unknown_additions;
+
+    Ok(json!({
+        "repoUrl": repo_url,
+        "projectName": project_name,
+        "targetBranch": target_branch,
+        "environment": options.environment.clone().unwrap_or_default(),
+        "metricScope": options.metric_scope.clone().unwrap_or_else(|| "mr-final-delta".to_string()),
+        "baseCommit": base_commit,
+        "headCommit": head_commit,
+        "mergeCommit": options.merge_commit.clone(),
+        "sourceHeadCommit": options.source_head_commit.clone(),
+        "mrIid": options.mr_iid.clone(),
+        "mergeStrategy": options.merge_strategy.clone(),
+        "pipelineId": options.pipeline_id.clone(),
+        "jobId": options.job_id.clone(),
+        "source": options.source.clone().unwrap_or_else(|| "git-ai-ci".to_string()),
+        "stats": {
+            "totalAddLines": total_add_lines,
+            "aiAddLines": ai_add_lines,
+            "humanAddLines": human_add_lines,
+            "unknownAddLines": unknown_add_lines,
+            "totalDelLines": stats.git_diff_deleted_lines,
+            "aiRate": ratio(ai_add_lines, total_add_lines),
+            "unknownRate": ratio(unknown_add_lines, total_add_lines),
+            "noteCoverageRate": ratio(ai_add_lines + human_add_lines, total_add_lines),
+            "gitDiffAddedLines": stats.git_diff_added_lines,
+            "gitDiffDeletedLines": stats.git_diff_deleted_lines,
+            "aiAdditions": stats.ai_additions,
+            "humanAdditions": stats.human_additions,
+            "unknownAdditions": stats.unknown_additions
+        },
+        "authorship": {
+            "totalCommits": range_stats.authorship_stats.total_commits,
+            "commitsWithAuthorship": range_stats.authorship_stats.commits_with_authorship,
+            "commitsWithoutAuthorship": range_stats.authorship_stats.commits_without_authorship,
+            "commitsWithoutAuthorshipWithAuthors": range_stats.authorship_stats.commits_without_authorship_with_authors
+        }
+    }))
+}
+
+fn online_payload_summary(payload: &Value) -> Value {
+    let stats = payload.get("stats");
+    json!({
+        "projectName": payload.get("projectName").and_then(Value::as_str),
+        "targetBranch": payload.get("targetBranch").and_then(Value::as_str),
+        "environment": payload.get("environment").and_then(Value::as_str),
+        "metricScope": payload.get("metricScope").and_then(Value::as_str),
+        "baseCommit": payload.get("baseCommit").and_then(Value::as_str),
+        "headCommit": payload.get("headCommit").and_then(Value::as_str),
+        "stats": stats.map(|stats| json!({
+            "totalAddLines": stats.get("totalAddLines").and_then(Value::as_u64).unwrap_or(0),
+            "aiAddLines": stats.get("aiAddLines").and_then(Value::as_u64).unwrap_or(0),
+            "humanAddLines": stats.get("humanAddLines").and_then(Value::as_u64).unwrap_or(0),
+            "unknownAddLines": stats.get("unknownAddLines").and_then(Value::as_u64).unwrap_or(0),
+        })),
+    })
+}
+
+fn ratio(numerator: u32, denominator: u32) -> f64 {
+    if denominator == 0 {
+        return 0.0;
+    }
+    let value = numerator as f64 / denominator as f64;
+    (value * 10000.0).round() / 10000.0
 }
 
 fn upload_payload_summary(payload: &Value) -> Value {
@@ -1082,7 +1336,11 @@ fn split_tool_model(key: &str) -> (String, Option<String>) {
     }
 }
 
-fn build_file_stats(repo: &Repository, commit_sha: &str, authorship_log: &AuthorshipLog) -> Vec<Value> {
+fn build_file_stats(
+    repo: &Repository,
+    commit_sha: &str,
+    authorship_log: &AuthorshipLog,
+) -> Vec<Value> {
     let workdir = repo.canonical_workdir().to_path_buf();
     let numstat = git_diff_tree_numstat(&workdir, commit_sha);
     if numstat.is_empty() {
@@ -1105,7 +1363,9 @@ fn build_file_stats(repo: &Repository, commit_sha: &str, authorship_log: &Author
     for (file_path, added, deleted) in numstat {
         let accepted = accepted_by_file.get(&file_path);
         let ai_attr = accepted.map(|value| value.ai_accepted).unwrap_or(0);
-        let human_attr = accepted.map(|value| value.known_human_accepted).unwrap_or(0);
+        let human_attr = accepted
+            .map(|value| value.known_human_accepted)
+            .unwrap_or(0);
 
         let ai_add = ai_attr.min(added);
         let human_add = human_attr.min(added.saturating_sub(ai_add));
@@ -1422,11 +1682,13 @@ mod tests {
         assert_eq!(prompt["customAttributes"]["language"], "rust");
         assert!(prompt["messages"].is_array());
         assert_eq!(prompt["messages"].as_array().map(Vec::len), Some(2));
-        assert!(prompt["messages"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|message| message["type"] == "user"));
+        assert!(
+            prompt["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|message| message["type"] == "user")
+        );
     }
 
     #[test]
@@ -1520,8 +1782,9 @@ mod tests {
 
     #[test]
     fn inspect_backend_response_body_accepts_success_code() {
-        let result = inspect_backend_response_body("{\"code\":200,\"msg\":\"操作成功\"}".as_bytes())
-            .expect("success body should pass");
+        let result =
+            inspect_backend_response_body("{\"code\":200,\"msg\":\"操作成功\"}".as_bytes())
+                .expect("success body should pass");
 
         assert_eq!(result, Some((200, Some("操作成功".to_string()))));
     }
@@ -1533,12 +1796,16 @@ mod tests {
         )
         .expect_err("non-200 backend code should fail upload");
 
-        assert_eq!(error, "backend returned code 500: 数据库中已存在该记录，请联系管理员确认");
+        assert_eq!(
+            error,
+            "backend returned code 500: 数据库中已存在该记录，请联系管理员确认"
+        );
     }
 
     #[test]
     fn inspect_backend_response_body_ignores_non_standard_success_body() {
-        let result = inspect_backend_response_body(b"ok").expect("non-json success body should not fail");
+        let result =
+            inspect_backend_response_body(b"ok").expect("non-json success body should not fail");
 
         assert_eq!(result, None);
     }
@@ -1616,7 +1883,9 @@ mod tests {
         tmp_repo
             .trigger_checkpoint_with_author("test_user")
             .expect("seed checkpoint");
-        tmp_repo.commit_with_message("seed commit").expect("seed commit");
+        tmp_repo
+            .commit_with_message("seed commit")
+            .expect("seed commit");
 
         file.append("\nHuman line 1\nHuman line 2\n\n")
             .expect("append human block");
@@ -1628,7 +1897,8 @@ mod tests {
             .expect("human commit");
 
         let head_sha = tmp_repo.get_head_commit_sha().expect("head sha");
-        let authorship_log = get_authorship(tmp_repo.gitai_repo(), &head_sha).expect("authorship note");
+        let authorship_log =
+            get_authorship(tmp_repo.gitai_repo(), &head_sha).expect("authorship note");
         let file_stats = build_file_stats(tmp_repo.gitai_repo(), &head_sha, &authorship_log);
 
         assert_eq!(file_stats.len(), 1);

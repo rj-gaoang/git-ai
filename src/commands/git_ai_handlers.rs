@@ -124,6 +124,9 @@ pub fn handle_git_ai(args: &[String]) {
         "upload-stats" | "upload-ai-stats" => {
             handle_upload_stats(&args[1..]);
         }
+        "upload-online-stats" | "upload-ai-online-stats" => {
+            handle_upload_online_stats(&args[1..]);
+        }
         "status" => {
             commands::status::handle_status(&args[1..]);
         }
@@ -289,6 +292,9 @@ fn print_help() {
     eprintln!("  stats [commit]     Show AI authorship statistics for a commit");
     eprintln!("    --json                 Output in JSON format");
     eprintln!("  upload-stats [commit...]  Manually upload local AI stats for one or more commits");
+    eprintln!(
+        "  upload-online-stats --base <commit> --head <commit>  Upload final online range AI stats"
+    );
     eprintln!("    --dry-run             Build the upload payload without sending it");
     eprintln!("    --source <name>       Source label written into the payload (default: manual)");
     eprintln!(
@@ -2107,6 +2113,14 @@ struct UploadStatsArgs {
     ignore_patterns: Vec<String>,
 }
 
+#[derive(Debug, Clone)]
+struct UploadOnlineStatsArgs {
+    base_rev: String,
+    head_rev: String,
+    options: crate::integration::upload_stats::OnlineUploadOptions,
+    ignore_patterns: Vec<String>,
+}
+
 fn handle_upload_stats(args: &[String]) {
     let repo = match find_repository(&Vec::<String>::new()) {
         Ok(repo) => repo,
@@ -2220,6 +2234,68 @@ fn handle_upload_stats(args: &[String]) {
     }
 }
 
+fn handle_upload_online_stats(args: &[String]) {
+    let repo = match find_repository(&Vec::<String>::new()) {
+        Ok(repo) => repo,
+        Err(e) => {
+            eprintln!("Failed to find repository: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    let parsed = match parse_upload_online_stats_args(args) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            eprintln!("upload-online-stats: {}", error);
+            std::process::exit(1);
+        }
+    };
+
+    let effective_patterns = effective_ignore_patterns(&repo, &parsed.ignore_patterns, &[]);
+    match crate::integration::upload_stats::upload_online_range_stats(
+        &repo,
+        &parsed.base_rev,
+        &parsed.head_rev,
+        &effective_patterns,
+        &parsed.options,
+    ) {
+        Ok(crate::integration::upload_stats::OnlineUploadOutcome::DryRun {
+            base_commit,
+            head_commit,
+            url,
+            url_source,
+            payload_summary,
+        }) => {
+            println!(
+                "[git-ai] upload-online-stats: dry-run {}..{} url={} urlSource={} summary={}",
+                short_commit_sha(&base_commit),
+                short_commit_sha(&head_commit),
+                url,
+                url_source,
+                payload_summary
+            );
+        }
+        Ok(crate::integration::upload_stats::OnlineUploadOutcome::Uploaded {
+            base_commit,
+            head_commit,
+            url,
+            status_code,
+        }) => {
+            println!(
+                "[git-ai] upload-online-stats: uploaded {}..{} status={} url={}",
+                short_commit_sha(&base_commit),
+                short_commit_sha(&head_commit),
+                status_code,
+                url
+            );
+        }
+        Err(error) => {
+            eprintln!("[git-ai] upload-online-stats: failed: {}", error);
+            std::process::exit(1);
+        }
+    }
+}
+
 fn parse_upload_stats_args(args: &[String]) -> Result<UploadStatsArgs, String> {
     let mut dry_run = false;
     let mut source = "manual".to_string();
@@ -2271,6 +2347,130 @@ fn parse_upload_stats_args(args: &[String]) -> Result<UploadStatsArgs, String> {
         source,
         ignore_patterns,
     })
+}
+
+fn parse_upload_online_stats_args(args: &[String]) -> Result<UploadOnlineStatsArgs, String> {
+    let mut base_rev: Option<String> = None;
+    let mut head_rev: Option<String> = None;
+    let mut ignore_patterns = Vec::new();
+    let mut options = crate::integration::upload_stats::OnlineUploadOptions {
+        source: Some("git-ai-ci".to_string()),
+        metric_scope: Some("mr-final-delta".to_string()),
+        ..Default::default()
+    };
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--dry-run" => {
+                options.dry_run = true;
+                i += 1;
+            }
+            "--base" => {
+                base_rev = Some(required_arg(args, i, "--base")?);
+                i += 2;
+            }
+            "--head" => {
+                head_rev = Some(required_arg(args, i, "--head")?);
+                i += 2;
+            }
+            "--repo-url" => {
+                options.repo_url = Some(required_arg(args, i, "--repo-url")?);
+                i += 2;
+            }
+            "--project-name" => {
+                options.project_name = Some(required_arg(args, i, "--project-name")?);
+                i += 2;
+            }
+            "--target-branch" => {
+                options.target_branch = Some(required_arg(args, i, "--target-branch")?);
+                i += 2;
+            }
+            "--environment" => {
+                options.environment = Some(required_arg(args, i, "--environment")?);
+                i += 2;
+            }
+            "--metric-scope" => {
+                options.metric_scope = Some(required_arg(args, i, "--metric-scope")?);
+                i += 2;
+            }
+            "--merge-commit" => {
+                options.merge_commit = Some(required_arg(args, i, "--merge-commit")?);
+                i += 2;
+            }
+            "--source-head" | "--source-head-commit" => {
+                options.source_head_commit = Some(required_arg(args, i, args[i].as_str())?);
+                i += 2;
+            }
+            "--mr-iid" => {
+                options.mr_iid = Some(required_arg(args, i, "--mr-iid")?);
+                i += 2;
+            }
+            "--merge-strategy" => {
+                options.merge_strategy = Some(required_arg(args, i, "--merge-strategy")?);
+                i += 2;
+            }
+            "--pipeline-id" => {
+                options.pipeline_id = Some(required_arg(args, i, "--pipeline-id")?);
+                i += 2;
+            }
+            "--job-id" => {
+                options.job_id = Some(required_arg(args, i, "--job-id")?);
+                i += 2;
+            }
+            "--source" => {
+                options.source = Some(required_arg(args, i, "--source")?);
+                i += 2;
+            }
+            "--ignore" => {
+                ignore_patterns.push(required_arg(args, i, "--ignore")?);
+                i += 2;
+            }
+            value if value.starts_with("--") => {
+                return Err(format!("unknown upload-online-stats flag: {}", value));
+            }
+            value if value.contains("..") => {
+                let parts: Vec<&str> = value.split("..").collect();
+                if parts.len() != 2 || parts[0].trim().is_empty() || parts[1].trim().is_empty() {
+                    return Err("range must use <base>..<head>".to_string());
+                }
+                base_rev = Some(normalize_head_rev(parts[0].trim()));
+                head_rev = Some(normalize_head_rev(parts[1].trim()));
+                i += 1;
+            }
+            value => {
+                return Err(format!(
+                    "unexpected argument '{}'; use --base <commit> --head <commit> or <base>..<head>",
+                    value
+                ));
+            }
+        }
+    }
+
+    let Some(base_rev) = base_rev else {
+        return Err("--base <commit> or <base>..<head> is required".to_string());
+    };
+    let Some(head_rev) = head_rev else {
+        return Err("--head <commit> or <base>..<head> is required".to_string());
+    };
+
+    Ok(UploadOnlineStatsArgs {
+        base_rev: normalize_head_rev(&base_rev),
+        head_rev: normalize_head_rev(&head_rev),
+        options,
+        ignore_patterns,
+    })
+}
+
+fn required_arg(args: &[String], index: usize, flag: &str) -> Result<String, String> {
+    let Some(value) = args.get(index + 1) else {
+        return Err(format!("{} requires a value", flag));
+    };
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(format!("{} requires a non-empty value", flag));
+    }
+    Ok(trimmed.to_string())
 }
 
 fn short_commit_sha(commit_sha: &str) -> &str {
