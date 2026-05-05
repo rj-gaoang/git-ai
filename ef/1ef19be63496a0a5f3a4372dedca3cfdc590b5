@@ -1,0 +1,148 @@
+docs/design-doc/git-ai上线代码AI占比统计方案.md
+  h_c122390aeb95ca 3,5,7,9-134,136,156,173,182,223,277,374,389,405,424,432
+src/commands/git_ai_handlers.rs
+  56f257572b2e50a4 127-129
+  4f5cc27eac8e4939 2116-2123,2237-2298,2352-2473
+  1d30be9e9ded820f 295-297
+docs/design-doc/git-ai看板方案.md
+  0c50d94784ba4f6e 75-76,2391,2414
+  e43dc6b10ecd7524 2796-2819
+src/integration/upload_stats.rs
+  1d30be9e9ded820f 1339-1343,1366-1368,1685-1691,1785-1787,1799-1802,1807-1808,1886-1888,1900-1901
+  4de392cffd92fa82 568
+  109abc04de310572 20,26,35-36,58-91,136-152
+  d5026ea7449070fd 557-567,569-660
+  2a97ef61bd065f50 796-889
+docs/design-doc/git_ai_tool_stats_primary_key_fix_2026-05-04.sql
+  h_c122390aeb95ca 14-16
+---
+{
+  "schema_version": "authorship/3.1.0",
+  "git_ai_version": "2.0.27",
+  "x_user_id": "108",
+  "base_commit_sha": "ef1ef19be63496a0a5f3a4372dedca3cfdc590b5",
+  "prompts": {
+    "0c50d94784ba4f6e": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "478d93dd-465e-48a5-9ebf-28419f0feb65",
+        "model": "copilot/gpt-5.5"
+      },
+      "human_author": "shunfei",
+      "messages": [],
+      "total_additions": 4,
+      "total_deletions": 0,
+      "accepted_lines": 4,
+      "overriden_lines": 0
+    },
+    "109abc04de310572": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "478d93dd-465e-48a5-9ebf-28419f0feb65",
+        "model": "copilot/gpt-5.5"
+      },
+      "human_author": "shunfei",
+      "messages": [],
+      "total_additions": 57,
+      "total_deletions": 1,
+      "accepted_lines": 57,
+      "overriden_lines": 0
+    },
+    "1d30be9e9ded820f": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "478d93dd-465e-48a5-9ebf-28419f0feb65",
+        "model": "copilot/gpt-5.5"
+      },
+      "human_author": "shunfei",
+      "messages": [],
+      "total_additions": 87,
+      "total_deletions": 57,
+      "accepted_lines": 72,
+      "overriden_lines": 3
+    },
+    "2a97ef61bd065f50": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "478d93dd-465e-48a5-9ebf-28419f0feb65",
+        "model": "copilot/gpt-5.5"
+      },
+      "human_author": "shunfei",
+      "messages": [],
+      "total_additions": 94,
+      "total_deletions": 0,
+      "accepted_lines": 94,
+      "overriden_lines": 0
+    },
+    "4de392cffd92fa82": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "478d93dd-465e-48a5-9ebf-28419f0feb65",
+        "model": "copilot/gpt-5.5"
+      },
+      "human_author": "shunfei",
+      "messages": [],
+      "total_additions": 1,
+      "total_deletions": 1,
+      "accepted_lines": 1,
+      "overriden_lines": 0
+    },
+    "4f5cc27eac8e4939": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "478d93dd-465e-48a5-9ebf-28419f0feb65",
+        "model": "copilot/gpt-5.5"
+      },
+      "human_author": "shunfei",
+      "messages": [],
+      "total_additions": 194,
+      "total_deletions": 0,
+      "accepted_lines": 194,
+      "overriden_lines": 0
+    },
+    "56f257572b2e50a4": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "478d93dd-465e-48a5-9ebf-28419f0feb65",
+        "model": "copilot/gpt-5.5"
+      },
+      "human_author": "shunfei",
+      "messages": [],
+      "total_additions": 4,
+      "total_deletions": 0,
+      "accepted_lines": 3,
+      "overriden_lines": 0
+    },
+    "d5026ea7449070fd": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "478d93dd-465e-48a5-9ebf-28419f0feb65",
+        "model": "copilot/gpt-5.5"
+      },
+      "human_author": "shunfei",
+      "messages": [],
+      "total_additions": 104,
+      "total_deletions": 0,
+      "accepted_lines": 103,
+      "overriden_lines": 0
+    },
+    "e43dc6b10ecd7524": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "478d93dd-465e-48a5-9ebf-28419f0feb65",
+        "model": "copilot/gpt-5.5"
+      },
+      "human_author": "shunfei",
+      "messages": [],
+      "total_additions": 24,
+      "total_deletions": 0,
+      "accepted_lines": 24,
+      "overriden_lines": 0
+    }
+  },
+  "humans": {
+    "h_c122390aeb95ca": {
+      "author": "shunfei"
+    }
+  }
+}
