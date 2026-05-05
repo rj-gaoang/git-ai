@@ -664,6 +664,62 @@ impl InternalDatabase {
         }
     }
 
+    pub fn get_prompts_for_session(
+        &self,
+        tool: &str,
+        external_thread_id: &str,
+    ) -> Result<Vec<PromptDbRecord>, GitAiError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, workdir, tool, model, external_thread_id, messages,
+                    commit_sha, agent_metadata, human_author,
+                    total_additions, total_deletions, accepted_lines,
+                    overridden_lines, created_at, updated_at
+             FROM prompts
+             WHERE tool = ?1 AND external_thread_id = ?2
+             ORDER BY updated_at ASC, id ASC",
+        )?;
+
+        let rows = stmt.query_map(params![tool, external_thread_id], |row| {
+            let messages_json: String = row.get(5)?;
+            let messages: AiTranscript = serde_json::from_str(&messages_json).map_err(|e| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    5,
+                    rusqlite::types::Type::Text,
+                    Box::new(e),
+                )
+            })?;
+
+            let agent_metadata: Option<HashMap<String, String>> = row
+                .get::<_, Option<String>>(7)?
+                .and_then(|json| serde_json::from_str(&json).ok());
+
+            Ok(PromptDbRecord {
+                id: row.get(0)?,
+                workdir: row.get(1)?,
+                tool: row.get(2)?,
+                model: row.get(3)?,
+                external_thread_id: row.get(4)?,
+                messages,
+                commit_sha: row.get(6)?,
+                agent_metadata,
+                human_author: row.get(8)?,
+                total_additions: row.get(9)?,
+                total_deletions: row.get(10)?,
+                accepted_lines: row.get(11)?,
+                overridden_lines: row.get(12)?,
+                created_at: row.get(13)?,
+                updated_at: row.get(14)?,
+            })
+        })?;
+
+        let mut records = Vec::new();
+        for row in rows {
+            records.push(row?);
+        }
+
+        Ok(records)
+    }
+
     /// Get all prompts for a given commit (future use)
     #[allow(dead_code)]
     pub fn get_prompts_by_commit(

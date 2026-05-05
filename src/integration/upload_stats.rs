@@ -290,7 +290,7 @@ pub fn upload_local_commit_stats(
         });
     };
 
-    hydrate_prompts_from_local_db(&mut authorship_log.metadata.prompts);
+    hydrate_prompts_from_local_db(commit_sha, &mut authorship_log.metadata.prompts);
 
     crate::diagnostics::append_debug_event(
         "upload_stats_manual_authorship_note_loaded",
@@ -501,7 +501,7 @@ pub fn upload_local_commit_stats(
     }
 }
 
-fn hydrate_prompts_from_local_db(prompts: &mut BTreeMap<String, PromptRecord>) {
+fn hydrate_prompts_from_local_db(commit_sha: &str, prompts: &mut BTreeMap<String, PromptRecord>) {
     if prompts.is_empty() {
         return;
     }
@@ -512,6 +512,15 @@ fn hydrate_prompts_from_local_db(prompts: &mut BTreeMap<String, PromptRecord>) {
     let Ok(db_guard) = db_mutex.lock() else {
         return;
     };
+
+    struct HydratedPromptCandidate {
+        prompt_id: String,
+        session_key: String,
+        tool: String,
+        external_thread_id: String,
+        updated_at: i64,
+        user_messages: Vec<Message>,
+    }
 
     let mut hydrated_segments = Vec::new();
 
@@ -533,39 +542,101 @@ fn hydrate_prompts_from_local_db(prompts: &mut BTreeMap<String, PromptRecord>) {
                 continue;
             }
 
-            hydrated_segments.push((
-                prompt_id.clone(),
-                format!("{}::{}", db_record.tool, db_record.external_thread_id),
-                db_record.updated_at,
+            hydrated_segments.push(HydratedPromptCandidate {
+                prompt_id: prompt_id.clone(),
+                session_key: format!("{}::{}", db_record.tool, db_record.external_thread_id),
+                tool: db_record.tool,
+                external_thread_id: db_record.external_thread_id,
+                updated_at: db_record.updated_at,
                 user_messages,
-            ));
+            });
         }
     }
 
     hydrated_segments.sort_by(|left, right| {
-        left.1
-            .cmp(&right.1)
-            .then_with(|| left.2.cmp(&right.2))
-            .then_with(|| left.0.cmp(&right.0))
+        left.session_key
+            .cmp(&right.session_key)
+            .then_with(|| left.updated_at.cmp(&right.updated_at))
+            .then_with(|| left.prompt_id.cmp(&right.prompt_id))
     });
 
-    let mut previous_session_messages: HashMap<String, Vec<Message>> = HashMap::new();
+    let mut session_history_cache: HashMap<String, Vec<(String, Vec<Message>)>> = HashMap::new();
 
-    for (prompt_id, session_key, _updated_at, user_messages) in hydrated_segments {
-        let new_messages = if let Some(previous_messages) = previous_session_messages.get(&session_key)
-        {
-            if user_messages.starts_with(previous_messages) {
-                user_messages[previous_messages.len()..].to_vec()
-            } else {
-                user_messages.clone()
-            }
+    for candidate in &hydrated_segments {
+        session_history_cache
+            .entry(candidate.session_key.clone())
+            .or_insert_with(|| {
+                let mut history = db_guard
+                    .get_prompts_for_session(&candidate.tool, &candidate.external_thread_id)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|record| {
+                        (
+                            record.id,
+                            record.commit_sha,
+                            record.updated_at,
+                            record
+                                .messages
+                                .messages()
+                                .iter()
+                                .filter(|message| matches!(message, Message::User { .. }))
+                                .cloned()
+                                .collect::<Vec<_>>(),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+
+                history.sort_by(|left, right| {
+                    let left_group = match left.1.as_deref() {
+                        Some(record_commit_sha) if record_commit_sha != commit_sha => 0u8,
+                        Some(_) => 1u8,
+                        None => 2u8,
+                    };
+                    let right_group = match right.1.as_deref() {
+                        Some(record_commit_sha) if record_commit_sha != commit_sha => 0u8,
+                        Some(_) => 1u8,
+                        None => 2u8,
+                    };
+
+                    left_group
+                        .cmp(&right_group)
+                        .then_with(|| left.2.cmp(&right.2))
+                        .then_with(|| left.0.cmp(&right.0))
+                });
+
+                history
+                    .into_iter()
+                    .map(|(prompt_id, _record_commit_sha, _updated_at, messages)| {
+                        (prompt_id, messages)
+                    })
+                    .collect()
+            });
+    }
+
+    for candidate in hydrated_segments {
+        let previous_messages = session_history_cache
+            .get(&candidate.session_key)
+            .and_then(|history| {
+                history
+                    .iter()
+                    .position(|(prompt_id, _)| prompt_id == &candidate.prompt_id)
+                    .and_then(|current_index| {
+                        history[..current_index]
+                            .iter()
+                            .rev()
+                            .find_map(|(_, messages)| {
+                                candidate.user_messages.starts_with(messages).then_some(messages)
+                            })
+                    })
+            });
+
+        let new_messages = if let Some(previous_messages) = previous_messages {
+            candidate.user_messages[previous_messages.len()..].to_vec()
         } else {
-            user_messages.clone()
+            candidate.user_messages.clone()
         };
 
-        previous_session_messages.insert(session_key, user_messages);
-
-        if let Some(prompt) = prompts.get_mut(&prompt_id) {
+        if let Some(prompt) = prompts.get_mut(&candidate.prompt_id) {
             prompt.messages = new_messages;
         }
     }
@@ -1679,7 +1750,7 @@ mod tests {
             ),
         ]);
 
-        hydrate_prompts_from_local_db(&mut prompts);
+        hydrate_prompts_from_local_db("current-commit", &mut prompts);
 
         assert_eq!(
             prompts[&prompt_a_id].messages,
@@ -1693,6 +1764,108 @@ mod tests {
             vec![Message::user(
                 "second prompt".to_string(),
                 Some("2026-05-05T01:01:00Z".to_string()),
+            )]
+        );
+    }
+
+    #[test]
+    fn hydrate_prompts_from_local_db_excludes_prior_same_session_history_outside_commit() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let prior_prompt_id = format!("prompt-prior-{unique}");
+        let current_prompt_id = format!("prompt-current-{unique}");
+        let session_id = format!("session-{unique}");
+
+        let mut prior_transcript = AiTranscript::new();
+        prior_transcript.add_message(Message::user(
+            "older unrelated prompt".to_string(),
+            Some("2026-05-04T16:00:00Z".to_string()),
+        ));
+
+        let mut current_transcript = AiTranscript::new();
+        current_transcript.add_message(Message::user(
+            "older unrelated prompt".to_string(),
+            Some("2026-05-04T16:00:00Z".to_string()),
+        ));
+        current_transcript.add_message(Message::assistant(
+            "assistant reply".to_string(),
+            Some("2026-05-04T16:00:01Z".to_string()),
+        ));
+        current_transcript.add_message(Message::user(
+            "current commit prompt".to_string(),
+            Some("2026-05-04T16:05:00Z".to_string()),
+        ));
+
+        let db = InternalDatabase::global().unwrap();
+        let mut db_guard = db.lock().unwrap();
+        db_guard
+            .batch_upsert_prompts(&[
+                PromptDbRecord {
+                    id: prior_prompt_id,
+                    workdir: None,
+                    tool: "github-copilot".to_string(),
+                    model: "copilot/gpt-5.4".to_string(),
+                    external_thread_id: session_id.clone(),
+                    messages: prior_transcript,
+                    commit_sha: Some("older-commit".to_string()),
+                    agent_metadata: None,
+                    human_author: Some("shunfei".to_string()),
+                    total_additions: None,
+                    total_deletions: None,
+                    accepted_lines: None,
+                    overridden_lines: None,
+                    created_at: 100,
+                    updated_at: 300,
+                },
+                PromptDbRecord {
+                    id: current_prompt_id.clone(),
+                    workdir: None,
+                    tool: "github-copilot".to_string(),
+                    model: "copilot/gpt-5.4".to_string(),
+                    external_thread_id: session_id,
+                    messages: current_transcript,
+                    commit_sha: Some("current-commit".to_string()),
+                    agent_metadata: None,
+                    human_author: Some("shunfei".to_string()),
+                    total_additions: None,
+                    total_deletions: None,
+                    accepted_lines: None,
+                    overridden_lines: None,
+                    created_at: 100,
+                    updated_at: 101,
+                },
+            ])
+            .unwrap();
+        drop(db_guard);
+
+        let mut prompts = BTreeMap::from([(
+            current_prompt_id.clone(),
+            PromptRecord {
+                agent_id: AgentId {
+                    tool: "github-copilot".to_string(),
+                    id: "session-a".to_string(),
+                    model: "copilot/gpt-5.4".to_string(),
+                },
+                human_author: Some("shunfei".to_string()),
+                messages: Vec::new(),
+                total_additions: 0,
+                total_deletions: 0,
+                accepted_lines: 0,
+                overriden_lines: 0,
+                messages_url: None,
+                custom_attributes: None,
+            },
+        )]);
+
+        hydrate_prompts_from_local_db("current-commit", &mut prompts);
+
+        assert_eq!(
+            prompts[&current_prompt_id].messages,
+            vec![Message::user(
+                "current commit prompt".to_string(),
+                Some("2026-05-04T16:05:00Z".to_string()),
             )]
         );
     }
