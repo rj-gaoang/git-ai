@@ -13,8 +13,13 @@ pub mod attr_pos {
     pub const BRANCH: usize = 5;
     pub const TOOL: usize = 20;
     pub const MODEL: usize = 21;
+    // Position 22 (PROMPT_ID): TOMBSTONED - never reuse this index
     pub const PROMPT_ID: usize = 22;
-    pub const EXTERNAL_PROMPT_ID: usize = 23;
+    pub const EXTERNAL_SESSION_ID: usize = 23;
+    pub const SESSION_ID: usize = 24;
+    pub const TRACE_ID: usize = 25;
+    pub const PARENT_SESSION_ID: usize = 26;
+    pub const EXTERNAL_PARENT_SESSION_ID: usize = 27;
     pub const CUSTOM_ATTRIBUTES: usize = 30;
 }
 
@@ -30,8 +35,12 @@ pub mod attr_pos {
 /// | 5 | branch | String | No (nullable) |
 /// | 20 | tool | String | No (nullable) |
 /// | 21 | model | String | No (nullable) |
-/// | 22 | prompt_id | String | No (nullable) |
-/// | 23 | external_prompt_id | String | No (nullable) |
+/// | 22 | prompt_id (TOMBSTONED) | String | No (nullable) |
+/// | 23 | external_session_id | String | No (nullable) |
+/// | 24 | session_id | String | Yes |
+/// | 25 | trace_id | String | No (nullable) |
+/// | 26 | parent_session_id | String | No (nullable) |
+/// | 27 | external_parent_session_id | String | No (nullable) |
 /// | 30 | custom_attributes | String (JSON) | No (nullable) |
 #[derive(Debug, Clone, Default)]
 pub struct EventAttributes {
@@ -44,7 +53,11 @@ pub struct EventAttributes {
     pub tool: PosField<String>,
     pub model: PosField<String>,
     pub prompt_id: PosField<String>,
-    pub external_prompt_id: PosField<String>,
+    pub session_id: PosField<String>,
+    pub trace_id: PosField<String>,
+    pub parent_session_id: PosField<String>,
+    pub external_session_id: PosField<String>,
+    pub external_parent_session_id: PosField<String>,
     pub custom_attributes: PosField<String>,
 }
 
@@ -159,28 +172,81 @@ impl EventAttributes {
         self
     }
 
-    // Builder methods for prompt_id
-    pub fn prompt_id(mut self, value: impl Into<String>) -> Self {
-        self.prompt_id = Some(Some(value.into()));
+    // Position 22 (prompt_id) is TOMBSTONED - setters removed, field kept for reading legacy data.
+
+    // Builder methods for session_id
+    pub fn session_id(mut self, value: impl Into<String>) -> Self {
+        self.session_id = Some(Some(value.into()));
         self
     }
 
     #[allow(dead_code)]
-    pub fn prompt_id_null(mut self) -> Self {
-        self.prompt_id = Some(None);
+    pub fn session_id_null(mut self) -> Self {
+        self.session_id = Some(None);
         self
     }
 
-    // Builder methods for external_prompt_id
-    pub fn external_prompt_id(mut self, value: impl Into<String>) -> Self {
-        self.external_prompt_id = Some(Some(value.into()));
+    // Builder methods for trace_id
+    pub fn trace_id(mut self, value: impl Into<String>) -> Self {
+        self.trace_id = Some(Some(value.into()));
         self
     }
 
     #[allow(dead_code)]
-    pub fn external_prompt_id_null(mut self) -> Self {
-        self.external_prompt_id = Some(None);
+    pub fn trace_id_null(mut self) -> Self {
+        self.trace_id = Some(None);
         self
+    }
+
+    // Builder methods for parent_session_id
+    pub fn parent_session_id(mut self, value: impl Into<String>) -> Self {
+        self.parent_session_id = Some(Some(value.into()));
+        self
+    }
+
+    pub fn parent_session_id_opt(self, value: Option<String>) -> Self {
+        match value {
+            Some(v) => self.parent_session_id(v),
+            None => self,
+        }
+    }
+
+    // Builder methods for external_session_id
+    pub fn external_session_id(mut self, value: impl Into<String>) -> Self {
+        self.external_session_id = Some(Some(value.into()));
+        self
+    }
+
+    #[allow(dead_code)]
+    pub fn external_session_id_null(mut self) -> Self {
+        self.external_session_id = Some(None);
+        self
+    }
+
+    pub fn external_session_id_opt(self, value: Option<String>) -> Self {
+        match value {
+            Some(v) => self.external_session_id(v),
+            None => self,
+        }
+    }
+
+    // Builder methods for external_parent_session_id
+    pub fn external_parent_session_id(mut self, value: impl Into<String>) -> Self {
+        self.external_parent_session_id = Some(Some(value.into()));
+        self
+    }
+
+    #[allow(dead_code)]
+    pub fn external_parent_session_id_null(mut self) -> Self {
+        self.external_parent_session_id = Some(None);
+        self
+    }
+
+    pub fn external_parent_session_id_opt(self, value: Option<String>) -> Self {
+        match value {
+            Some(v) => self.external_parent_session_id(v),
+            None => self,
+        }
     }
 
     // Builder methods for custom_attributes
@@ -230,15 +296,27 @@ impl PosEncoded for EventAttributes {
         sparse_set(&mut map, attr_pos::BRANCH, string_to_json(&self.branch));
         sparse_set(&mut map, attr_pos::TOOL, string_to_json(&self.tool));
         sparse_set(&mut map, attr_pos::MODEL, string_to_json(&self.model));
+        // Position 22 (PROMPT_ID) is TOMBSTONED - no longer written, only read for legacy data
         sparse_set(
             &mut map,
-            attr_pos::PROMPT_ID,
-            string_to_json(&self.prompt_id),
+            attr_pos::EXTERNAL_SESSION_ID,
+            string_to_json(&self.external_session_id),
         );
         sparse_set(
             &mut map,
-            attr_pos::EXTERNAL_PROMPT_ID,
-            string_to_json(&self.external_prompt_id),
+            attr_pos::SESSION_ID,
+            string_to_json(&self.session_id),
+        );
+        sparse_set(&mut map, attr_pos::TRACE_ID, string_to_json(&self.trace_id));
+        sparse_set(
+            &mut map,
+            attr_pos::PARENT_SESSION_ID,
+            string_to_json(&self.parent_session_id),
+        );
+        sparse_set(
+            &mut map,
+            attr_pos::EXTERNAL_PARENT_SESSION_ID,
+            string_to_json(&self.external_parent_session_id),
         );
         sparse_set(
             &mut map,
@@ -259,7 +337,14 @@ impl PosEncoded for EventAttributes {
             tool: sparse_get_string(arr, attr_pos::TOOL),
             model: sparse_get_string(arr, attr_pos::MODEL),
             prompt_id: sparse_get_string(arr, attr_pos::PROMPT_ID),
-            external_prompt_id: sparse_get_string(arr, attr_pos::EXTERNAL_PROMPT_ID),
+            session_id: sparse_get_string(arr, attr_pos::SESSION_ID),
+            trace_id: sparse_get_string(arr, attr_pos::TRACE_ID),
+            parent_session_id: sparse_get_string(arr, attr_pos::PARENT_SESSION_ID),
+            external_session_id: sparse_get_string(arr, attr_pos::EXTERNAL_SESSION_ID),
+            external_parent_session_id: sparse_get_string(
+                arr,
+                attr_pos::EXTERNAL_PARENT_SESSION_ID,
+            ),
             custom_attributes: sparse_get_string(arr, attr_pos::CUSTOM_ATTRIBUTES),
         }
     }
@@ -279,8 +364,7 @@ mod tests {
             .base_commit_sha("base-commit-123")
             .branch("main")
             .tool("claude-code")
-            .model_null()
-            .prompt_id("prompt-123");
+            .model_null();
 
         assert_eq!(attrs.git_ai_version, Some(Some("1.0.0".to_string())));
         assert_eq!(
@@ -296,15 +380,14 @@ mod tests {
         assert_eq!(attrs.branch, Some(Some("main".to_string())));
         assert_eq!(attrs.tool, Some(Some("claude-code".to_string())));
         assert_eq!(attrs.model, Some(None)); // explicitly null
-        assert_eq!(attrs.prompt_id, Some(Some("prompt-123".to_string())));
+        assert_eq!(attrs.prompt_id, None); // tombstoned - never written
     }
 
     #[test]
     fn test_event_attributes_to_sparse() {
         let attrs = EventAttributes::with_version("1.0.0")
             .tool("test-tool")
-            .model_null()
-            .prompt_id("prompt-123");
+            .model_null();
 
         let sparse = attrs.to_sparse();
 
@@ -319,10 +402,7 @@ mod tests {
             Some(&Value::String("test-tool".to_string()))
         );
         assert_eq!(sparse.get("21"), Some(&Value::Null)); // explicitly null
-        assert_eq!(
-            sparse.get("22"),
-            Some(&Value::String("prompt-123".to_string()))
-        );
+        assert_eq!(sparse.get("22"), None); // tombstoned - never written
     }
 
     #[test]
@@ -353,8 +433,7 @@ mod tests {
             .branch("feature-branch")
             .tool("cursor")
             .model("gpt-4")
-            .prompt_id("prompt-456")
-            .external_prompt_id("ext-789");
+            .external_session_id("ext-789");
 
         assert_eq!(attrs.git_ai_version, Some(Some("1.2.3".to_string())));
         assert_eq!(
@@ -367,8 +446,8 @@ mod tests {
         assert_eq!(attrs.branch, Some(Some("feature-branch".to_string())));
         assert_eq!(attrs.tool, Some(Some("cursor".to_string())));
         assert_eq!(attrs.model, Some(Some("gpt-4".to_string())));
-        assert_eq!(attrs.prompt_id, Some(Some("prompt-456".to_string())));
-        assert_eq!(attrs.external_prompt_id, Some(Some("ext-789".to_string())));
+        assert_eq!(attrs.prompt_id, None); // tombstoned
+        assert_eq!(attrs.external_session_id, Some(Some("ext-789".to_string())));
     }
 
     #[test]
@@ -382,8 +461,7 @@ mod tests {
             .branch_null()
             .tool_null()
             .model_null()
-            .prompt_id_null()
-            .external_prompt_id_null();
+            .external_session_id_null();
 
         assert_eq!(attrs.git_ai_version, Some(None));
         assert_eq!(attrs.repo_url, Some(None));
@@ -393,8 +471,8 @@ mod tests {
         assert_eq!(attrs.branch, Some(None));
         assert_eq!(attrs.tool, Some(None));
         assert_eq!(attrs.model, Some(None));
-        assert_eq!(attrs.prompt_id, Some(None));
-        assert_eq!(attrs.external_prompt_id, Some(None));
+        assert_eq!(attrs.prompt_id, None); // tombstoned - no setter available
+        assert_eq!(attrs.external_session_id, Some(None));
     }
 
     #[test]
@@ -407,8 +485,7 @@ mod tests {
             .branch("main")
             .tool("test-tool")
             .model("test-model")
-            .prompt_id("prompt-id")
-            .external_prompt_id("ext-id");
+            .external_session_id("ext-id");
 
         let sparse = attrs.to_sparse();
 
@@ -438,10 +515,7 @@ mod tests {
             sparse.get("21"),
             Some(&Value::String("test-model".to_string()))
         );
-        assert_eq!(
-            sparse.get("22"),
-            Some(&Value::String("prompt-id".to_string()))
-        );
+        assert_eq!(sparse.get("22"), None); // tombstoned - never written
         assert_eq!(sparse.get("23"), Some(&Value::String("ext-id".to_string())));
     }
 
@@ -496,7 +570,7 @@ mod tests {
         assert_eq!(attrs.tool, None);
         assert_eq!(attrs.model, None);
         assert_eq!(attrs.prompt_id, None);
-        assert_eq!(attrs.external_prompt_id, None);
+        assert_eq!(attrs.external_session_id, None);
     }
 
     #[test]
@@ -519,6 +593,149 @@ mod tests {
         assert_eq!(TOOL, 20);
         assert_eq!(MODEL, 21);
         assert_eq!(PROMPT_ID, 22);
-        assert_eq!(EXTERNAL_PROMPT_ID, 23);
+        assert_eq!(EXTERNAL_SESSION_ID, 23);
+        assert_eq!(SESSION_ID, 24);
+        assert_eq!(TRACE_ID, 25);
+    }
+
+    #[test]
+    fn test_event_attributes_session_id_builder() {
+        let attrs = EventAttributes::with_version("1.0.0")
+            .session_id("session-123")
+            .trace_id("trace-456");
+
+        assert_eq!(attrs.session_id, Some(Some("session-123".to_string())));
+        assert_eq!(attrs.trace_id, Some(Some("trace-456".to_string())));
+    }
+
+    #[test]
+    fn test_event_attributes_session_id_null() {
+        let attrs = EventAttributes::with_version("1.0.0")
+            .session_id_null()
+            .trace_id_null();
+
+        assert_eq!(attrs.session_id, Some(None));
+        assert_eq!(attrs.trace_id, Some(None));
+    }
+
+    #[test]
+    fn test_event_attributes_to_sparse_with_session_fields() {
+        let attrs = EventAttributes::with_version("1.0.0")
+            .session_id("session-abc")
+            .trace_id("trace-xyz")
+            .tool("test-tool");
+
+        let sparse = attrs.to_sparse();
+
+        assert_eq!(sparse.get("0"), Some(&Value::String("1.0.0".to_string())));
+        assert_eq!(
+            sparse.get("20"),
+            Some(&Value::String("test-tool".to_string()))
+        );
+        assert_eq!(
+            sparse.get("24"),
+            Some(&Value::String("session-abc".to_string()))
+        );
+        assert_eq!(
+            sparse.get("25"),
+            Some(&Value::String("trace-xyz".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_event_attributes_from_sparse_with_session_fields() {
+        let mut sparse = SparseArray::new();
+        sparse.insert("0".to_string(), Value::String("2.0.0".to_string()));
+        sparse.insert("24".to_string(), Value::String("session-123".to_string()));
+        sparse.insert("25".to_string(), Value::Null);
+
+        let attrs = EventAttributes::from_sparse(&sparse);
+
+        assert_eq!(attrs.git_ai_version, Some(Some("2.0.0".to_string())));
+        assert_eq!(attrs.session_id, Some(Some("session-123".to_string())));
+        assert_eq!(attrs.trace_id, Some(None)); // null
+    }
+
+    #[test]
+    fn test_event_attributes_roundtrip_with_session_fields() {
+        let original = EventAttributes::with_version("2.5.0")
+            .session_id("session-roundtrip")
+            .trace_id_null()
+            .tool("copilot");
+
+        let sparse = original.to_sparse();
+        let restored = EventAttributes::from_sparse(&sparse);
+
+        assert_eq!(restored.git_ai_version, Some(Some("2.5.0".to_string())));
+        assert_eq!(
+            restored.session_id,
+            Some(Some("session-roundtrip".to_string()))
+        );
+        assert_eq!(restored.trace_id, Some(None)); // explicitly null
+        assert_eq!(restored.tool, Some(Some("copilot".to_string())));
+    }
+
+    #[test]
+    fn test_event_attributes_prompt_id_backward_compat() {
+        // Test that tombstoned prompt_id still works for deserialization
+        let mut sparse = SparseArray::new();
+        sparse.insert("0".to_string(), Value::String("1.0.0".to_string()));
+        sparse.insert("22".to_string(), Value::String("old-prompt-id".to_string()));
+        sparse.insert("24".to_string(), Value::String("new-session".to_string()));
+
+        let attrs = EventAttributes::from_sparse(&sparse);
+
+        assert_eq!(attrs.prompt_id, Some(Some("old-prompt-id".to_string())));
+        assert_eq!(attrs.session_id, Some(Some("new-session".to_string())));
+    }
+
+    #[test]
+    fn test_event_attributes_external_session_ids() {
+        let attrs = EventAttributes::with_version("1.0.0")
+            .session_id("internal-session")
+            .external_session_id("agent-uuid-123")
+            .external_parent_session_id("parent-uuid-456");
+
+        assert_eq!(
+            attrs.external_session_id,
+            Some(Some("agent-uuid-123".to_string()))
+        );
+        assert_eq!(
+            attrs.external_parent_session_id,
+            Some(Some("parent-uuid-456".to_string()))
+        );
+
+        let sparse = attrs.to_sparse();
+        assert_eq!(
+            sparse.get("23"),
+            Some(&Value::String("agent-uuid-123".to_string()))
+        );
+        assert_eq!(
+            sparse.get("27"),
+            Some(&Value::String("parent-uuid-456".to_string()))
+        );
+
+        let restored = EventAttributes::from_sparse(&sparse);
+        assert_eq!(
+            restored.external_session_id,
+            Some(Some("agent-uuid-123".to_string()))
+        );
+        assert_eq!(
+            restored.external_parent_session_id,
+            Some(Some("parent-uuid-456".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_event_attributes_external_session_id_opt() {
+        let attrs = EventAttributes::with_version("1.0.0")
+            .external_session_id_opt(Some("has-value".to_string()))
+            .external_parent_session_id_opt(None);
+
+        assert_eq!(
+            attrs.external_session_id,
+            Some(Some("has-value".to_string()))
+        );
+        assert_eq!(attrs.external_parent_session_id, None);
     }
 }

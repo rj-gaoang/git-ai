@@ -53,10 +53,7 @@ pub(crate) fn append_debug_event(event: &str, fields: Value) {
     record.insert("schemaVersion".to_string(), json!(1));
     record.insert("event".to_string(), Value::String(event.to_string()));
     record.insert("timestampMs".to_string(), json!(now.timestamp_millis()));
-    record.insert(
-        "timestamp".to_string(),
-        Value::String(debug_timestamp(now)),
-    );
+    record.insert("timestamp".to_string(), Value::String(debug_timestamp(now)));
     record.insert("processId".to_string(), json!(std::process::id()));
 
     match fields {

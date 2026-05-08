@@ -4,7 +4,9 @@
 #[path = "integration/repos/mod.rs"]
 mod repos;
 
-use repos::test_repo::{GitTestMode, TestRepo, get_binary_path, real_git_executable};
+use repos::test_repo::{
+    DaemonTestScope, GitTestMode, TestRepo, get_binary_path, real_git_executable,
+};
 use serde_json::Value;
 use serial_test::serial;
 use std::fs::{self, OpenOptions};
@@ -326,7 +328,8 @@ fn wait_for_child_exit(repo: &TestRepo, child: &mut Child, timeout: Duration) {
 #[test]
 #[serial]
 fn windows_install_script_reinstall_stops_running_daemon() {
-    let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
+    let repo =
+        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::NoDaemon);
 
     let initial_install = run_install_script(&repo, Duration::from_secs(90));
     assert!(
@@ -370,7 +373,8 @@ fn windows_install_script_reinstall_stops_running_daemon() {
 #[test]
 #[serial]
 fn windows_daemon_creates_log_file() {
-    let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
+    let repo =
+        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::NoDaemon);
 
     let initial_install = run_install_script(&repo, Duration::from_secs(90));
     assert!(
@@ -393,7 +397,8 @@ fn windows_daemon_creates_log_file() {
 #[test]
 #[serial]
 fn windows_git_extension_upgrade_requires_direct_git_ai_binary() {
-    let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
+    let repo =
+        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::NoDaemon);
 
     let initial_install = run_install_script(&repo, Duration::from_secs(90));
     assert!(
@@ -425,5 +430,31 @@ fn windows_git_extension_upgrade_requires_direct_git_ai_binary() {
         combined.contains("git-ai upgrade"),
         "expected direct command hint, got:\n{}",
         combined
+    );
+}
+
+#[test]
+fn windows_install_script_does_not_shadow_reserved_pid_variable() {
+    let script = fs::read_to_string(install_script_path()).expect("failed to read install.ps1");
+    assert!(
+        !script.contains("foreach ($pid in $pids)"),
+        "install.ps1 should not iterate with the reserved $PID variable name"
+    );
+    assert!(
+        script.contains("foreach ($managedPid in $pids)"),
+        "install.ps1 should use a non-reserved loop variable for managed process ids"
+    );
+}
+
+#[test]
+fn windows_install_script_gates_daemon_restart_to_self_update() {
+    let script = fs::read_to_string(install_script_path()).expect("failed to read install.ps1");
+    assert!(
+        script.contains("GIT_AI_RESTART_DAEMON_AFTER_INSTALL"),
+        "install.ps1 should only restart the daemon when the self-update env flag is set"
+    );
+    assert!(
+        script.contains("Start-DaemonIfRequested"),
+        "install.ps1 should funnel daemon restart attempts through the gated helper"
     );
 }

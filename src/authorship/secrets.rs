@@ -554,7 +554,11 @@ mod tests {
 
         let messages = &prompts.get("prompt-1").unwrap().messages;
         assert_eq!(messages.len(), 2);
-        assert!(messages.iter().all(|message| matches!(message, Message::User { .. })));
+        assert!(
+            messages
+                .iter()
+                .all(|message| matches!(message, Message::User { .. }))
+        );
     }
 
     #[test]

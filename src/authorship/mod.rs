@@ -2,6 +2,7 @@ pub mod agent_detection;
 pub mod attribution_tracker;
 pub mod authorship_log;
 pub mod authorship_log_serialization;
+pub mod background_agent;
 pub mod diff_ai_accepted;
 pub mod git_ai_hooks;
 pub mod ignore;
@@ -9,7 +10,7 @@ pub mod imara_diff_utils;
 pub mod internal_db;
 pub mod move_detection;
 pub mod post_commit;
-pub mod pre_commit;
+
 pub mod prompt_utils;
 pub mod range_authorship;
 pub mod rebase_authorship;

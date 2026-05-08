@@ -1,6 +1,9 @@
-use crate::authorship::authorship_log::{Author, HumanRecord, LineRange, PromptRecord};
+use crate::authorship::authorship_log::{
+    Author, HumanRecord, LineRange, PromptRecord, SessionRecord,
+};
 use crate::authorship::working_log::CheckpointKind;
 use crate::git::repository::Repository;
+use rand::RngExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
@@ -38,6 +41,8 @@ pub struct AuthorshipMetadata {
     pub prompts: BTreeMap<String, PromptRecord>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub humans: BTreeMap<String, HumanRecord>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub sessions: BTreeMap<String, SessionRecord>,
 }
 
 impl fmt::Debug for AuthorshipMetadata {
@@ -64,6 +69,7 @@ impl AuthorshipMetadata {
             base_commit_sha: String::new(),
             prompts: BTreeMap::new(),
             humans: BTreeMap::new(),
+            sessions: BTreeMap::new(),
         }
     }
 }
@@ -310,6 +316,37 @@ impl AuthorshipLog {
                     continue;
                 }
 
+                // s_-prefixed hashes are session attestations — route to sessions map
+                if entry.hash.starts_with("s_") {
+                    // Extract session key from "s_<14hex>::t_<14hex>" format
+                    let session_key = entry.hash.split("::").next().unwrap_or(&entry.hash);
+                    if let Some(session_record) = self.metadata.sessions.get(session_key) {
+                        // Create a PromptRecord-like structure from SessionRecord for compatibility
+                        // Note: sessions don't have message transcripts or detailed stats
+                        let prompt_record = PromptRecord {
+                            agent_id: session_record.agent_id.clone(),
+                            human_author: session_record.human_author.clone(),
+                            messages: Vec::new(),
+                            total_additions: 0, // Sessions don't track detailed stats
+                            total_deletions: 0,
+                            accepted_lines: 0,
+                            overriden_lines: 0,
+                            custom_attributes: session_record.custom_attributes.clone(),
+                            messages_url: None,
+                        };
+                        return Some((
+                            Author {
+                                username: session_record.agent_id.tool.clone(),
+                                email: String::new(),
+                            },
+                            Some(entry.hash.clone()), // Return full s_::t_ hash
+                            Some(prompt_record),
+                        ));
+                    }
+                    // Session hash not found locally — skip this entry
+                    continue;
+                }
+
                 // The hash corresponds to a prompt session short hash
                 if let Some(prompt_record) = self.metadata.prompts.get(&entry.hash) {
                     // Create author info from the prompt record
@@ -443,12 +480,23 @@ impl AuthorshipLog {
                     continue;
                 }
 
-                let prompt_record = self
-                    .metadata
-                    .prompts
-                    .get(session_hash)
-                    .ok_or_else(|| format!("Missing prompt record for hash: {}", session_hash))?
-                    .clone();
+                // s_-prefixed hashes are session attestations — look up in sessions map
+                let prompt_record = if session_hash.starts_with("s_") {
+                    let session_key = session_hash.split("::").next().unwrap_or(session_hash);
+                    self.metadata
+                        .sessions
+                        .get(session_key)
+                        .ok_or_else(|| {
+                            format!("Missing session record for hash: {}", session_hash)
+                        })?
+                        .to_prompt_record()
+                } else {
+                    self.metadata
+                        .prompts
+                        .get(session_hash)
+                        .ok_or_else(|| format!("Missing prompt record for hash: {}", session_hash))?
+                        .clone()
+                };
 
                 // Expand ranges to individual lines, then compress to working log format
                 let mut all_lines: Vec<u32> = Vec::new();
@@ -509,12 +557,7 @@ impl AuthorshipLog {
                 // TODO Fill in the LineStats
 
                 // Reconstruct transcript from messages
-                let mut transcript = crate::authorship::transcript::AiTranscript::new();
-                for message in &prompt_record.messages {
-                    transcript.add_message(message.clone());
-                }
-                ai_checkpoint.transcript = Some(transcript);
-
+                // Transcript no longer stored in checkpoints
                 checkpoints.push(ai_checkpoint);
             }
         }
@@ -743,6 +786,31 @@ pub fn generate_human_short_hash(author_identity: &str) -> String {
     format!("h_{}", &hex[..14])
 }
 
+/// Generate a session ID: "s_" + first 14 hex chars of SHA256(tool:agent_id) = 16 chars total.
+/// Uses the same hash base as `generate_short_hash` but with a prefix and shorter hash portion.
+/// The "s_" prefix distinguishes session IDs from legacy prompt hashes throughout the system.
+pub fn generate_session_id(agent_id: &str, tool: &str) -> String {
+    let combined = format!("{}:{}", tool, agent_id);
+    let mut hasher = Sha256::new();
+    hasher.update(combined.as_bytes());
+    let hex = format!("{:x}", hasher.finalize());
+    format!("s_{}", &hex[..14])
+}
+
+/// Generate a trace ID: "t_" + 14 random hex chars = 16 chars total.
+/// Unique per checkpoint call (not deterministic). Used for per-checkpoint granularity
+/// in attestation keys.
+pub fn generate_trace_id() -> String {
+    let mut rng = rand::rng();
+    let hex: String = (0..14)
+        .map(|_| {
+            let idx: u8 = rng.random_range(0..16);
+            char::from_digit(idx as u32, 16).unwrap()
+        })
+        .collect();
+    format!("t_{}", hex)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -877,13 +945,13 @@ mod tests {
             crate::authorship::authorship_log::PromptRecord {
                 agent_id,
                 human_author: None,
-                messages: vec![],
+                messages: Vec::new(),
                 total_additions: 0,
                 total_deletions: 0,
                 accepted_lines: 0,
                 overriden_lines: 0,
-                messages_url: None,
                 custom_attributes: None,
+                messages_url: None,
             },
         );
 
@@ -945,13 +1013,13 @@ mod tests {
             crate::authorship::authorship_log::PromptRecord {
                 agent_id,
                 human_author: None,
-                messages: vec![],
+                messages: Vec::new(),
                 total_additions: 0,
                 total_deletions: 0,
                 accepted_lines: 0,
                 overriden_lines: 0,
-                messages_url: None,
                 custom_attributes: None,
+                messages_url: None,
             },
         );
 
@@ -998,13 +1066,13 @@ mod tests {
             crate::authorship::authorship_log::PromptRecord {
                 agent_id,
                 human_author: None,
-                messages: vec![],
+                messages: Vec::new(),
                 total_additions: 0,
                 total_deletions: 0,
                 accepted_lines: 0,
                 overriden_lines: 0,
-                messages_url: None,
                 custom_attributes: None,
+                messages_url: None,
             },
         );
 
@@ -1123,106 +1191,6 @@ mod tests {
         assert_eq!(entry.line_ranges[1], LineRange::Range(8, 10));
     }
 
-    // Commenting out because working log to authorship helper deprecated in favor
-    // of virtual attribution
-    // #[test]
-    // fn test_metrics_calculation() {
-    //     use crate::authorship::attribution_tracker::{Attribution, LineAttribution};
-    //     use crate::authorship::transcript::{AiTranscript, Message};
-    //     use crate::authorship::working_log::{
-    //         AgentId, Checkpoint, CheckpointKind, WorkingLogEntry,
-    //     };
-    //     use std::time::{SystemTime, UNIX_EPOCH};
-
-    //     // Create an agent ID
-    //     let agent_id = AgentId {
-    //         tool: "cursor".to_string(),
-    //         id: "test_session".to_string(),
-    //         model: "claude-3-sonnet".to_string(),
-    //     };
-
-    //     let session_hash = generate_short_hash(&agent_id.id, &agent_id.tool);
-
-    //     // Create a transcript
-    //     let mut transcript = AiTranscript::new();
-    //     transcript.add_message(Message::user("Add a function".to_string(), None));
-    //     transcript.add_message(Message::assistant("Here's the function".to_string(), None));
-
-    //     let ts = SystemTime::now()
-    //         .duration_since(UNIX_EPOCH)
-    //         .unwrap_or_default()
-    //         .as_millis();
-
-    //     // Create working log entries
-    //     // First checkpoint: add 10 lines
-    //     let line_attributions1 = vec![LineAttribution::new(1, 10, session_hash.clone(), None)];
-    //     let attributions1 = vec![Attribution::new(0, 100, session_hash.clone(), ts)];
-    //     let entry1 = WorkingLogEntry::new(
-    //         "src/test.rs".to_string(),
-    //         "blob_sha_1".to_string(),
-    //         attributions1,
-    //         line_attributions1,
-    //     );
-    //     let mut checkpoint1 = Checkpoint::new(
-    //         CheckpointKind::AiAgent,
-    //         "".to_string(),
-    //         "ai".to_string(),
-    //         vec![entry1],
-    //     );
-    //     checkpoint1.agent_id = Some(agent_id.clone());
-    //     checkpoint1.transcript = Some(transcript.clone());
-    //     // First checkpoint stats: 10 additions, 0 deletions
-    //     checkpoint1.line_stats.additions = 10;
-    //     checkpoint1.line_stats.deletions = 0;
-
-    //     // Second checkpoint: modify lines (delete 3, add 5)
-    //     // This represents the final state after both checkpoints
-    //     let line_attributions2 = vec![
-    //         LineAttribution::new(1, 4, session_hash.clone(), None),
-    //         LineAttribution::new(5, 9, session_hash.clone(), None),
-    //     ];
-    //     let attributions2 = vec![
-    //         Attribution::new(0, 50, session_hash.clone(), ts),
-    //         Attribution::new(50, 150, session_hash.clone(), ts),
-    //     ];
-    //     let entry2 = WorkingLogEntry::new(
-    //         "src/test.rs".to_string(),
-    //         "blob_sha_2".to_string(),
-    //         attributions2,
-    //         line_attributions2,
-    //     );
-    //     let mut checkpoint2 = Checkpoint::new(
-    //         CheckpointKind::AiAgent,
-    //         "".to_string(),
-    //         "ai".to_string(),
-    //         vec![entry2],
-    //     );
-    //     checkpoint2.agent_id = Some(agent_id.clone());
-    //     checkpoint2.transcript = Some(transcript);
-    //     // Second checkpoint stats: 5 new lines added, 3 deleted
-    //     checkpoint2.line_stats.additions = 5;
-    //     checkpoint2.line_stats.deletions = 3;
-
-    //     // Convert to authorship log
-    //     let authorship_log = AuthorshipLog::from_working_log_with_base_commit_and_human_author(
-    //         &[checkpoint1, checkpoint2],
-    //         "base123",
-    //         None,
-    //         None,
-    //     );
-
-    //     // Get the prompt record
-    //     let prompt_record = authorship_log.metadata.prompts.get(&session_hash).unwrap();
-
-    //     // Verify metrics
-    //     // total_additions: accumulated from line_stats
-    //     assert_eq!(prompt_record.total_additions, 15);
-    //     // total_deletions: accumulated from line_stats
-    //     assert_eq!(prompt_record.total_deletions, 3);
-    //     // accepted_lines: lines 1-4 and 5-9 = 9 lines
-    //     assert_eq!(prompt_record.accepted_lines, 9);
-    // }
-
     #[test]
     fn test_convert_authorship_log_to_checkpoints() {
         use crate::authorship::transcript::{AiTranscript, Message};
@@ -1254,8 +1222,8 @@ mod tests {
                 total_deletions: 3,
                 accepted_lines: 11,
                 overriden_lines: 0,
-                messages_url: None,
                 custom_attributes: None,
+                messages_url: None,
             },
         );
 
@@ -1287,7 +1255,7 @@ mod tests {
         assert_eq!(ai_checkpoint.author, "ai");
         assert!(ai_checkpoint.agent_id.is_some());
         assert_eq!(ai_checkpoint.agent_id.as_ref().unwrap().tool, "cursor");
-        assert!(ai_checkpoint.transcript.is_some());
+        // Transcript field removed from Checkpoint
         assert_eq!(ai_checkpoint.entries.len(), 1);
         let ai_entry = &ai_checkpoint.entries[0];
         assert_eq!(ai_entry.file, "src/main.rs");
@@ -1302,100 +1270,6 @@ mod tests {
             .sum();
         assert_eq!(total_lines, 11); // 5 lines (1-5) + 6 lines (10-15)
     }
-
-    // #[test]
-    // fn test_overriden_lines_detection() {
-    //     use crate::authorship::attribution_tracker::{Attribution, LineAttribution};
-    //     use crate::authorship::transcript::{AiTranscript, Message};
-    //     use crate::authorship::working_log::{
-    //         AgentId, Checkpoint, CheckpointKind, WorkingLogEntry,
-    //     };
-    //     use std::time::{SystemTime, UNIX_EPOCH};
-
-    //     // Create an AI checkpoint that adds lines 1-5
-    //     let agent_id = AgentId {
-    //         tool: "cursor".to_string(),
-    //         id: "session_123".to_string(),
-    //         model: "claude-3-sonnet".to_string(),
-    //     };
-
-    //     let session_hash = generate_short_hash(&agent_id.id, &agent_id.tool);
-
-    //     let ts = SystemTime::now()
-    //         .duration_since(UNIX_EPOCH)
-    //         .unwrap_or_default()
-    //         .as_millis();
-
-    //     // First checkpoint: AI adds lines 1-5
-    //     let line_attributions1 = vec![LineAttribution::new(1, 5, session_hash.clone(), None)];
-    //     let attributions1 = vec![Attribution::new(0, 50, session_hash.clone(), ts)];
-    //     let entry1 = WorkingLogEntry::new(
-    //         "src/main.rs".to_string(),
-    //         "sha1".to_string(),
-    //         attributions1,
-    //         line_attributions1,
-    //     );
-    //     let mut checkpoint1 = Checkpoint::new(
-    //         CheckpointKind::AiAgent,
-    //         "".to_string(),
-    //         "ai".to_string(),
-    //         vec![entry1],
-    //     );
-    //     checkpoint1.agent_id = Some(agent_id.clone());
-    //     checkpoint1.line_stats.additions = 5;
-    //     checkpoint1.line_stats.deletions = 0;
-
-    //     // Add transcript to make it a valid AI checkpoint
-    //     let mut transcript = AiTranscript::new();
-    //     transcript.add_message(Message::user("Add some code".to_string(), None));
-    //     transcript.add_message(Message::assistant("Added code".to_string(), None));
-    //     checkpoint1.transcript = Some(transcript);
-
-    //     // Create a human checkpoint that removes lines 2-3 (overriding AI lines)
-    //     // After deletion, AI owns lines 1, 4->2, 5->3 (lines shift up)
-    //     let line_attributions2 = vec![
-    //         LineAttribution::new(1, 1, session_hash.clone(), true),
-    //         LineAttribution::new(2, 3, session_hash.clone(), true),
-    //     ];
-    //     let attributions2 = vec![
-    //         Attribution::new(0, 10, session_hash.clone(), ts),
-    //         Attribution::new(10, 30, session_hash.clone(), ts),
-    //     ];
-    //     let entry2 = WorkingLogEntry::new(
-    //         "src/main.rs".to_string(),
-    //         "sha2".to_string(),
-    //         attributions2,
-    //         line_attributions2,
-    //     );
-    //     let mut checkpoint2 = Checkpoint::new(
-    //         CheckpointKind::Human,
-    //         "".to_string(),
-    //         "human".to_string(),
-    //         vec![entry2],
-    //     );
-    //     checkpoint2.line_stats.additions = 0;
-    //     checkpoint2.line_stats.deletions = 0;
-    //     // Note: checkpoint2.agent_id is None, indicating it's a human checkpoint
-
-    //     // Convert to authorship log
-    //     let authorship_log = AuthorshipLog::from_working_log_with_base_commit_and_human_author(
-    //         &[checkpoint1, checkpoint2],
-    //         "base123",
-    //         Some("human@example.com"),
-    //         None,
-    //     );
-
-    //     // Get the prompt record
-    //     let prompt_record = authorship_log.metadata.prompts.get(&session_hash).unwrap();
-
-    //     // Verify metrics
-    //     assert_eq!(prompt_record.total_additions, 5);
-    //     assert_eq!(prompt_record.total_deletions, 0); // AI didn't delete anything
-    //     // accepted_lines: lines 1, 2, 3 = 3 lines (after human deletion of original lines 2-3)
-    //     assert_eq!(prompt_record.accepted_lines, 3);
-    //     // overridden_lines: lines 1-3 are marked overridden in latest checkpoint
-    //     assert_eq!(prompt_record.overriden_lines, 3);
-    // }
 
     #[test]
     fn test_convert_authorship_log_multiple_ai_sessions() {
@@ -1426,8 +1300,8 @@ mod tests {
                 total_deletions: 0,
                 accepted_lines: 10,
                 overriden_lines: 0,
-                messages_url: None,
                 custom_attributes: None,
+                messages_url: None,
             },
         );
 
@@ -1451,8 +1325,8 @@ mod tests {
                 total_deletions: 0,
                 accepted_lines: 20,
                 overriden_lines: 0,
-                messages_url: None,
                 custom_attributes: None,
+                messages_url: None,
             },
         );
 
@@ -1583,8 +1457,8 @@ mod tests {
                 total_deletions: 0,
                 accepted_lines: 5,
                 overriden_lines: 0,
-                messages_url: None,
                 custom_attributes: None,
+                messages_url: None,
             },
         );
 
@@ -1627,8 +1501,95 @@ mod tests {
         assert_eq!(checkpoints[0].author, "ai");
     }
 
+    /// Test that `convert_to_checkpoints_for_squash` correctly handles s_ session attestations
+    /// by looking them up in the sessions map rather than the prompts map.
+    #[test]
+    fn test_convert_to_checkpoints_handles_s_session_entries() {
+        use crate::authorship::working_log::AgentId;
+        use std::collections::HashMap;
+
+        let mut log = AuthorshipLog::new();
+        log.metadata.base_commit_sha = "base456".to_string();
+
+        let agent_id = AgentId {
+            tool: "claude".to_string(),
+            id: "conv_abc123".to_string(),
+            model: "claude-sonnet-4-5-20250514".to_string(),
+        };
+
+        // Generate session ID the same way production code does
+        let session_key = generate_session_id(&agent_id.id, &agent_id.tool);
+        let trace_id = generate_trace_id();
+        let attestation_hash = format!("{}::{}", session_key, trace_id);
+
+        // Insert into sessions map (NOT prompts map)
+        log.metadata.sessions.insert(
+            session_key.clone(),
+            crate::authorship::authorship_log::SessionRecord {
+                agent_id: agent_id.clone(),
+                human_author: Some("dev@example.com".to_string()),
+                custom_attributes: None,
+            },
+        );
+
+        // File with session-format attestation
+        let mut file1 = FileAttestation::new("src/main.rs".to_string());
+        file1.add_entry(AttestationEntry::new(
+            attestation_hash.clone(),
+            vec![LineRange::Range(1, 3)],
+        ));
+        log.attestations.push(file1);
+
+        let mut file_contents = HashMap::new();
+        file_contents.insert(
+            "src/main.rs".to_string(),
+            "line1\nline2\nline3\n".to_string(),
+        );
+
+        let result = log.convert_to_checkpoints_for_squash(&file_contents);
+        assert!(
+            result.is_ok(),
+            "convert_to_checkpoints_for_squash must handle s_ session entries: {:?}",
+            result.err()
+        );
+        let checkpoints = result.unwrap();
+        assert_eq!(checkpoints.len(), 1);
+        assert_eq!(checkpoints[0].agent_id.as_ref().unwrap().tool, "claude");
+        assert_eq!(checkpoints[0].agent_id.as_ref().unwrap().id, "conv_abc123");
+    }
+
     // TODO: `get_line_attribution` routing for h_ hashes requires a live `Repository` instance
     // and cannot be unit-tested here without significant mocking infrastructure.
     // The h_-routing path (returning HumanRecord data instead of PromptRecord) is covered by
     // integration tests in the authorship integration test suite.
+
+    #[test]
+    fn test_generate_session_id() {
+        let id = generate_session_id("session_123", "cursor");
+        assert!(id.starts_with("s_"));
+        assert_eq!(id.len(), 16);
+        // Deterministic
+        assert_eq!(id, generate_session_id("session_123", "cursor"));
+        // Different inputs produce different output
+        assert_ne!(id, generate_session_id("session_456", "cursor"));
+    }
+
+    #[test]
+    fn test_generate_trace_id() {
+        let id = generate_trace_id();
+        assert!(id.starts_with("t_"));
+        assert_eq!(id.len(), 16);
+        // Random: two calls produce different output
+        assert_ne!(id, generate_trace_id());
+        // All chars after prefix are hex
+        assert!(id[2..].chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn test_session_id_uses_same_hash_base_as_prompt_id() {
+        let session = generate_session_id("session_123", "cursor");
+        let prompt = generate_short_hash("session_123", "cursor");
+        // The hex portion of session (after "s_") should be a prefix of the prompt hash
+        assert_eq!(&session[2..], &prompt[..14]);
+    }
 }

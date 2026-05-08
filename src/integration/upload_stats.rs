@@ -240,16 +240,16 @@ pub fn maybe_upload_after_commit(
             "payloadSummary": upload_payload_summary(&payload),
         }),
     );
-    dispatch_upload(
-        feature_flags.async_mode,
+    dispatch_upload(UploadDispatch {
+        run_in_background: feature_flags.async_mode,
         url,
         payload,
         api_key,
         user_id,
-        commit_sha.to_string(),
+        commit_sha: commit_sha.to_string(),
         commit_short,
-        "auto".to_string(),
-    );
+        source: "auto".to_string(),
+    });
 }
 
 pub fn upload_local_commit_stats(
@@ -498,7 +498,7 @@ pub fn upload_local_commit_stats(
     }
 }
 
-fn dispatch_upload(
+struct UploadDispatch {
     run_in_background: bool,
     url: String,
     payload: Value,
@@ -507,7 +507,19 @@ fn dispatch_upload(
     commit_sha: String,
     commit_short: String,
     source: String,
-) {
+}
+
+fn dispatch_upload(request: UploadDispatch) {
+    let UploadDispatch {
+        run_in_background,
+        url,
+        payload,
+        api_key,
+        user_id,
+        commit_sha,
+        commit_short,
+        source,
+    } = request;
     let upload_mode = if run_in_background {
         "background"
     } else {
@@ -1082,7 +1094,11 @@ fn split_tool_model(key: &str) -> (String, Option<String>) {
     }
 }
 
-fn build_file_stats(repo: &Repository, commit_sha: &str, authorship_log: &AuthorshipLog) -> Vec<Value> {
+fn build_file_stats(
+    repo: &Repository,
+    commit_sha: &str,
+    authorship_log: &AuthorshipLog,
+) -> Vec<Value> {
     let workdir = repo.canonical_workdir().to_path_buf();
     let numstat = git_diff_tree_numstat(&workdir, commit_sha);
     if numstat.is_empty() {
@@ -1105,7 +1121,9 @@ fn build_file_stats(repo: &Repository, commit_sha: &str, authorship_log: &Author
     for (file_path, added, deleted) in numstat {
         let accepted = accepted_by_file.get(&file_path);
         let ai_attr = accepted.map(|value| value.ai_accepted).unwrap_or(0);
-        let human_attr = accepted.map(|value| value.known_human_accepted).unwrap_or(0);
+        let human_attr = accepted
+            .map(|value| value.known_human_accepted)
+            .unwrap_or(0);
 
         let ai_add = ai_attr.min(added);
         let human_add = human_attr.min(added.saturating_sub(ai_add));
@@ -1422,11 +1440,13 @@ mod tests {
         assert_eq!(prompt["customAttributes"]["language"], "rust");
         assert!(prompt["messages"].is_array());
         assert_eq!(prompt["messages"].as_array().map(Vec::len), Some(2));
-        assert!(prompt["messages"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|message| message["type"] == "user"));
+        assert!(
+            prompt["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|message| message["type"] == "user")
+        );
     }
 
     #[test]
@@ -1520,8 +1540,9 @@ mod tests {
 
     #[test]
     fn inspect_backend_response_body_accepts_success_code() {
-        let result = inspect_backend_response_body("{\"code\":200,\"msg\":\"操作成功\"}".as_bytes())
-            .expect("success body should pass");
+        let result =
+            inspect_backend_response_body("{\"code\":200,\"msg\":\"操作成功\"}".as_bytes())
+                .expect("success body should pass");
 
         assert_eq!(result, Some((200, Some("操作成功".to_string()))));
     }
@@ -1533,12 +1554,16 @@ mod tests {
         )
         .expect_err("non-200 backend code should fail upload");
 
-        assert_eq!(error, "backend returned code 500: 数据库中已存在该记录，请联系管理员确认");
+        assert_eq!(
+            error,
+            "backend returned code 500: 数据库中已存在该记录，请联系管理员确认"
+        );
     }
 
     #[test]
     fn inspect_backend_response_body_ignores_non_standard_success_body() {
-        let result = inspect_backend_response_body(b"ok").expect("non-json success body should not fail");
+        let result =
+            inspect_backend_response_body(b"ok").expect("non-json success body should not fail");
 
         assert_eq!(result, None);
     }
@@ -1616,7 +1641,9 @@ mod tests {
         tmp_repo
             .trigger_checkpoint_with_author("test_user")
             .expect("seed checkpoint");
-        tmp_repo.commit_with_message("seed commit").expect("seed commit");
+        tmp_repo
+            .commit_with_message("seed commit")
+            .expect("seed commit");
 
         file.append("\nHuman line 1\nHuman line 2\n\n")
             .expect("append human block");
@@ -1628,7 +1655,8 @@ mod tests {
             .expect("human commit");
 
         let head_sha = tmp_repo.get_head_commit_sha().expect("head sha");
-        let authorship_log = get_authorship(tmp_repo.gitai_repo(), &head_sha).expect("authorship note");
+        let authorship_log =
+            get_authorship(tmp_repo.gitai_repo(), &head_sha).expect("authorship note");
         let file_stats = build_file_stats(tmp_repo.gitai_repo(), &head_sha, &authorship_log);
 
         assert_eq!(file_stats.len(), 1);

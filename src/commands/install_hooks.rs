@@ -255,7 +255,7 @@ fn configure_global_trace2_file(event_target: &str) -> Result<(), GitAiError> {
     write_global_git_config(&config_path, &cfg)
 }
 
-fn maybe_configure_async_mode_daemon_trace2(dry_run: bool) -> Result<(), GitAiError> {
+fn configure_daemon_trace2(dry_run: bool) -> Result<(), GitAiError> {
     let runtime_config = config::Config::fresh();
 
     if !runtime_config.feature_flags().async_mode {
@@ -289,38 +289,8 @@ pub(crate) fn configure_async_mode_daemon_trace2_for_config(
     configure_global_trace2_file(&event_target)
 }
 
-fn maybe_teardown_async_mode(dry_run: bool) {
+fn ensure_daemon(dry_run: bool) {
     if dry_run {
-        return;
-    }
-
-    let runtime_config = config::Config::fresh();
-    if runtime_config.feature_flags().async_mode {
-        return;
-    }
-
-    // Don't touch daemon inside test harnesses
-    if std::env::var_os("GIT_AI_TEST_DB_PATH").is_some()
-        || std::env::var_os("GITAI_TEST_DB_PATH").is_some()
-    {
-        return;
-    }
-
-    // Shut down any leftover daemon from when async_mode was enabled.
-    // Uses stop_daemon which tries soft shutdown then escalates to hard kill.
-    if let Ok(daemon_config) = DaemonConfig::from_env_or_default_paths() {
-        let _ =
-            crate::commands::daemon::stop_daemon(&daemon_config, std::time::Duration::from_secs(5));
-    }
-}
-
-fn maybe_ensure_daemon(dry_run: bool) {
-    if dry_run {
-        return;
-    }
-
-    let runtime_config = config::Config::fresh();
-    if !runtime_config.feature_flags().async_mode {
         return;
     }
 
@@ -350,6 +320,7 @@ pub fn run(args: &[String]) -> Result<HashMap<String, String>, GitAiError> {
     // Parse flags
     let mut dry_run = false;
     let mut verbose = false;
+    let mut install_skills = false;
     for arg in args {
         if arg == "--dry-run" || arg == "--dry-run=true" {
             dry_run = true;
@@ -357,20 +328,21 @@ pub fn run(args: &[String]) -> Result<HashMap<String, String>, GitAiError> {
         if arg == "--verbose" || arg == "-v" {
             verbose = true;
         }
+        if arg == "--skills" {
+            install_skills = true;
+        }
     }
 
-    // In async mode, daemon trace2 config must be in place before any install work starts.
-    // If async mode was disabled, tear down any leftover daemon and trace2 config.
+    // Daemon trace2 config must be in place before any install work starts.
     // Non-fatal: the global git config may be read-only (e.g. Nix store symlink).
-    if let Err(e) = maybe_configure_async_mode_daemon_trace2(dry_run) {
+    if let Err(e) = configure_daemon_trace2(dry_run) {
         eprintln!("Warning: could not configure trace2 (non-fatal): {e}");
     }
-    maybe_teardown_async_mode(dry_run);
-    maybe_ensure_daemon(dry_run);
+    ensure_daemon(dry_run);
 
     // Now that the daemon is (re)started, initialize the telemetry handle so
     // that install-hooks metrics and observability events route through it.
-    if config::Config::get().feature_flags().async_mode && !dry_run {
+    if !dry_run {
         let _ = crate::daemon::telemetry_handle::init_daemon_telemetry_handle();
     }
 
@@ -380,7 +352,7 @@ pub fn run(args: &[String]) -> Result<HashMap<String, String>, GitAiError> {
     let params = HookInstallerParams { binary_path };
 
     // Run async operations with smol and convert result
-    let statuses = smol::block_on(async_run_install(&params, dry_run, verbose))?;
+    let statuses = smol::block_on(async_run_install(&params, dry_run, verbose, install_skills))?;
 
     // Clean up legacy envelope logs directory and related artifacts.
     // These are no longer used — all telemetry now routes through the daemon.
@@ -484,6 +456,7 @@ async fn async_run_install(
     params: &HookInstallerParams,
     dry_run: bool,
     verbose: bool,
+    install_skills: bool,
 ) -> Result<HashMap<String, InstallStatus>, GitAiError> {
     let mut any_checked = false;
     let mut has_changes = false;
@@ -657,8 +630,13 @@ async fn async_run_install(
         }
     }
 
-    // Install skills for detected agents only
-    if let Ok(result) = skills_installer::install_skills(dry_run, verbose, &installed_tools)
+    if install_skills {
+        if let Ok(result) = skills_installer::install_skills(dry_run, verbose, &installed_tools)
+            && result.changed
+        {
+            has_changes = true;
+        }
+    } else if let Ok(result) = skills_installer::uninstall_skills(dry_run, verbose)
         && result.changed
     {
         has_changes = true;
@@ -792,7 +770,72 @@ async fn async_run_install(
         emit_install_hooks_metrics(&detailed_results);
     }
 
+    // Warn if git version is below the minimum required for full functionality
+    warn_if_git_version_too_old();
+
     Ok(statuses)
+}
+
+/// Minimum git version required for git-ai to function correctly.
+/// git 2.22.0 introduced `git worktree list --porcelain` output format improvements
+/// and trace2 event logging used by git-ai for attribution.
+const MIN_GIT_VERSION: (u32, u32, u32) = (2, 22, 0);
+
+/// Parse a git version string like "git version 2.39.1" into (major, minor, patch).
+fn parse_git_version(output: &str) -> Option<(u32, u32, u32)> {
+    // Strip the "git version " prefix and any platform suffix (e.g. "(Apple Git-140)")
+    let version_str = output.trim().strip_prefix("git version ")?;
+    let version_str = version_str.split_whitespace().next()?;
+    let mut parts = version_str.split('.');
+    let major: u32 = parts.next()?.parse().ok()?;
+    let minor: u32 = parts.next()?.parse().ok()?;
+    let patch: u32 = parts.next().and_then(|p| p.parse().ok()).unwrap_or(0);
+    Some((major, minor, patch))
+}
+
+/// Print a loud warning if the installed git version is older than MIN_GIT_VERSION.
+fn warn_if_git_version_too_old() {
+    let output = Command::new("git")
+        .args(["--version"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output();
+
+    let version = match output {
+        Ok(o) => {
+            let text = String::from_utf8_lossy(&o.stdout).into_owned();
+            parse_git_version(&text)
+        }
+        Err(_) => None,
+    };
+
+    if let Some(v) = version {
+        let (maj, min, patch) = MIN_GIT_VERSION;
+        if v < (maj, min, patch) {
+            let (vmaj, vmin, vpatch) = v;
+            eprintln!();
+            eprintln!(
+                "\x1b[1;31m╔══════════════════════════════════════════════════════════════╗\x1b[0m"
+            );
+            eprintln!(
+                "\x1b[1;31m║  WARNING: git version too old — git-ai will not work         ║\x1b[0m"
+            );
+            eprintln!(
+                "\x1b[1;31m╚══════════════════════════════════════════════════════════════╝\x1b[0m"
+            );
+            eprintln!(
+                "\x1b[1;31mDetected git {}.{}.{} — git-ai requires git >= {}.{}.{}\x1b[0m",
+                vmaj, vmin, vpatch, maj, min, patch
+            );
+            eprintln!("\x1b[33mPlease upgrade git before using git-ai:\x1b[0m");
+            eprintln!("  macOS:   brew install git");
+            eprintln!(
+                "  Ubuntu:  sudo add-apt-repository ppa:git-core/ppa && sudo apt-get update && sudo apt-get install git"
+            );
+            eprintln!("  Windows: https://git-scm.com/download/win");
+            eprintln!();
+        }
+    }
 }
 
 /// Emit metrics events for install-hooks results
@@ -1238,5 +1281,41 @@ mod tests {
             parse_git_og_cmd_path("@echo off\r\n\"C:\\Program Files\\Git\\bin\\git.exe\" %*\r\n"),
             Some("C:\\Program Files\\Git\\bin\\git.exe".to_string())
         );
+    }
+
+    #[test]
+    fn parse_git_version_standard() {
+        assert_eq!(parse_git_version("git version 2.39.1"), Some((2, 39, 1)));
+    }
+
+    #[test]
+    fn parse_git_version_apple_suffix() {
+        assert_eq!(
+            parse_git_version("git version 2.39.3 (Apple Git-146)"),
+            Some((2, 39, 3))
+        );
+    }
+
+    #[test]
+    fn parse_git_version_no_patch() {
+        assert_eq!(parse_git_version("git version 2.22"), Some((2, 22, 0)));
+    }
+
+    #[test]
+    fn parse_git_version_old() {
+        assert_eq!(parse_git_version("git version 2.17.1"), Some((2, 17, 1)));
+        assert!(parse_git_version("git version 2.17.1").unwrap() < MIN_GIT_VERSION);
+    }
+
+    #[test]
+    fn parse_git_version_at_minimum() {
+        assert_eq!(parse_git_version("git version 2.22.0"), Some((2, 22, 0)));
+        assert!(parse_git_version("git version 2.22.0").unwrap() >= MIN_GIT_VERSION);
+    }
+
+    #[test]
+    fn parse_git_version_invalid() {
+        assert_eq!(parse_git_version("not a git version"), None);
+        assert_eq!(parse_git_version(""), None);
     }
 }

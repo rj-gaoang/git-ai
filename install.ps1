@@ -1,11 +1,30 @@
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
+function Start-DaemonIfRequested {
+    if ($env:GIT_AI_RESTART_DAEMON_AFTER_INSTALL -ne '1') {
+        return
+    }
+
+    $daemonExe = Join-Path $HOME '.git-ai\bin\git-ai.exe'
+    if (-not (Test-Path $daemonExe)) {
+        Write-Warning 'Warning: Failed to locate git-ai.exe for daemon restart after install.'
+        return
+    }
+
+    try {
+        & $daemonExe bg start *> $null
+    } catch {
+        Write-Warning 'Warning: Failed to restart git-ai background service automatically.'
+    }
+}
+
 function Write-ErrorAndExit {
     param(
         [Parameter(Mandatory = $true)][string]$Message
     )
     Write-Host "Error: $Message" -ForegroundColor Red
+    Start-DaemonIfRequested
     exit 1
 }
 
@@ -553,6 +572,9 @@ try {
 } catch {
     Write-Warning "Warning: Failed to set up IDE/agent hooks. Please try running 'git-ai install-hooks' manually."
 }
+
+# Best-effort restart only for daemon-initiated self-updates.
+Start-DaemonIfRequested
 
 # Update PATH so our shim takes precedence over any Git entries
 $skipPathUpdate = $env:GIT_AI_SKIP_PATH_UPDATE -eq '1'

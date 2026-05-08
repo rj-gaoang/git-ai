@@ -19,23 +19,28 @@ use std::io::IsTerminal;
 
 /// Skip expensive post-commit stats when this threshold is exceeded.
 /// High hunk density is the strongest predictor of slow diff_ai_accepted_stats.
-const STATS_SKIP_MAX_HUNKS: usize = 1000;
+#[doc(hidden)]
+pub const STATS_SKIP_MAX_HUNKS: usize = 1000;
 /// Skip expensive stats for very large net additions even if hunks are moderate.
-const STATS_SKIP_MAX_ADDED_LINES: usize = 6000;
+#[doc(hidden)]
+pub const STATS_SKIP_MAX_ADDED_LINES: usize = 6000;
 /// Skip expensive stats for extremely wide commits touching many added-line files.
-const STATS_SKIP_MAX_FILES_WITH_ADDITIONS: usize = 200;
+#[doc(hidden)]
+pub const STATS_SKIP_MAX_FILES_WITH_ADDITIONS: usize = 200;
 /// Skip expensive stats for commits that delete a large number of lines.
 /// Deletion-heavy commits (e.g. removing many files) trigger the same expensive
 /// diff-parsing path as large addition commits, but the added-lines estimate is
 /// near zero, so the cost was previously invisible to the estimator.
-const STATS_SKIP_MAX_DELETED_LINES: usize = 6000;
+#[doc(hidden)]
+pub const STATS_SKIP_MAX_DELETED_LINES: usize = 6000;
 
 #[derive(Debug, Clone, Copy)]
-struct StatsCostEstimate {
-    files_with_additions: usize,
-    added_lines: usize,
-    hunk_ranges: usize,
-    deleted_lines: usize,
+#[doc(hidden)]
+pub struct StatsCostEstimate {
+    pub files_with_additions: usize,
+    pub added_lines: usize,
+    pub hunk_ranges: usize,
+    pub deleted_lines: usize,
 }
 
 fn checkpoint_entry_requires_post_processing(
@@ -205,20 +210,56 @@ pub fn post_commit_with_final_state(
     authorship_log.metadata.base_commit_sha = commit_sha.clone();
     authorship_log.ensure_x_user_id_from_repo(repo);
 
+    // No-hooks background agents (Devin, Codex Cloud, etc.) may not fire checkpoints
+    // for all edits. Attribute any committed lines that have no existing attestation
+    // ("holes") to the detected agent, preserving explicit attributions.
+    if !matches!(
+        crate::authorship::background_agent::detect(),
+        crate::authorship::background_agent::BackgroundAgent::None
+            | crate::authorship::background_agent::BackgroundAgent::WithHooks { .. }
+    ) {
+        let diff_base = if parent_sha == "initial" {
+            "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+        } else {
+            &parent_sha
+        };
+        if let Ok(added_lines) = repo.diff_added_lines(diff_base, &commit_sha, None) {
+            let committed_hunks: HashMap<
+                String,
+                Vec<crate::authorship::authorship_log::LineRange>,
+            > = added_lines
+                .into_iter()
+                .filter(|(_, lines)| !lines.is_empty())
+                .map(|(path, lines)| {
+                    (
+                        path,
+                        crate::authorship::authorship_log::LineRange::compress_lines(&lines),
+                    )
+                })
+                .collect();
+            crate::authorship::background_agent::fill_unattributed_lines(
+                &mut authorship_log,
+                &committed_hunks,
+                &human_author,
+            );
+        }
+    }
+
     // Long-lived daemon processes should read a fresh config snapshot.
     // Always use Config::fresh() to support runtime config updates
     // (especially important for daemon mode, but also good for consistency)
     let config = Config::fresh();
-    let (effective_storage, using_custom_api, custom_attrs) = (
-        config.effective_prompt_storage(&Some(repo.clone())),
-        config.api_base_url() != crate::config::DEFAULT_API_BASE_URL,
-        config.custom_attributes().clone(),
-    );
+    let effective_storage = config.effective_prompt_storage(&Some(repo.clone()));
+    let using_custom_api = config.api_base_url() != crate::config::DEFAULT_API_BASE_URL;
+    let custom_attrs = config.custom_attributes().clone();
 
-    // Inject custom attributes into all PromptRecords.
+    // Inject custom attributes into all PromptRecords and SessionRecords.
     if !custom_attrs.is_empty() {
         for pr in authorship_log.metadata.prompts.values_mut() {
             pr.custom_attributes = Some(custom_attrs.clone());
+        }
+        for sr in authorship_log.metadata.sessions.values_mut() {
+            sr.custom_attributes = Some(custom_attrs.clone());
         }
     }
 
@@ -272,7 +313,6 @@ pub fn post_commit_with_final_state(
         }
     }
 
-    // Serialize the authorship log
     let authorship_json = authorship_log
         .serialize_to_string()
         .map_err(|_| GitAiError::Generic("Failed to serialize authorship log".to_string()))?;
@@ -394,6 +434,7 @@ pub fn post_commit_with_final_state(
             initial_attributions.prompts,
             initial_attributions.humans,
             initial_file_contents,
+            initial_attributions.sessions,
         )?;
         crate::diagnostics::append_debug_event(
             "post_commit_initial_attributions_written",
@@ -564,7 +605,8 @@ fn stats_skip_reason_debug(reason: Option<&StatsSkipReason>) -> serde_json::Valu
     }
 }
 
-fn should_skip_expensive_post_commit_stats(estimate: &StatsCostEstimate) -> bool {
+#[doc(hidden)]
+pub fn should_skip_expensive_post_commit_stats(estimate: &StatsCostEstimate) -> bool {
     estimate.hunk_ranges >= STATS_SKIP_MAX_HUNKS
         || estimate.added_lines >= STATS_SKIP_MAX_ADDED_LINES
         || estimate.files_with_additions >= STATS_SKIP_MAX_FILES_WITH_ADDITIONS
@@ -642,7 +684,8 @@ fn estimate_stats_cost(
     })
 }
 
-fn count_line_ranges(lines: &[u32]) -> usize {
+#[doc(hidden)]
+pub fn count_line_ranges(lines: &[u32]) -> usize {
     if lines.is_empty() {
         return 0;
     }
@@ -663,13 +706,11 @@ fn count_line_ranges(lines: &[u32]) -> usize {
 }
 
 /// Update prompts/transcripts in working log checkpoints to their latest versions.
-/// This helps prevent race conditions where we miss the last message in a conversation.
 ///
-/// For each unique prompt/conversation (identified by agent_id), only the LAST checkpoint
-/// with that agent_id is updated. This prevents duplicating the same full transcript
-/// across multiple checkpoints when only the final version matters.
+/// For each unique prompt/conversation (identified by agent_id), only the last
+/// checkpoint with that agent_id is updated. This prevents duplicating the same
+/// full transcript across multiple checkpoints when only the final version matters.
 fn update_prompts_to_latest(checkpoints: &mut [Checkpoint]) -> Result<(), GitAiError> {
-    // Group checkpoints by agent ID (tool + id), tracking indices
     let mut agent_checkpoint_indices: HashMap<String, Vec<usize>> = HashMap::new();
 
     for (idx, checkpoint) in checkpoints.iter().enumerate() {
@@ -679,18 +720,15 @@ fn update_prompts_to_latest(checkpoints: &mut [Checkpoint]) -> Result<(), GitAiE
         }
     }
 
-    // For each unique agent/conversation, update only the LAST checkpoint
     for (_agent_key, indices) in agent_checkpoint_indices {
         if indices.is_empty() {
             continue;
         }
 
-        // Get the last checkpoint index for this agent
         let last_idx = *indices.last().unwrap();
         let checkpoint = &checkpoints[last_idx];
 
         if let Some(agent_id) = &checkpoint.agent_id {
-            // Use shared update logic from prompt_updater module
             let result = update_prompt_from_tool(
                 &agent_id.tool,
                 &agent_id.id,
@@ -698,7 +736,6 @@ fn update_prompts_to_latest(checkpoints: &mut [Checkpoint]) -> Result<(), GitAiE
                 &agent_id.model,
             );
 
-            // Apply the update to the last checkpoint only
             match result {
                 PromptUpdateResult::Updated(latest_transcript, latest_model) => {
                     let checkpoint = &mut checkpoints[last_idx];
@@ -707,13 +744,8 @@ fn update_prompts_to_latest(checkpoints: &mut [Checkpoint]) -> Result<(), GitAiE
                         agent_id.model = latest_model;
                     }
                 }
-                PromptUpdateResult::Unchanged => {
-                    // No update available, keep existing transcript
-                }
-                PromptUpdateResult::Failed(_e) => {
-                    // Error already logged in update_prompt_from_tool
-                    // Continue processing other checkpoints
-                }
+                PromptUpdateResult::Unchanged => {}
+                PromptUpdateResult::Failed(_e) => {}
             }
         }
     }
@@ -721,9 +753,7 @@ fn update_prompts_to_latest(checkpoints: &mut [Checkpoint]) -> Result<(), GitAiE
     Ok(())
 }
 
-/// Batch upsert all prompts from checkpoints to the internal database.
-/// For each unique agent_id (tool:id), only the LAST checkpoint is inserted.
-/// This mirrors the deduplication logic in update_prompts_to_latest().
+/// Batch upsert the latest prompt checkpoint for each agent into the internal database.
 fn batch_upsert_prompts_to_db(
     checkpoints: &[Checkpoint],
     working_log: &crate::git::repo_storage::PersistedWorkingLog,
@@ -732,9 +762,6 @@ fn batch_upsert_prompts_to_db(
     use crate::authorship::internal_db::{InternalDatabase, PromptDbRecord};
 
     let workdir = working_log.repo_workdir.to_string_lossy().to_string();
-
-    // Group checkpoints by agent_id, keeping track of the LAST index for each.
-    // This mirrors the logic in update_prompts_to_latest().
     let mut last_checkpoint_by_agent: HashMap<String, usize> = HashMap::new();
 
     for (idx, checkpoint) in checkpoints.iter().enumerate() {
@@ -743,13 +770,10 @@ fn batch_upsert_prompts_to_db(
         }
         if let Some(agent_id) = &checkpoint.agent_id {
             let key = format!("{}:{}", agent_id.tool, agent_id.id);
-            // Always update to the latest index (overwrites previous)
             last_checkpoint_by_agent.insert(key, idx);
         }
     }
 
-    // Only create records for the LAST checkpoint of each agent_id
-    // Note: from_checkpoint now uses message timestamps for created_at/updated_at
     let mut records = Vec::new();
     for (_agent_key, idx) in last_checkpoint_by_agent {
         let checkpoint = &checkpoints[idx];
@@ -776,11 +800,7 @@ fn batch_upsert_prompts_to_db(
     Ok(())
 }
 
-/// Enqueue prompt messages to CAS for external storage.
-/// For each prompt with non-empty messages:
-/// - Serialize messages to JSON
-/// - Enqueue to CAS (returns hash)
-/// - Set messages_url (format: {api_base_url}/cas/{hash}) and clear messages
+/// Enqueue prompt messages to CAS for external storage and replace messages with a messages_url.
 fn enqueue_prompt_messages_to_cas(
     repo: &Repository,
     prompts: &mut std::collections::BTreeMap<
@@ -795,12 +815,10 @@ fn enqueue_prompt_messages_to_cas(
         .lock()
         .map_err(|e| GitAiError::Generic(format!("Failed to lock database: {}", e)))?;
 
-    // CAS metadata for prompt messages
     let mut metadata = HashMap::new();
     metadata.insert("api_version".to_string(), "v1".to_string());
     metadata.insert("kind".to_string(), "prompt".to_string());
 
-    // Get repo URL from default remote
     let repo_url = repo
         .get_default_remote()
         .ok()
@@ -820,45 +838,38 @@ fn enqueue_prompt_messages_to_cas(
         metadata.insert("repo_url".to_string(), normalized);
     }
 
-    // Get API base URL for constructing messages_url
-    // Always use Config::fresh() to support runtime config updates
     let api_base_url = Config::fresh().api_base_url().to_string();
 
-    for (_key, prompt) in prompts.iter_mut() {
-        if !prompt.messages.is_empty() {
-            // Wrap messages in CasMessagesObject and serialize to JSON
-            let messages_obj = crate::api::types::CasMessagesObject {
-                messages: prompt.messages.clone(),
-            };
-            let messages_json = serde_json::to_value(&messages_obj)
-                .map_err(|e| GitAiError::Generic(format!("Failed to serialize messages: {}", e)))?;
-
-            // Enqueue to CAS (returns hash)
-            let hash = db_lock.enqueue_cas_object(&messages_json, Some(&metadata))?;
-
-            let metadata_json = serde_json::to_string(&metadata).ok();
-            let canonical = serde_json_canonicalizer::to_string(&messages_json)
-                .unwrap_or_else(|_| messages_json.to_string());
-            let cas_payload = crate::daemon::control_api::CasSyncPayload {
-                hash: hash.clone(),
-                data: canonical,
-                metadata: metadata_json,
-            };
-
-            // In daemon mode, submit directly to the in-process telemetry worker.
-            // In wrapper-daemon mode, forward over the control socket so the
-            // background daemon can upload it immediately.
-            if crate::daemon::daemon_process_active() {
-                let _ =
-                    crate::daemon::telemetry_worker::submit_daemon_internal_cas(vec![cas_payload]);
-            } else if crate::daemon::telemetry_handle::daemon_telemetry_available() {
-                crate::daemon::telemetry_handle::submit_cas(vec![cas_payload]);
-            }
-
-            // Set full URL and clear messages
-            prompt.messages_url = Some(format!("{}/cas/{}", api_base_url, hash));
-            prompt.messages.clear();
+    for prompt in prompts.values_mut() {
+        if prompt.messages.is_empty() {
+            continue;
         }
+
+        let messages_obj = crate::api::types::CasMessagesObject {
+            messages: prompt.messages.clone(),
+        };
+        let messages_json = serde_json::to_value(&messages_obj)
+            .map_err(|e| GitAiError::Generic(format!("Failed to serialize messages: {}", e)))?;
+
+        let hash = db_lock.enqueue_cas_object(&messages_json, Some(&metadata))?;
+
+        let metadata_json = serde_json::to_string(&metadata).ok();
+        let canonical = serde_json_canonicalizer::to_string(&messages_json)
+            .unwrap_or_else(|_| messages_json.to_string());
+        let cas_payload = crate::daemon::control_api::CasSyncPayload {
+            hash: hash.clone(),
+            data: canonical,
+            metadata: metadata_json,
+        };
+
+        if crate::daemon::daemon_process_active() {
+            let _ = crate::daemon::telemetry_worker::submit_daemon_internal_cas(vec![cas_payload]);
+        } else if crate::daemon::telemetry_handle::daemon_telemetry_available() {
+            crate::daemon::telemetry_handle::submit_cas(vec![cas_payload]);
+        }
+
+        prompt.messages_url = Some(format!("{}/cas/{}", api_base_url, hash));
+        prompt.messages.clear();
     }
 
     Ok(())
@@ -890,31 +901,19 @@ fn record_commit_metrics(
 
     // Subtract mock_ai contributions from the aggregates so the "all" entry
     // only reflects real tools.
-    let mut agg_mixed = stats.mixed_additions;
     let mut agg_ai = stats.ai_additions;
     let mut agg_accepted = stats.ai_accepted;
-    let mut agg_total_add = stats.total_ai_additions;
-    let mut agg_total_del = stats.total_ai_deletions;
-    let mut agg_waiting: u64 = stats.time_waiting_for_ai;
     for (key, ts) in &stats.tool_model_breakdown {
         if key.starts_with("mock_ai::") {
-            agg_mixed = agg_mixed.saturating_sub(ts.mixed_additions);
             agg_ai = agg_ai.saturating_sub(ts.ai_additions);
             agg_accepted = agg_accepted.saturating_sub(ts.ai_accepted);
-            agg_total_add = agg_total_add.saturating_sub(ts.total_ai_additions);
-            agg_total_del = agg_total_del.saturating_sub(ts.total_ai_deletions);
-            agg_waiting = agg_waiting.saturating_sub(ts.time_waiting_for_ai);
         }
     }
 
     // Build parallel arrays: index 0 = "all" (aggregate), index 1+ = per tool/model
     let mut tool_model_pairs: Vec<String> = vec!["all".to_string()];
-    let mut mixed_additions: Vec<u32> = vec![agg_mixed];
     let mut ai_additions: Vec<u32> = vec![agg_ai];
     let mut ai_accepted: Vec<u32> = vec![agg_accepted];
-    let mut total_ai_additions: Vec<u32> = vec![agg_total_add];
-    let mut total_ai_deletions: Vec<u32> = vec![agg_total_del];
-    let mut time_waiting_for_ai: Vec<u64> = vec![agg_waiting];
 
     // Add per-tool/model breakdown, skipping mock_ai (test preset)
     for (tool_model, tool_stats) in &stats.tool_model_breakdown {
@@ -922,12 +921,8 @@ fn record_commit_metrics(
             continue;
         }
         tool_model_pairs.push(tool_model.clone());
-        mixed_additions.push(tool_stats.mixed_additions);
         ai_additions.push(tool_stats.ai_additions);
         ai_accepted.push(tool_stats.ai_accepted);
-        total_ai_additions.push(tool_stats.total_ai_additions);
-        total_ai_deletions.push(tool_stats.total_ai_deletions);
-        time_waiting_for_ai.push(tool_stats.time_waiting_for_ai);
     }
 
     // Build values with all stats
@@ -936,12 +931,8 @@ fn record_commit_metrics(
         .git_diff_deleted_lines(stats.git_diff_deleted_lines)
         .git_diff_added_lines(stats.git_diff_added_lines)
         .tool_model_pairs(tool_model_pairs)
-        .mixed_additions(mixed_additions)
         .ai_additions(ai_additions)
-        .ai_accepted(ai_accepted)
-        .total_ai_additions(total_ai_additions)
-        .total_ai_deletions(total_ai_deletions)
-        .time_waiting_for_ai(time_waiting_for_ai);
+        .ai_accepted(ai_accepted);
 
     // Add first checkpoint timestamp (null if no checkpoints)
     let values = if let Some(first) = checkpoints.first() {
@@ -964,7 +955,9 @@ fn record_commit_metrics(
         values.commit_subject_null().commit_body_null()
     };
 
-    // Build attributes - start with version
+    // Build attributes - start with version and extract session_id from first AI checkpoint
+    // session_id links this commit to the AI agent conversation that produced it
+    // Note: session_id removed from committed events - commits can contain code from multiple AI sessions
     let mut attrs = EventAttributes::with_version(env!("CARGO_PKG_VERSION"));
 
     attrs = attrs
@@ -997,12 +990,7 @@ fn record_commit_metrics(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        STATS_SKIP_MAX_ADDED_LINES, STATS_SKIP_MAX_DELETED_LINES,
-        STATS_SKIP_MAX_FILES_WITH_ADDITIONS, STATS_SKIP_MAX_HUNKS, StatsCostEstimate,
-        count_line_ranges, should_skip_expensive_post_commit_stats,
-    };
-    use crate::git::test_utils::TmpRepo;
+    use super::*;
 
     #[test]
     fn test_count_line_ranges_handles_scattered_and_contiguous_lines() {
@@ -1055,68 +1043,6 @@ mod tests {
             deleted_lines: STATS_SKIP_MAX_DELETED_LINES,
         };
         assert!(should_skip_expensive_post_commit_stats(&by_deleted_lines));
-    }
-
-    #[test]
-    fn test_post_commit_empty_repo_with_checkpoint() {
-        // Create an empty repo (no commits yet)
-        let tmp_repo = TmpRepo::new().unwrap();
-
-        // Create a file and checkpoint it (no commit yet)
-        let mut file = tmp_repo
-            .write_file("test.txt", "Hello, world!\n", false)
-            .unwrap();
-        tmp_repo
-            .trigger_checkpoint_with_author("test_user")
-            .unwrap();
-
-        // Make a change and checkpoint again
-        file.append("Second line\n").unwrap();
-        tmp_repo
-            .trigger_checkpoint_with_author("test_user")
-            .unwrap();
-
-        // Now make the first commit (empty repo case: base_commit is None)
-        let result = tmp_repo.commit_with_message("Initial commit");
-
-        // Should not panic or error - this is the key test
-        // The main goal is to ensure empty repos (base_commit=None) don't cause errors
-        assert!(
-            result.is_ok(),
-            "post_commit should handle empty repo (base_commit=None) without errors"
-        );
-
-        // The authorship log is created successfully (even if empty for human-only checkpoints)
-        let _authorship_log = result.unwrap();
-    }
-
-    #[test]
-    fn test_post_commit_empty_repo_no_checkpoint() {
-        // Create an empty repo (no commits yet)
-        let tmp_repo = TmpRepo::new().unwrap();
-
-        // Create a file without checkpointing
-        tmp_repo
-            .write_file("test.txt", "Hello, world!\n", false)
-            .unwrap();
-
-        // Make the first commit with no prior checkpoints
-        let result = tmp_repo.commit_with_message("Initial commit");
-
-        // Should not panic or error even with no working log
-        assert!(
-            result.is_ok(),
-            "post_commit should handle empty repo with no checkpoints without errors"
-        );
-
-        let authorship_log = result.unwrap();
-
-        // The authorship log should be created but empty (no AI checkpoints)
-        // All changes will be attributed to the human author
-        assert!(
-            authorship_log.attestations.is_empty(),
-            "Should have empty attestations when no checkpoints exist"
-        );
     }
 
     #[test]
@@ -1210,50 +1136,6 @@ mod tests {
         assert!(
             !should_skip_expensive_post_commit_stats(&all_zero),
             "All zero values should not skip"
-        );
-    }
-
-    #[test]
-    fn test_post_commit_utf8_filename_with_ai_attribution() {
-        // Create a repo with an initial commit
-        let tmp_repo = TmpRepo::new().unwrap();
-
-        // Create initial file and commit
-        tmp_repo.write_file("README.md", "# Test\n", true).unwrap();
-        tmp_repo
-            .trigger_checkpoint_with_author("test_user")
-            .unwrap();
-        tmp_repo.commit_with_message("Initial commit").unwrap();
-
-        // Create a file with Chinese characters in the filename
-        let chinese_filename = "中文文件.txt";
-        tmp_repo
-            .write_file(chinese_filename, "Hello, 世界!\n", true)
-            .unwrap();
-
-        // Trigger AI checkpoint
-        tmp_repo
-            .trigger_checkpoint_with_ai("mock_ai", None, None)
-            .unwrap();
-
-        // Commit
-        let authorship_log = tmp_repo.commit_with_message("Add Chinese file").unwrap();
-
-        // Debug output
-        println!(
-            "Authorship log attestations: {:?}",
-            authorship_log.attestations
-        );
-
-        // The attestation should include the Chinese filename
-        assert_eq!(
-            authorship_log.attestations.len(),
-            1,
-            "Should have 1 attestation for the Chinese-named file"
-        );
-        assert_eq!(
-            authorship_log.attestations[0].file_path, chinese_filename,
-            "File path should be the UTF-8 filename"
         );
     }
 }

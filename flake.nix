@@ -36,7 +36,7 @@
         # Build the git-ai binary using the pinned Rust toolchain
         git-ai-unwrapped = rustPlatform.buildRustPackage {
           pname = "git-ai";
-          version = "2.0.8";
+          version = "2.1.1";
 
           src = ./.;
 
@@ -387,9 +387,7 @@ GITOGEOF
             feature_flags =
               let
                 knownFlags = filterAttrs (n: v: v != null) {
-                  async_mode = cfg.settings.featureFlags.asyncMode;
                   rewrite_stash = cfg.settings.featureFlags.rewriteStash;
-                  checkpoint_inter_commit_move = cfg.settings.featureFlags.interCommitMove;
                   auth_keyring = cfg.settings.featureFlags.authKeyring;
                   git_hooks_enabled = cfg.settings.featureFlags.gitHooksEnabled;
                   git_hooks_externally_managed = cfg.settings.featureFlags.gitHooksExternallyManaged;
@@ -561,32 +559,12 @@ GITOGEOF
               };
 
               featureFlags = {
-                asyncMode = mkOption {
-                  type = types.nullOr types.bool;
-                  default = null;
-                  description = ''
-                    Enable async daemon mode for background processing.
-                    When enabled, git operations are processed asynchronously
-                    through a background daemon, improving performance for IDE
-                    and agent workflows.
-                    Equivalent to: git ai config set feature_flags.async_mode true
-                  '';
-                };
-
                 rewriteStash = mkOption {
                   type = types.nullOr types.bool;
                   default = null;
                   description = ''
                     Enable stash rewriting for improved AI tracking of stash
                     operations.
-                  '';
-                };
-
-                interCommitMove = mkOption {
-                  type = types.nullOr types.bool;
-                  default = null;
-                  description = ''
-                    Enable checkpoint inter-commit move tracking.
                   '';
                 };
 
@@ -695,9 +673,7 @@ GITOGEOF
             feature_flags =
               let
                 knownFlags = filterAttrs (n: v: v != null) {
-                  async_mode = cfg.settings.featureFlags.asyncMode;
                   rewrite_stash = cfg.settings.featureFlags.rewriteStash;
-                  checkpoint_inter_commit_move = cfg.settings.featureFlags.interCommitMove;
                   auth_keyring = cfg.settings.featureFlags.authKeyring;
                   git_hooks_enabled = cfg.settings.featureFlags.gitHooksEnabled;
                   git_hooks_externally_managed = cfg.settings.featureFlags.gitHooksExternallyManaged;
@@ -856,32 +832,12 @@ GITOGEOF
               };
 
               featureFlags = {
-                asyncMode = mkOption {
-                  type = types.nullOr types.bool;
-                  default = null;
-                  description = ''
-                    Enable async daemon mode for background processing.
-                    When enabled, git operations are processed asynchronously
-                    through a background daemon, improving performance for IDE
-                    and agent workflows.
-                    Equivalent to: git ai config set feature_flags.async_mode true
-                  '';
-                };
-
                 rewriteStash = mkOption {
                   type = types.nullOr types.bool;
                   default = null;
                   description = ''
                     Enable stash rewriting for improved AI tracking of stash
                     operations.
-                  '';
-                };
-
-                interCommitMove = mkOption {
-                  type = types.nullOr types.bool;
-                  default = null;
-                  description = ''
-                    Enable checkpoint inter-commit move tracking.
                   '';
                 };
 

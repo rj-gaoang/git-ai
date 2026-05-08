@@ -50,6 +50,8 @@ unsafe extern "system" {
 
 const UPDATE_CHECK_INTERVAL_HOURS: u64 = 24;
 const GIT_AI_RELEASE_ENV: &str = "GIT_AI_RELEASE_TAG";
+#[cfg(windows)]
+const GIT_AI_RESTART_DAEMON_AFTER_INSTALL_ENV: &str = "GIT_AI_RESTART_DAEMON_AFTER_INSTALL";
 const BACKGROUND_SPAWN_THROTTLE_SECS: u64 = 60;
 const ENV_BACKGROUND_UPGRADE_WORKER: &str = "GIT_AI_BACKGROUND_UPGRADE_WORKER";
 
@@ -311,6 +313,11 @@ fn persist_update_state(channel: UpdateChannel, release: Option<&ChannelRelease>
     write_update_cache(&cache);
 }
 
+pub(crate) fn clear_cached_update_state() {
+    let channel = config::Config::fresh().update_channel();
+    persist_update_state(channel, None);
+}
+
 fn releases_endpoint() -> &'static str {
     "/worker/releases"
 }
@@ -530,17 +537,21 @@ fn run_install_script(script_content: &str, tag: &str, silent: bool) -> Result<(
              Start-Transcript -Path $logFile -Append -Force | Out-Null; \
              Write-Host 'Running verified install script...'; \
              try {{ \
-                 $ErrorActionPreference = 'Continue'; \
-                 & '{}'; \
-                 Write-Host 'Install script completed'; \
-             }} catch {{ \
-                 Write-Host \"Error: $_\"; \
-                 Write-Host \"Stack trace: $($_.ScriptStackTrace)\"; \
-             }} finally {{ \
-                 Stop-Transcript | Out-Null; \
-                 Remove-Item -Path '{}' -Force -ErrorAction SilentlyContinue; \
-             }}",
-            log_path_str, script_path_str, script_path_str
+                  $ErrorActionPreference = 'Continue'; \
+                  & '{}'; \
+                  Write-Host 'Install script completed'; \
+              }} catch {{ \
+                  Write-Host \"Error: $_\"; \
+                  Write-Host \"Stack trace: $($_.ScriptStackTrace)\"; \
+              }} finally {{ \
+                  if ($env:{} -eq '1') {{ \
+                      $daemonExe = Join-Path $HOME '.git-ai\\bin\\git-ai.exe'; \
+                      if (Test-Path $daemonExe) {{ try {{ & $daemonExe bg start *> $null }} catch {{ }} }} \
+                  }}; \
+                  Stop-Transcript | Out-Null; \
+                  Remove-Item -Path '{}' -Force -ErrorAction SilentlyContinue; \
+              }}",
+            log_path_str, script_path_str, GIT_AI_RESTART_DAEMON_AFTER_INSTALL_ENV, script_path_str
         );
 
         let spawn_powershell = |exe: &str| -> std::io::Result<std::process::Child> {
@@ -556,6 +567,7 @@ fn run_install_script(script_content: &str, tag: &str, silent: bool) -> Result<(
             cmd.creation_flags(CREATE_NO_WINDOW);
 
             if silent {
+                cmd.env(GIT_AI_RESTART_DAEMON_AFTER_INSTALL_ENV, "1");
                 cmd.stdout(Stdio::null()).stderr(Stdio::null());
             }
 
@@ -661,7 +673,7 @@ pub fn run_with_args(args: &[String]) {
 }
 
 fn run_impl(force: bool, background: bool) {
-    let config = config::Config::get();
+    let config = config::Config::fresh();
     let channel = config.update_channel();
     let skip_install = background && config.auto_updates_disabled();
     let _ = run_impl_with_url(force, config.api_base_url(), channel, skip_install);
@@ -1779,5 +1791,65 @@ mod tests {
             UpdateChannel::Latest,
             Some(&cache)
         ));
+    }
+
+    fn with_update_check_env(
+        cache_has_update: bool,
+        auto_updates_disabled: bool,
+        f: impl FnOnce(),
+    ) {
+        let temp_dir = tempfile::tempdir().unwrap();
+        set_test_cache_dir(&temp_dir);
+
+        let mut cache = UpdateCache::new(UpdateChannel::Latest);
+        cache.last_checked_at = current_timestamp();
+        if cache_has_update {
+            cache.available_tag = Some("v99.99.99".to_string());
+            cache.available_semver = Some("99.99.99".to_string());
+        }
+        write_update_cache(&cache);
+
+        let patch = serde_json::json!({
+            "disable_version_checks": false,
+            "disable_auto_updates": auto_updates_disabled
+        })
+        .to_string();
+        unsafe { std::env::set_var("GIT_AI_TEST_CONFIG_PATCH", &patch) };
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+
+        unsafe { std::env::remove_var("GIT_AI_TEST_CONFIG_PATCH") };
+        clear_test_cache_dir();
+
+        if let Err(e) = result {
+            std::panic::resume_unwind(e);
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn check_for_update_available_returns_update_ready_when_cache_has_pending_update() {
+        with_update_check_env(true, false, || {
+            let result = check_for_update_available().unwrap();
+            assert_eq!(result, DaemonUpdateCheckResult::UpdateReady);
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn check_for_update_available_returns_no_update_when_auto_updates_disabled() {
+        with_update_check_env(true, true, || {
+            let result = check_for_update_available().unwrap();
+            assert_eq!(result, DaemonUpdateCheckResult::NoUpdate);
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn check_for_update_available_returns_no_update_when_cache_has_no_pending_update() {
+        with_update_check_env(false, false, || {
+            let result = check_for_update_available().unwrap();
+            assert_eq!(result, DaemonUpdateCheckResult::NoUpdate);
+        });
     }
 }

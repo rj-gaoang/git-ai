@@ -1,9 +1,13 @@
 pub mod cli_parser;
 pub mod command_classification;
 pub mod diff_tree_to_tree;
+pub mod fast_reader;
 pub mod refs;
 pub mod repo_state;
 pub mod repository;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_utils;
 
 pub mod authorship_traversal;
 
@@ -16,6 +20,3 @@ pub mod repo_storage;
 pub mod rewrite_log;
 pub mod status;
 pub mod sync_authorship;
-
-#[cfg(feature = "test-support")]
-pub mod test_utils;

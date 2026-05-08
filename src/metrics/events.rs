@@ -2,8 +2,8 @@
 
 use super::pos_encoded::{
     PosEncoded, PosField, sparse_get_string, sparse_get_u32, sparse_get_u64, sparse_get_vec_string,
-    sparse_get_vec_u32, sparse_get_vec_u64, sparse_set, string_to_json, u32_to_json, u64_to_json,
-    vec_string_to_json, vec_u32_to_json, vec_u64_to_json,
+    sparse_get_vec_u32, sparse_set, string_to_json, u32_to_json, u64_to_json, vec_string_to_json,
+    vec_u32_to_json,
 };
 use super::types::{EventValues, MetricEventId, SparseArray};
 
@@ -21,7 +21,7 @@ pub mod committed_pos {
     pub const AI_ACCEPTED: usize = 6;
     pub const TOTAL_AI_ADDITIONS: usize = 7;
     pub const TOTAL_AI_DELETIONS: usize = 8;
-    pub const TIME_WAITING_FOR_AI: usize = 9;
+    // Position 9 was time_waiting_for_ai (removed)
 
     // New scalar fields
     pub const FIRST_CHECKPOINT_TS: usize = 10; // u64 (null if no checkpoints)
@@ -44,12 +44,12 @@ pub mod committed_pos {
 /// | Position | Name | Type |
 /// |----------|------|------|
 /// | 3 | tool_model_pairs | `Vec<String>` |
-/// | 4 | mixed_additions | `Vec<u32>` |
+/// | 4 | (removed) | - |
 /// | 5 | ai_additions | `Vec<u32>` |
 /// | 6 | ai_accepted | `Vec<u32>` |
-/// | 7 | total_ai_additions | `Vec<u32>` |
-/// | 8 | total_ai_deletions | `Vec<u32>` |
-/// | 9 | time_waiting_for_ai | `Vec<u64>` |
+/// | 7 | (removed) | - |
+/// | 8 | (removed) | - |
+/// | 9 | (removed) | - |
 /// | 10 | first_checkpoint_ts | u64 |
 /// | 11 | commit_subject | String |
 /// | 12 | commit_body | String |
@@ -62,12 +62,8 @@ pub struct CommittedValues {
 
     // Array fields (parallel arrays)
     pub tool_model_pairs: PosField<Vec<String>>,
-    pub mixed_additions: PosField<Vec<u32>>,
     pub ai_additions: PosField<Vec<u32>>,
     pub ai_accepted: PosField<Vec<u32>>,
-    pub total_ai_additions: PosField<Vec<u32>>,
-    pub total_ai_deletions: PosField<Vec<u32>>,
-    pub time_waiting_for_ai: PosField<Vec<u64>>,
 
     // New scalar fields
     pub first_checkpoint_ts: PosField<u64>,
@@ -128,17 +124,6 @@ impl CommittedValues {
         self
     }
 
-    pub fn mixed_additions(mut self, value: Vec<u32>) -> Self {
-        self.mixed_additions = Some(Some(value));
-        self
-    }
-
-    #[allow(dead_code)]
-    pub fn mixed_additions_null(mut self) -> Self {
-        self.mixed_additions = Some(None);
-        self
-    }
-
     pub fn ai_additions(mut self, value: Vec<u32>) -> Self {
         self.ai_additions = Some(Some(value));
         self
@@ -158,39 +143,6 @@ impl CommittedValues {
     #[allow(dead_code)]
     pub fn ai_accepted_null(mut self) -> Self {
         self.ai_accepted = Some(None);
-        self
-    }
-
-    pub fn total_ai_additions(mut self, value: Vec<u32>) -> Self {
-        self.total_ai_additions = Some(Some(value));
-        self
-    }
-
-    #[allow(dead_code)]
-    pub fn total_ai_additions_null(mut self) -> Self {
-        self.total_ai_additions = Some(None);
-        self
-    }
-
-    pub fn total_ai_deletions(mut self, value: Vec<u32>) -> Self {
-        self.total_ai_deletions = Some(Some(value));
-        self
-    }
-
-    #[allow(dead_code)]
-    pub fn total_ai_deletions_null(mut self) -> Self {
-        self.total_ai_deletions = Some(None);
-        self
-    }
-
-    pub fn time_waiting_for_ai(mut self, value: Vec<u64>) -> Self {
-        self.time_waiting_for_ai = Some(Some(value));
-        self
-    }
-
-    #[allow(dead_code)]
-    pub fn time_waiting_for_ai_null(mut self) -> Self {
-        self.time_waiting_for_ai = Some(None);
         self
     }
 
@@ -256,11 +208,6 @@ impl PosEncoded for CommittedValues {
         );
         sparse_set(
             &mut map,
-            committed_pos::MIXED_ADDITIONS,
-            vec_u32_to_json(&self.mixed_additions),
-        );
-        sparse_set(
-            &mut map,
             committed_pos::AI_ADDITIONS,
             vec_u32_to_json(&self.ai_additions),
         );
@@ -268,21 +215,6 @@ impl PosEncoded for CommittedValues {
             &mut map,
             committed_pos::AI_ACCEPTED,
             vec_u32_to_json(&self.ai_accepted),
-        );
-        sparse_set(
-            &mut map,
-            committed_pos::TOTAL_AI_ADDITIONS,
-            vec_u32_to_json(&self.total_ai_additions),
-        );
-        sparse_set(
-            &mut map,
-            committed_pos::TOTAL_AI_DELETIONS,
-            vec_u32_to_json(&self.total_ai_deletions),
-        );
-        sparse_set(
-            &mut map,
-            committed_pos::TIME_WAITING_FOR_AI,
-            vec_u64_to_json(&self.time_waiting_for_ai),
         );
 
         // New scalar fields
@@ -314,12 +246,8 @@ impl PosEncoded for CommittedValues {
 
             // Array fields
             tool_model_pairs: sparse_get_vec_string(arr, committed_pos::TOOL_MODEL_PAIRS),
-            mixed_additions: sparse_get_vec_u32(arr, committed_pos::MIXED_ADDITIONS),
             ai_additions: sparse_get_vec_u32(arr, committed_pos::AI_ADDITIONS),
             ai_accepted: sparse_get_vec_u32(arr, committed_pos::AI_ACCEPTED),
-            total_ai_additions: sparse_get_vec_u32(arr, committed_pos::TOTAL_AI_ADDITIONS),
-            total_ai_deletions: sparse_get_vec_u32(arr, committed_pos::TOTAL_AI_DELETIONS),
-            time_waiting_for_ai: sparse_get_vec_u64(arr, committed_pos::TIME_WAITING_FOR_AI),
 
             // New scalar fields
             first_checkpoint_ts: sparse_get_u64(arr, committed_pos::FIRST_CHECKPOINT_TS),
@@ -488,6 +416,7 @@ pub mod checkpoint_pos {
     pub const LINES_DELETED: usize = 4; // u32 - for this file
     pub const LINES_ADDED_SLOC: usize = 5; // u32 - for this file
     pub const LINES_DELETED_SLOC: usize = 6; // u32 - for this file
+    pub const TOOL_USE_ID: usize = 7; // String - nullable
 }
 
 /// Values for Event ID 4: checkpoint
@@ -505,6 +434,7 @@ pub mod checkpoint_pos {
 /// | 4 | lines_deleted | u32 |
 /// | 5 | lines_added_sloc | u32 |
 /// | 6 | lines_deleted_sloc | u32 |
+/// | 7 | external_tool_use_id | String (nullable) |
 #[derive(Debug, Clone, Default)]
 pub struct CheckpointValues {
     pub checkpoint_ts: PosField<u64>,
@@ -514,6 +444,7 @@ pub struct CheckpointValues {
     pub lines_deleted: PosField<u32>,
     pub lines_added_sloc: PosField<u32>,
     pub lines_deleted_sloc: PosField<u32>,
+    pub external_tool_use_id: PosField<String>,
 }
 
 impl CheckpointValues {
@@ -597,6 +528,17 @@ impl CheckpointValues {
         self.lines_deleted_sloc = Some(None);
         self
     }
+
+    pub fn external_tool_use_id(mut self, value: impl Into<String>) -> Self {
+        self.external_tool_use_id = Some(Some(value.into()));
+        self
+    }
+
+    #[allow(dead_code)]
+    pub fn external_tool_use_id_null(mut self) -> Self {
+        self.external_tool_use_id = Some(None);
+        self
+    }
 }
 
 impl PosEncoded for CheckpointValues {
@@ -634,6 +576,11 @@ impl PosEncoded for CheckpointValues {
             checkpoint_pos::LINES_DELETED_SLOC,
             u32_to_json(&self.lines_deleted_sloc),
         );
+        sparse_set(
+            &mut map,
+            checkpoint_pos::TOOL_USE_ID,
+            string_to_json(&self.external_tool_use_id),
+        );
 
         map
     }
@@ -647,6 +594,7 @@ impl PosEncoded for CheckpointValues {
             lines_deleted: sparse_get_u32(arr, checkpoint_pos::LINES_DELETED),
             lines_added_sloc: sparse_get_u32(arr, checkpoint_pos::LINES_ADDED_SLOC),
             lines_deleted_sloc: sparse_get_u32(arr, checkpoint_pos::LINES_DELETED_SLOC),
+            external_tool_use_id: sparse_get_string(arr, checkpoint_pos::TOOL_USE_ID),
         }
     }
 }
@@ -677,12 +625,8 @@ mod tests {
             .git_diff_deleted_lines(20)
             .git_diff_added_lines(150)
             .tool_model_pairs(vec!["all".to_string(), "claude-code:claude-3".to_string()])
-            .mixed_additions(vec![30, 20])
             .ai_additions(vec![100, 70])
-            .ai_accepted(vec![80, 55])
-            .total_ai_additions(vec![120, 80])
-            .total_ai_deletions(vec![25, 15])
-            .time_waiting_for_ai(vec![5000, 3000]);
+            .ai_accepted(vec![80, 55]);
 
         assert_eq!(values.human_additions, Some(Some(50)));
         assert_eq!(
@@ -1000,38 +944,377 @@ mod tests {
     fn test_committed_values_with_all_arrays() {
         let values = CommittedValues::new()
             .tool_model_pairs(vec!["all".to_string(), "cursor:gpt-4".to_string()])
-            .mixed_additions(vec![10, 5])
             .ai_additions(vec![100, 50])
-            .ai_accepted(vec![80, 40])
-            .total_ai_additions(vec![120, 60])
-            .total_ai_deletions(vec![20, 10])
-            .time_waiting_for_ai(vec![5000, 3000]);
+            .ai_accepted(vec![80, 40]);
 
         assert_eq!(
             values.tool_model_pairs,
             Some(Some(vec!["all".to_string(), "cursor:gpt-4".to_string()]))
         );
-        assert_eq!(values.mixed_additions, Some(Some(vec![10, 5])));
         assert_eq!(values.ai_additions, Some(Some(vec![100, 50])));
         assert_eq!(values.ai_accepted, Some(Some(vec![80, 40])));
-        assert_eq!(values.total_ai_additions, Some(Some(vec![120, 60])));
-        assert_eq!(values.total_ai_deletions, Some(Some(vec![20, 10])));
-        assert_eq!(values.time_waiting_for_ai, Some(Some(vec![5000, 3000])));
     }
 
     #[test]
     fn test_committed_values_array_nulls() {
-        let values = CommittedValues::new()
-            .mixed_additions_null()
-            .ai_accepted_null()
-            .total_ai_additions_null()
-            .total_ai_deletions_null()
-            .time_waiting_for_ai_null();
+        let values = CommittedValues::new().ai_accepted_null();
 
-        assert_eq!(values.mixed_additions, Some(None));
         assert_eq!(values.ai_accepted, Some(None));
-        assert_eq!(values.total_ai_additions, Some(None));
-        assert_eq!(values.total_ai_deletions, Some(None));
-        assert_eq!(values.time_waiting_for_ai, Some(None));
+    }
+
+    #[test]
+    fn test_checkpoint_values_with_external_tool_use_id() {
+        let values = CheckpointValues::new()
+            .checkpoint_ts(1704067200)
+            .kind("ai_agent")
+            .file_path("src/main.rs")
+            .lines_added(50)
+            .external_tool_use_id("tool-use-123");
+
+        assert_eq!(
+            values.external_tool_use_id,
+            Some(Some("tool-use-123".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_checkpoint_values_external_tool_use_id_null() {
+        let values = CheckpointValues::new()
+            .checkpoint_ts(1704067200)
+            .kind("human")
+            .external_tool_use_id_null();
+
+        assert_eq!(values.external_tool_use_id, Some(None));
+    }
+
+    #[test]
+    fn test_checkpoint_values_to_sparse_with_external_tool_use_id() {
+        use super::PosEncoded;
+
+        let values = CheckpointValues::new()
+            .checkpoint_ts(1700000000)
+            .kind("ai_agent")
+            .file_path("tests/test.rs")
+            .lines_added(100)
+            .external_tool_use_id("tool-xyz");
+
+        let sparse = PosEncoded::to_sparse(&values);
+
+        assert_eq!(sparse.get("0"), Some(&Value::Number(1700000000.into())));
+        assert_eq!(
+            sparse.get("1"),
+            Some(&Value::String("ai_agent".to_string()))
+        );
+        assert_eq!(
+            sparse.get("2"),
+            Some(&Value::String("tests/test.rs".to_string()))
+        );
+        assert_eq!(sparse.get("3"), Some(&Value::Number(100.into())));
+        assert_eq!(
+            sparse.get("7"),
+            Some(&Value::String("tool-xyz".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_checkpoint_values_from_sparse_with_external_tool_use_id() {
+        use super::PosEncoded;
+
+        let mut sparse = SparseArray::new();
+        sparse.insert("0".to_string(), Value::Number(1704067200.into()));
+        sparse.insert("1".to_string(), Value::String("ai_tab".to_string()));
+        sparse.insert("2".to_string(), Value::String("lib.rs".to_string()));
+        sparse.insert("3".to_string(), Value::Number(75.into()));
+        sparse.insert("7".to_string(), Value::String("tool-abc".to_string()));
+
+        let values = <CheckpointValues as PosEncoded>::from_sparse(&sparse);
+
+        assert_eq!(values.checkpoint_ts, Some(Some(1704067200)));
+        assert_eq!(values.kind, Some(Some("ai_tab".to_string())));
+        assert_eq!(values.file_path, Some(Some("lib.rs".to_string())));
+        assert_eq!(values.lines_added, Some(Some(75)));
+        assert_eq!(
+            values.external_tool_use_id,
+            Some(Some("tool-abc".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_checkpoint_values_roundtrip_with_external_tool_use_id() {
+        use super::PosEncoded;
+
+        let original = CheckpointValues::new()
+            .checkpoint_ts(1700000000)
+            .kind("ai_agent")
+            .file_path("src/lib.rs")
+            .lines_added(50)
+            .external_tool_use_id_null();
+
+        let sparse = PosEncoded::to_sparse(&original);
+        let restored = <CheckpointValues as PosEncoded>::from_sparse(&sparse);
+
+        assert_eq!(restored.checkpoint_ts, Some(Some(1700000000)));
+        assert_eq!(restored.kind, Some(Some("ai_agent".to_string())));
+        assert_eq!(restored.file_path, Some(Some("src/lib.rs".to_string())));
+        assert_eq!(restored.lines_added, Some(Some(50)));
+        assert_eq!(restored.external_tool_use_id, Some(None)); // explicitly null
+    }
+
+    #[test]
+    fn test_checkpoint_values_external_tool_use_id_not_set() {
+        use super::PosEncoded;
+
+        let mut sparse = SparseArray::new();
+        sparse.insert("0".to_string(), Value::Number(1700000000.into()));
+        sparse.insert("1".to_string(), Value::String("human".to_string()));
+        // external_tool_use_id not included
+
+        let values = <CheckpointValues as PosEncoded>::from_sparse(&sparse);
+
+        assert_eq!(values.external_tool_use_id, None); // not set
+    }
+}
+
+/// Value positions for "session_event" event.
+pub mod session_event_pos {
+    pub const RAW_JSON: usize = 0;
+    pub const EXTERNAL_EVENT_ID: usize = 1;
+    pub const EXTERNAL_PARENT_EVENT_ID: usize = 2;
+    pub const EXTERNAL_TOOL_USE_ID: usize = 3;
+}
+
+/// Values for Event ID 5: session_event
+///
+/// Each event is the raw JSON from the agent's transcript file, stored at position 0.
+/// Uses EventAttributes for session_id, trace_id, tool metadata.
+#[derive(Debug, Clone, Default)]
+pub struct SessionEventValues {
+    pub raw_json: serde_json::Value,
+    pub external_event_id: Option<String>,
+    pub external_parent_event_id: Option<String>,
+    pub external_tool_use_id: Option<String>,
+}
+
+impl SessionEventValues {
+    pub fn new(raw_json: serde_json::Value) -> Self {
+        Self {
+            raw_json,
+            external_event_id: None,
+            external_parent_event_id: None,
+            external_tool_use_id: None,
+        }
+    }
+
+    pub fn with_ids(
+        raw_json: serde_json::Value,
+        external_event_id: Option<String>,
+        external_parent_event_id: Option<String>,
+        external_tool_use_id: Option<String>,
+    ) -> Self {
+        Self {
+            raw_json,
+            external_event_id,
+            external_parent_event_id,
+            external_tool_use_id,
+        }
+    }
+}
+
+impl PosEncoded for SessionEventValues {
+    fn to_sparse(&self) -> SparseArray {
+        let mut map = SparseArray::new();
+        map.insert(
+            session_event_pos::RAW_JSON.to_string(),
+            self.raw_json.clone(),
+        );
+        if let Some(ref id) = self.external_event_id {
+            map.insert(
+                session_event_pos::EXTERNAL_EVENT_ID.to_string(),
+                serde_json::Value::String(id.clone()),
+            );
+        }
+        if let Some(ref id) = self.external_parent_event_id {
+            map.insert(
+                session_event_pos::EXTERNAL_PARENT_EVENT_ID.to_string(),
+                serde_json::Value::String(id.clone()),
+            );
+        }
+        if let Some(ref id) = self.external_tool_use_id {
+            map.insert(
+                session_event_pos::EXTERNAL_TOOL_USE_ID.to_string(),
+                serde_json::Value::String(id.clone()),
+            );
+        }
+        map
+    }
+
+    fn from_sparse(arr: &SparseArray) -> Self {
+        let raw_json = arr
+            .get(&session_event_pos::RAW_JSON.to_string())
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        let external_event_id = arr
+            .get(&session_event_pos::EXTERNAL_EVENT_ID.to_string())
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let external_parent_event_id = arr
+            .get(&session_event_pos::EXTERNAL_PARENT_EVENT_ID.to_string())
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let external_tool_use_id = arr
+            .get(&session_event_pos::EXTERNAL_TOOL_USE_ID.to_string())
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        Self {
+            raw_json,
+            external_event_id,
+            external_parent_event_id,
+            external_tool_use_id,
+        }
+    }
+}
+
+impl EventValues for SessionEventValues {
+    fn event_id() -> MetricEventId {
+        MetricEventId::SessionEvent
+    }
+
+    fn to_sparse(&self) -> SparseArray {
+        PosEncoded::to_sparse(self)
+    }
+
+    fn into_sparse(self) -> SparseArray {
+        let mut map = SparseArray::new();
+        map.insert(session_event_pos::RAW_JSON.to_string(), self.raw_json);
+        if let Some(id) = self.external_event_id {
+            map.insert(
+                session_event_pos::EXTERNAL_EVENT_ID.to_string(),
+                serde_json::Value::String(id),
+            );
+        }
+        if let Some(id) = self.external_parent_event_id {
+            map.insert(
+                session_event_pos::EXTERNAL_PARENT_EVENT_ID.to_string(),
+                serde_json::Value::String(id),
+            );
+        }
+        if let Some(id) = self.external_tool_use_id {
+            map.insert(
+                session_event_pos::EXTERNAL_TOOL_USE_ID.to_string(),
+                serde_json::Value::String(id),
+            );
+        }
+        map
+    }
+
+    fn from_sparse(arr: &SparseArray) -> Self {
+        PosEncoded::from_sparse(arr)
+    }
+}
+
+#[cfg(test)]
+mod session_event_tests {
+    use super::*;
+
+    #[test]
+    fn test_session_event_values_new() {
+        let raw = serde_json::json!({"type": "user", "uuid": "abc"});
+        let values = SessionEventValues::new(raw.clone());
+        assert_eq!(values.raw_json, raw);
+        assert_eq!(values.external_event_id, None);
+        assert_eq!(values.external_parent_event_id, None);
+        assert_eq!(values.external_tool_use_id, None);
+    }
+
+    #[test]
+    fn test_session_event_values_with_ids() {
+        let raw = serde_json::json!({"type": "assistant"});
+        let values = SessionEventValues::with_ids(
+            raw.clone(),
+            Some("evt-123".to_string()),
+            Some("parent-456".to_string()),
+            Some("toolu_789".to_string()),
+        );
+
+        assert_eq!(values.raw_json, raw);
+        assert_eq!(values.external_event_id, Some("evt-123".to_string()));
+        assert_eq!(
+            values.external_parent_event_id,
+            Some("parent-456".to_string())
+        );
+        assert_eq!(values.external_tool_use_id, Some("toolu_789".to_string()));
+    }
+
+    #[test]
+    fn test_session_event_values_sparse_roundtrip_with_ids() {
+        let raw = serde_json::json!({"type": "assistant", "data": 42});
+        let values = SessionEventValues::with_ids(
+            raw.clone(),
+            Some("event-id".to_string()),
+            Some("parent-id".to_string()),
+            Some("tool-use-id".to_string()),
+        );
+
+        let sparse = PosEncoded::to_sparse(&values);
+        assert_eq!(sparse.get("0"), Some(&raw));
+        assert_eq!(
+            sparse.get("1"),
+            Some(&serde_json::Value::String("event-id".to_string()))
+        );
+        assert_eq!(
+            sparse.get("2"),
+            Some(&serde_json::Value::String("parent-id".to_string()))
+        );
+        assert_eq!(
+            sparse.get("3"),
+            Some(&serde_json::Value::String("tool-use-id".to_string()))
+        );
+
+        let restored = <SessionEventValues as PosEncoded>::from_sparse(&sparse);
+        assert_eq!(restored.raw_json, raw);
+        assert_eq!(restored.external_event_id, Some("event-id".to_string()));
+        assert_eq!(
+            restored.external_parent_event_id,
+            Some("parent-id".to_string())
+        );
+        assert_eq!(
+            restored.external_tool_use_id,
+            Some("tool-use-id".to_string())
+        );
+    }
+
+    #[test]
+    fn test_session_event_values_sparse_none_ids_omitted() {
+        let raw = serde_json::json!({"type": "user"});
+        let values = SessionEventValues::new(raw.clone());
+
+        let sparse = PosEncoded::to_sparse(&values);
+        assert_eq!(sparse.get("0"), Some(&raw));
+        assert_eq!(sparse.get("1"), None);
+        assert_eq!(sparse.get("2"), None);
+        assert_eq!(sparse.get("3"), None);
+    }
+
+    #[test]
+    fn test_session_event_values_into_sparse_with_ids() {
+        let raw = serde_json::json!({"msg": "hello"});
+        let values = SessionEventValues::with_ids(
+            raw.clone(),
+            Some("eid".to_string()),
+            None,
+            Some("tid".to_string()),
+        );
+
+        let sparse = EventValues::into_sparse(values);
+        assert_eq!(sparse.get("0"), Some(&raw));
+        assert_eq!(
+            sparse.get("1"),
+            Some(&serde_json::Value::String("eid".to_string()))
+        );
+        assert_eq!(sparse.get("2"), None);
+        assert_eq!(
+            sparse.get("3"),
+            Some(&serde_json::Value::String("tid".to_string()))
+        );
     }
 }

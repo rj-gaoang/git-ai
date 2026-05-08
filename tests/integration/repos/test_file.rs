@@ -17,6 +17,9 @@ const AI_AUTHOR_NAMES: &[&str] = &[
     "amp",
     "windsurf",
     "devin",
+    "cloud-agent",
+    "codex-cloud",
+    "git-ai-cloud-agent",
 ];
 
 #[derive(Debug, Clone, PartialEq)]
@@ -191,12 +194,19 @@ impl<'a> TestFile<'a> {
         }
     }
 
-    /// Helper function to check if an author string indicates AI authorship
+    /// Helper function to check if an author string indicates AI authorship.
+    /// Strips email (angle-bracket portion) before matching to avoid false positives
+    /// like "amp" inside "example.com".
     fn is_ai_author_helper(author: &str) -> bool {
-        let author_lower = author.to_lowercase();
+        let name_only = if let Some(bracket) = author.find('<') {
+            &author[..bracket]
+        } else {
+            author
+        };
+        let name_lower = name_only.to_lowercase();
         AI_AUTHOR_NAMES
             .iter()
-            .any(|&name| author_lower.contains(name))
+            .any(|&ai_name| name_lower.contains(ai_name))
     }
 
     /// Static version of parse_blame_line for use in from_existing_file
