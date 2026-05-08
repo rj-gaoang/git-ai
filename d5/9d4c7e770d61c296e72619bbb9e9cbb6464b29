@@ -1,0 +1,31 @@
+docs/design-doc/git-ai看板方案.md
+  96e6006e1e5f0855 53-56,2107-2108,2331,2628
+src/commands/checkpoint.rs
+  h_c122390aeb95ca 574,640,897-899,3143-3220
+---
+{
+  "schema_version": "authorship/3.1.0",
+  "git_ai_version": "2.0.14",
+  "x_user_id": "108",
+  "base_commit_sha": "d59d4c7e770d61c296e72619bbb9e9cbb6464b29",
+  "prompts": {
+    "96e6006e1e5f0855": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "c6a1eca2-8f6f-460a-99cd-3c1e523c21b4",
+        "model": "copilot/gpt-5.4"
+      },
+      "human_author": "shunfei",
+      "messages": [],
+      "total_additions": 8,
+      "total_deletions": 0,
+      "accepted_lines": 8,
+      "overriden_lines": 0
+    }
+  },
+  "humans": {
+    "h_c122390aeb95ca": {
+      "author": "shunfei"
+    }
+  }
+}

@@ -1,0 +1,31 @@
+docs/design-doc/git-ai看板方案.md
+  96e6006e1e5f0855 1917-1918,2371,2583-2600
+src/integration/upload_stats.rs
+  96e6006e1e5f0855 1523-1527
+---
+{
+  "schema_version": "authorship/3.1.0",
+  "git_ai_version": "2.0.16",
+  "x_user_id": "108",
+  "base_commit_sha": "243a4b2efa400b39b06aca2e4adfbb8db5a81fee",
+  "prompts": {
+    "96e6006e1e5f0855": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "c6a1eca2-8f6f-460a-99cd-3c1e523c21b4",
+        "model": "copilot/gpt-5.4"
+      },
+      "human_author": "shunfei",
+      "messages": [],
+      "total_additions": 96,
+      "total_deletions": 0,
+      "accepted_lines": 26,
+      "overriden_lines": 0
+    }
+  },
+  "humans": {
+    "h_c122390aeb95ca": {
+      "author": "shunfei"
+    }
+  }
+}
