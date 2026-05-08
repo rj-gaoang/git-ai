@@ -660,7 +660,7 @@ if (-not $gitAiCmd) {
 
 1. **同一个 endpoint 约定**：优先读 `GIT_AI_REPORT_REMOTE_URL`；否则读 `GIT_AI_REPORT_REMOTE_ENDPOINT` + `GIT_AI_REPORT_REMOTE_PATH`；都没有时回退到默认地址 `https://service-gw.ruijie.com.cn/api/ai-cr-manage-service/api/public/upload/ai-stats`。
 2. **同一组认证头**：`Content-Type: application/json`、可选 `Authorization: Bearer <api_key>`、可选 `X-USER-ID`。
-3. **同一份 payload 主结构**：`repoUrl`、`projectName`、`branch`、`reviewDocumentId`、`authorshipSchemaVersion`、`commits[]`。
+3. **同一份 payload 主结构**：`repoUrl`、`projectName`、`branch`、`reviewDocumentId`、`authorshipSchemaVersion`、`clientContext`、`commits[]`。
 4. **同一份 commit 级 stats 结构**：`humanAdditions`、`unknownAdditions`、`mixedAdditions`、`aiAdditions`、`aiAccepted`、`toolModelBreakdown[]` 等字段都保持 camelCase 兼容。
 5. **同一份文件级统计语义**：继续使用 commit-local 方式，从 authorship note 的 attestation + `git diff-tree --numstat` 组合出 `stats.files[]`；默认排除 `target/` 这类构建产物目录，避免文件表被编译输出刷屏，额外目录可通过 `GIT_AI_UPLOAD_EXCLUDE_PATH_PREFIXES` 扩展。
 6. **同一份时间格式**：commit 的 `%aI` 时间戳在发送前规整为 `yyyy-MM-dd HH:mm:ss`。
@@ -1751,6 +1751,13 @@ if ($Json) {
     "source": "manual",
     "reviewDocumentId": null,
     "authorshipSchemaVersion": "authorship/3.0.0",
+    "clientContext": {
+        "gitAiCliVersion": "1.3.5",
+        "gitAiPluginVersion": "0.9.2",
+        "ideName": "VS Code",
+        "ideVersion": "1.100.2",
+        "gitVersion": "2.49.0.windows.1"
+    },
     "commits": [
         {
             "commitSha": "abc123def456789...",
@@ -1892,7 +1899,18 @@ if ($Json) {
 | `source` | 上传来源 | 脚本或审查流程指定 | `"manual"` 或 `"codeReview"` |
 | `reviewDocumentId` | 关联的审查文档 ID | Code Review 步骤 8.1 返回值 | 主动上传时为 null |
 | `authorshipSchemaVersion` | 数据格式版本 | 固定值 `"authorship/3.0.0"` | 服务端兼容不同版本用 |
+| `clientContext` | 本次上传所在客户端环境信息 | 本地 `git-ai` / IDE / Git 运行时采集 | 用于排查归因异常、插件兼容性和版本分布 |
 | `commits` | 本次批量提交的 commit 列表 | 客户端组装 | 每个元素仍然对应一个 commit |
+
+**`clientContext` 字段说明：**
+
+| 字段 | 含义 | 来源 | 备注 |
+|------|------|------|------|
+| `gitAiCliVersion` | 当前执行上传的 `git-ai` CLI 版本号 | `git-ai --version` | 建议保留完整版本字符串，便于区分 debug / release |
+| `gitAiPluginVersion` | 当前 IDE 内 git-ai 集成插件/扩展版本号 | IDE 扩展或插件管理器 | 无插件链路时可为 `null` |
+| `ideName` | 当前使用的 IDE / 编辑器名称 | IDE 运行时或插件侧上报 | 例如 `VS Code`、`Cursor`、`IntelliJ IDEA` |
+| `ideVersion` | 当前 IDE / 编辑器版本号 | IDE 关于页或运行时接口 | CLI-only 场景可为 `null` 或约定值 |
+| `gitVersion` | 当前真实 Git 版本号 | `git --version` | 用于排查 hooks / trace2 / wrapper 兼容性 |
 
 **`commits[]` 内部字段说明：**
 

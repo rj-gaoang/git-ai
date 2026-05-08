@@ -10,6 +10,8 @@
 - [名词表：本文会用到的专有名词](#名词表本文会用到的专有名词)
 - [总览：这套系统到底在干什么](#总览这套系统到底在干什么)
 - [架构：两层系统](#架构两层系统)
+  - [整体源码地图：从入口到落盘](#整体源码地图从入口到落盘)
+  - [源码目录对应关系：插件在哪，安装器在哪](#源码目录对应关系插件在哪安装器在哪)
 - [第一层：VS Code 扩展——谁负责监听编辑事件](#第一层vs-code-扩展谁负责监听编辑事件)
   - [通道一：Copilot Chat 编辑（旧方案）](#通道一copilot-chat-编辑旧方案legacy-hooks)
   - [通道二：Copilot Chat 编辑（新方案）](#通道二copilot-chat-编辑新方案native-hooks)
@@ -85,34 +87,58 @@
 > **什么是"架构"？**
 >
 > 架构就是"这个软件由哪些部分组成，各部分怎么分工、怎么配合"。
-> 这里 Git AI 分成两部分：前端（VS Code 扩展）和后端（Rust 命令行程序）。
+> 从运行职责上看，Git AI 分成两部分：编辑器侧触发事件，Rust 侧计算归因。
+> 从源码目录上看，还要再单独区分一层“安装/接线代码”：它不是插件本体，
+> 只是负责把插件、hook 配置、git.path 等安装到用户环境里。
 >
 > 以下架构图描述的是**新方案（Native Hooks，VS Code ≥ 1.109.3）**。
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
 │                                                                  │
-│   第 1 层：VS Code 扩展 (TypeScript 编写)                          │
+│   第 1 层：编辑器插件/扩展 (源码在 agent-support/)                  │
 │                                                                  │
-│   职责（新方案下已缩减，但仍有持续运行的部分）：                       │
-│   • 【一次性】安装钩子配置：                                         │
-│       写入 ~/.copilot/hooks/git-ai.json （旧路径                  │
-│         ~/.github/hooks/git-ai.json 会被自动删除）                 │
-│       写入 VS Code settings.json 的 "chat.useHooks": true         │
+│   VS Code 扩展职责（新方案下已缩减，但仍有持续运行的部分）：             │
 │   • 【持续运行】KnownHuman 保存检查点（KnownHumanCheckpointManager）│
 │       每次 onDidSaveTextDocument，按仓库 root 防抖 500ms          │
 │       触发 git-ai checkpoint known_human                          │
 │   • 【持续运行】Blame Gutter 显示（BlameLensManager）               │
 │   • 【持续运行】Tab 补全追踪（AITabEditManager，实验功能）            │
+│   • 【兼容旧版】低版本 VS Code 下的 Legacy Chat 编辑监听             │
 │   • ✗ 不再监听 Chat 编辑器快照事件、不再判断"是否 Copilot 编辑"     │
 │   • ✗ 不再主动调用 git-ai CLI 传送 Chat 编辑数据（由 VS Code        │
 │       Native Hooks 直接调用）                                     │
 │                                                                  │
 │   关键文件：                                                       │
+│   • agent-support/vscode/package.json                      ← 清单 │
 │   • agent-support/vscode/src/extension.ts                  ← 入口 │
 │   • agent-support/vscode/src/known-human-checkpoint-manager.ts    │
 │   • agent-support/vscode/src/blame-lens-manager.ts  ← Gutter 展示 │
 │   • agent-support/vscode/src/ai-tab-edit-manager.ts ← Tab 补全    │
+│                                                                  │
+└──────────────────────────────────────────────────────────────────┘
+         │
+         │ 插件运行时只负责监听/展示；安装和配置由 Rust install-hooks 做
+         ▼
+┌──────────────────────────────────────────────────────────────────┐
+│                                                                  │
+│   安装/接线层：Rust MDM / install-hooks                           │
+│                                                                  │
+│   职责：                                                          │
+│   • 安装或检测 VS Code 扩展 git-ai.git-ai-vscode                  │
+│   • 写入 VS Code settings.json 的 git.path 和 chat.useHooks       │
+│   • 写入 ~/.copilot/hooks/git-ai.json                             │
+│     （旧路径 ~/.github/hooks/git-ai.json 会被识别并迁移/清理）      │
+│   • 为 Cursor、OpenCode、JetBrains 等工具安装各自 hook 或插件       │
+│                                                                  │
+│   关键文件：                                                       │
+│   • src/commands/install_hooks.rs                  ← 命令入口      │
+│   • src/mdm/hook_installer.rs                      ← 安装器 trait │
+│   • src/mdm/agents/mod.rs                          ← 安装器注册   │
+│   • src/mdm/agents/vscode.rs                       ← VS Code 扩展 │
+│     安装、git.path、chat.useHooks 设置                            │
+│   • src/mdm/agents/github_copilot.rs               ← Copilot      │
+│     Native Hooks: ~/.copilot/hooks/git-ai.json                   │
 │                                                                  │
 └──────────────────────────────────────────────────────────────────┘
          │
@@ -160,6 +186,88 @@
 └──────────────────────────────────────────────────────────────────┘
 ```
 
+### 整体源码地图：从入口到落盘
+
+如果按整个 `git-ai` 仓库来看，源码不是只有“VS Code 扩展 + Rust checkpoint”两块，而是一条完整链路：入口分发 → Git 代理/CLI 命令 → agent hook 解析 → checkpoint 归因 → working log/git notes 存储 → daemon 异步化 → stats/upload → 安装器和插件生态。
+
+| 层级 | 关键源码 | 负责什么 |
+|------|----------|----------|
+| 二进制入口 | `src/main.rs` | 根据 `argv[0]` 分流：以 `git-ai` 启动时进入 Git AI 自身命令；以 `git` 启动时作为透明 Git 代理转发到真实 git。测试里也可用 `GIT_AI=git` 强制走代理模式。 |
+| 模块根 | `src/lib.rs` | 声明整个 Rust crate 的模块边界，例如 `commands`、`authorship`、`git`、`daemon`、`integration`、`mdm`。 |
+| Git AI 命令分发 | `src/commands/git_ai_handlers.rs` | 处理 `git-ai checkpoint/status/blame/diff/install-hooks/daemon/dashboard/share/search` 等直接命令。这里会把 `checkpoint github-copilot --hook-input stdin` 路由到对应 preset。 |
+| Git 代理分发 | `src/commands/git_handlers.rs` | 处理用户正常执行的 `git commit/push/rebase/stash/...`。它先做代理，再按命令类型执行 pre/post hook 逻辑。异步模式下还会把 pre/post repo state 发给 daemon。 |
+| Git 生命周期 hook | `src/commands/hooks/` | 按 git 子命令拆分 hook：commit、push、fetch、rebase、merge、stash、reset、clone、checkout 等。这里决定什么时候触发 pre-commit/post-commit、notes 同步、rewrite 归因。 |
+| Agent 输入解析 | `src/commands/checkpoint_agent/` | 把不同 AI/IDE 的 hook 输入统一转换成 `AgentRunResult`。例如 `agent_presets.rs` 处理 GitHub Copilot native hooks，`bash_tool.rs` 处理 `run_in_terminal` 前后快照，`opencode_preset.rs`/`amp_preset.rs`/`pi_preset.rs` 处理其它工具。 |
+| Checkpoint 主流程 | `src/commands/checkpoint.rs` | 核心执行器：确定 base commit、筛选文件、读取当前/历史内容、生成 checkpoint entry、写 working log、记录 debug 诊断。 |
+| 归因数据模型 | `src/authorship/working_log.rs`、`src/authorship/authorship_log.rs` | 定义 `CheckpointKind`、`Checkpoint`、`WorkingLogEntry`、最终 `AuthorshipLog` 等核心数据结构。 |
+| 归因算法 | `src/authorship/attribution_tracker.rs`、`src/authorship/imara_diff_utils.rs`、`src/authorship/move_detection.rs` | 做字符级 diff、移动检测、归因更新、字符级归因到行级归因的转换。 |
+| commit/rewrite 处理 | `src/authorship/pre_commit.rs`、`src/authorship/post_commit.rs`、`src/authorship/rebase_authorship.rs`、`src/authorship/virtual_attribution.rs` | commit 前补人类 checkpoint，commit 后生成 git notes；rebase/cherry-pick/amend/reset/stash 等历史改写场景下重建或迁移归因。 |
+| Git 交互封装 | `src/git/repository.rs`、`src/git/status.rs`、`src/git/refs.rs`、`src/git/sync_authorship.rs`、`src/git/repo_storage.rs`、`src/git/rewrite_log.rs`、`src/git/repo_state.rs` | 所有 Git 调用和仓库存储抽象都在这里。生产逻辑主要通过 Git CLI，不依赖 libgit2。 |
+| 后台服务/异步模式 | `src/daemon.rs`、`src/daemon/` | daemon 主模块在 `src/daemon.rs`，子模块在 `src/daemon/`。负责 Trace2 事件接收、control pipe/socket、repo family 协调、异步 checkpoint、post-commit 汇总、Windows named pipe/Unix socket。 |
+| 统计与上报 | `src/metrics/`、`src/integration/upload_stats.rs`、`src/api/`、`src/auth/`、`src/http.rs` | 记录 checkpoint/stats 事件，commit 后按配置组装 payload 并上传 AI 统计；认证、HTTP、远端 API 封装也在这一层。 |
+| 调试和可观测性 | `src/diagnostics.rs`、`src/observability/` | 写 `~/.git-ai/logs/debug.jsonl`、记录性能目标、错误和结构化诊断事件。 |
+| 安装/接线 | `src/commands/install_hooks.rs`、`src/mdm/` | `git-ai install-hooks` 的实现。负责 git shim、Trace2 配置、VS Code/Copilot/OpenCode/JetBrains/Claude/Codex 等工具的 hook 或插件安装。 |
+| 编辑器/工具插件 | `agent-support/` | 真正运行在编辑器或 AI 工具里的插件源码，例如 VS Code 扩展、JetBrains 插件、OpenCode 插件。 |
+| 测试 | `tests/`、各模块内 `#[cfg(test)]` | 集成测试会创建真实 git 仓库，覆盖 checkpoint、daemon、notes 同步、Windows installer 等关键路径。 |
+
+按运行时序，把上面这些模块串起来是这样：
+
+```
+用户 / VS Code / Copilot / git 命令
+  │
+  ├─ 直接调用 git-ai
+  │   └─ src/main.rs → src/commands/git_ai_handlers.rs
+  │      ├─ checkpoint → checkpoint_agent preset → checkpoint.rs
+  │      ├─ status/blame/diff/show/log → commands 下对应模块
+  │      └─ install-hooks/daemon/share/search → commands 下对应模块
+  │
+  └─ 正常调用 git（git-ai 作为 git 代理）
+    └─ src/main.rs → src/commands/git_handlers.rs
+       ├─ proxy_to_git() 先执行真实 git
+       ├─ commit/rebase/push 等命令触发 commands/hooks/*
+       └─ pre_commit/post_commit/rewrite 进入 authorship/*
+
+checkpoint.rs
+  │
+  ├─ 通过 src/git/* 读取仓库状态、文件内容、working log
+  ├─ 通过 authorship/attribution_tracker.rs 做字符级归因
+  ├─ 通过 authorship/working_log.rs 写 .git/ai/working_logs/{base_commit}/
+  └─ commit 后由 authorship/post_commit.rs 汇总为 AuthorshipLog
+    ├─ 写入 refs/notes/ai
+    ├─ 必要时写下一轮 INITIAL
+    └─ integration/upload_stats.rs 可选上传统计
+```
+
+所以审查整体源码时，建议不要只看 `agent-support/` 或 `checkpoint.rs`。更稳的阅读顺序是：
+
+1. `src/main.rs`：先理解二进制分发，为什么同一个程序既能叫 `git-ai`，也能作为 `git` 代理。
+2. `src/commands/git_ai_handlers.rs` 和 `src/commands/git_handlers.rs`：看直接命令和 Git 代理命令分别怎么进入系统。
+3. `src/commands/checkpoint_agent/`：看不同 AI 工具的输入如何被规范化成 `AgentRunResult`。
+4. `src/commands/checkpoint.rs`：看一次 checkpoint 如何落到文件、diff、归因和 working log。
+5. `src/authorship/`：看归因算法、commit 汇总、历史改写和数据结构。
+6. `src/git/`：看所有 Git CLI 调用、refs/notes、repo storage、rewrite log 怎么封装。
+7. `src/daemon.rs` 和 `src/daemon/`：看异步模式、Trace2、control socket/pipe 和 Windows 恢复逻辑。
+8. `src/mdm/` 与 `agent-support/`：最后看安装器和具体编辑器/工具插件如何把事件送进 Rust 核心。
+
+### 源码目录对应关系：插件在哪，安装器在哪
+
+如果只想找“插件源码”，不要去 `src/` 里找。`src/` 是 Rust 核心和安装器代码，真正运行在编辑器/AI 工具里的插件源码统一在 `agent-support/` 下：
+
+| 你要看的东西 | 源码位置 | 说明 |
+|--------------|----------|------|
+| VS Code 扩展本体 | `agent-support/vscode/` | TypeScript 插件项目；入口是 `src/extension.ts`，扩展清单是 `package.json` |
+| VS Code 人类保存监听 | `agent-support/vscode/src/known-human-checkpoint-manager.ts` | 监听 `onDidSaveTextDocument`，触发 `git-ai checkpoint known_human --hook-input stdin` |
+| VS Code 旧版 Chat 监听 | `agent-support/vscode/src/ai-edit-manager.ts` | 只在 Legacy Hooks 路径使用；新方案下 Chat 编辑由 VS Code Native Hooks 直接触发 Rust |
+| VS Code Tab 补全追踪 | `agent-support/vscode/src/ai-tab-edit-manager.ts` | 实验功能，追踪用户接受 Copilot Tab 建议 |
+| JetBrains/IntelliJ 插件 | `agent-support/intellij/` | Kotlin/Gradle 插件项目；保存监听参考 `DocumentSaveListener.kt` |
+| OpenCode 插件 | `agent-support/opencode/` | TypeScript 插件，入口是 `git-ai.ts` |
+| Amp / Pi 插件支持 | `agent-support/amp/`、`agent-support/pi/` | 轻量 TypeScript hook/plugin 文件 |
+| VS Code 扩展安装器 | `src/mdm/agents/vscode.rs` | Rust 代码，负责自动安装 Marketplace 扩展、配置 `git.path` 和 `chat.useHooks`；它不是插件本体 |
+| Copilot Native Hooks 安装器 | `src/mdm/agents/github_copilot.rs` | Rust 代码，负责生成 `~/.copilot/hooks/git-ai.json`；它也不是插件本体 |
+| 所有安装器注册表 | `src/mdm/agents/mod.rs` | `git-ai install-hooks` 会从这里拿到 Claude、Codex、Cursor、VS Code、Copilot、OpenCode、JetBrains 等安装器 |
+
+所以一句话总结：**插件源码在 `agent-support/<target>/`，Rust 安装/接线代码在 `src/mdm/agents/*.rs`，归因计算核心在 `src/commands/` 和 `src/authorship/`。**
+
 两层之间的通信方式很简单：
 
 - VS Code 本体启动 `git-ai` 命令行进程
@@ -191,7 +299,7 @@
 > VS Code 扩展用 TypeScript 语言编写（一种增强版的 JavaScript）。
 > 你不需要懂 TypeScript，本文所有逻辑都用中文描述。
 
-Git AI 针对 Copilot 有三条独立的检测通道，分别对应 Copilot 的三种工作模式。
+在 VS Code 侧，Git AI 主要有四条触发通道：三条围绕 Copilot（Chat 旧方案、Chat 新方案、Tab 补全），一条围绕人类主动保存（KnownHuman）。
 
 ### 扩展启动时注册了哪些监听器
 
