@@ -1,0 +1,29 @@
+docs/design-doc/git-ai看板方案.md
+  62ad5d9390958d22 663,1754-1760,1902,1905-1914
+---
+{
+  "schema_version": "authorship/3.1.0",
+  "git_ai_version": "2.1.1",
+  "x_user_id": "108",
+  "base_commit_sha": "45a436bfa454b02c926f05f9bfac4a48598b3ccb",
+  "prompts": {
+    "62ad5d9390958d22": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "251a8065-02b5-4f27-9cfa-eb3dd11a5bac",
+        "model": "copilot/gpt-5.4"
+      },
+      "human_author": "gaoang",
+      "messages": [],
+      "total_additions": 19,
+      "total_deletions": 1,
+      "accepted_lines": 2952,
+      "overriden_lines": 0
+    }
+  },
+  "humans": {
+    "h_602db118073c06": {
+      "author": "gaoang"
+    }
+  }
+}
