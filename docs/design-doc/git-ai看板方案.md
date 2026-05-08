@@ -1907,10 +1907,12 @@ if ($Json) {
 | 字段 | 含义 | 来源 | 备注 |
 |------|------|------|------|
 | `gitAiCliVersion` | 当前执行上传的 `git-ai` CLI 版本号 | `git-ai --version` | 建议保留完整版本字符串，便于区分 debug / release |
-| `gitAiPluginVersion` | 当前 IDE 内 git-ai 集成插件/扩展版本号 | IDE 扩展或插件管理器 | 无插件链路时可为 `null` |
-| `ideName` | 当前使用的 IDE / 编辑器名称 | IDE 运行时或插件侧上报 | 例如 `VS Code`、`Cursor`、`IntelliJ IDEA` |
-| `ideVersion` | 当前 IDE / 编辑器版本号 | IDE 关于页或运行时接口 | CLI-only 场景可为 `null` 或约定值 |
-| `gitVersion` | 当前真实 Git 版本号 | `git --version` | 用于排查 hooks / trace2 / wrapper 兼容性 |
+| `gitAiPluginVersion` | 当前 IDE 内 git-ai 集成插件/扩展版本号 | 优先读 `GIT_AI_REPORT_PLUGIN_VERSION` | 无插件链路时可为 `null` |
+| `ideName` | 当前使用的 IDE / 编辑器名称 | 优先读 `GIT_AI_REPORT_IDE_NAME`，否则回退 `TERM_PROGRAM` | 例如 `VS Code`、`Cursor`、`IntelliJ IDEA` |
+| `ideVersion` | 当前 IDE / 编辑器版本号 | 优先读 `GIT_AI_REPORT_IDE_VERSION`，否则回退 `TERM_PROGRAM_VERSION` | CLI-only 场景可为 `null` 或约定值 |
+| `gitVersion` | 当前真实 Git 版本号 | `git --version` 的运行时结果 | 用于排查 hooks / trace2 / wrapper 兼容性 |
+
+> **实现补充（2026-05-08）**：`git-ai/src/integration/upload_stats.rs` 与 `spec-kit/scripts/powershell/upload-ai-stats.ps1` 现在都已按上表把 `clientContext` 落到上传 payload 顶层；其中 `gitAiCliVersion` 与 `gitVersion` 自动采集，`gitAiPluginVersion` / `ideName` / `ideVersion` 支持通过 `GIT_AI_REPORT_PLUGIN_VERSION`、`GIT_AI_REPORT_IDE_NAME`、`GIT_AI_REPORT_IDE_VERSION` 显式传入。批量脚本在未显式提供 IDE 名称/版本时，还会继续回退 `TERM_PROGRAM` / `TERM_PROGRAM_VERSION`。
 
 **`commits[]` 内部字段说明：**
 
@@ -1999,7 +2001,7 @@ if ($Json) {
 
 **要做什么：** 通过环境变量告诉上传链路"往哪里发"和"用什么认证"。
 
-> **与最新 git-ai 原生能力的边界：** `GIT_AI_REPORT_REMOTE_URL` / `GIT_AI_REPORT_REMOTE_ENDPOINT` / `GIT_AI_REPORT_REMOTE_PATH` / `GIT_AI_REPORT_REMOTE_API_KEY` / `GIT_AI_REPORT_REMOTE_USER_ID` / `GIT_AI_VSCODE_MCP_CONFIG_PATH` / `GIT_AI_IDEA_MCP_CONFIG_PATH` 现在同时服务于两条路径：`git-ai` 原生自动上传，以及本文的自建上传脚本路径；如果改用 Git AI 官方或自托管后端，应改配 `GIT_AI_API_KEY`，必要时再配 `GIT_AI_API_BASE_URL`。
+> **与最新 git-ai 原生能力的边界：** `GIT_AI_REPORT_REMOTE_URL` / `GIT_AI_REPORT_REMOTE_ENDPOINT` / `GIT_AI_REPORT_REMOTE_PATH` / `GIT_AI_REPORT_REMOTE_API_KEY` / `GIT_AI_REPORT_REMOTE_USER_ID` / `GIT_AI_VSCODE_MCP_CONFIG_PATH` / `GIT_AI_IDEA_MCP_CONFIG_PATH` / `GIT_AI_REPORT_PLUGIN_VERSION` / `GIT_AI_REPORT_IDE_NAME` / `GIT_AI_REPORT_IDE_VERSION` 现在同时服务于两条路径：`git-ai` 原生自动上传，以及本文的自建上传脚本路径；如果改用 Git AI 官方或自托管后端，应改配 `GIT_AI_API_KEY`，必要时再配 `GIT_AI_API_BASE_URL`。
 
 **为什么不用 `git-ai config set`？**
 - 当前 `git-ai config` 不支持 `report_to_remote.endpoint` / `report_to_remote.api_key` 这类自定义键

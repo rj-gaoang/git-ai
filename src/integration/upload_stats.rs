@@ -11,6 +11,13 @@
 //!   * `GIT_AI_REPORT_REMOTE_PATH`       - path appended to ENDPOINT
 //!   * `GIT_AI_REPORT_REMOTE_API_KEY`    - bearer token (Authorization header)
 //!   * `GIT_AI_REPORT_REMOTE_USER_ID`    - X-USER-ID header (falls back to IDE MCP config)
+//!   * `GIT_AI_REPORT_IDE_NAME`          - optional IDE/editor name override for `clientContext`
+//!   * `GIT_AI_REPORT_IDE_VERSION`       - optional IDE/editor version override for `clientContext`
+//!   * `GIT_AI_REPORT_PLUGIN_VERSION`    - optional git-ai plugin/extension version for `clientContext`
+//!
+//! When the explicit IDE fields are unset, `clientContext.ideName` and
+//! `clientContext.ideVersion` fall back to `TERM_PROGRAM` and
+//! `TERM_PROGRAM_VERSION` when available.
 //!
 //! Uploads are best-effort: failures are logged and never propagated to the
 //! caller, so a network outage cannot break a `git commit`.
@@ -104,6 +111,85 @@ fn env_non_empty(name: &str) -> Option<String> {
     } else {
         Some(trimmed.to_string())
     }
+}
+
+fn env_first_non_empty(names: &[&str]) -> Option<String> {
+    names.iter().find_map(|name| env_non_empty(name))
+}
+
+fn git_ai_cli_version() -> String {
+    if cfg!(debug_assertions) {
+        format!("{} (debug)", env!("CARGO_PKG_VERSION"))
+    } else {
+        env!("CARGO_PKG_VERSION").to_string()
+    }
+}
+
+fn git_version_string() -> Option<String> {
+    let output = crate::git::repository::exec_git(&["--version".to_string()]).ok()?;
+    let stdout = String::from_utf8(output.stdout).ok()?;
+    let trimmed = stdout.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    Some(
+        trimmed
+            .strip_prefix("git version ")
+            .unwrap_or(trimmed)
+            .trim()
+            .to_string(),
+    )
+}
+
+fn normalize_ide_name(name: &str) -> String {
+    match name.trim().to_ascii_lowercase().as_str() {
+        "vscode" | "code" | "visual studio code" => "VS Code".to_string(),
+        "cursor" => "Cursor".to_string(),
+        "windsurf" => "Windsurf".to_string(),
+        "intellij" | "idea" | "intellij idea" => "IntelliJ IDEA".to_string(),
+        _ => name.trim().to_string(),
+    }
+}
+
+fn ide_name() -> Option<String> {
+    env_first_non_empty(&[
+        "GIT_AI_REPORT_IDE_NAME",
+        "GIT_AI_IDE_NAME",
+        "GIT_AI_EDITOR_NAME",
+        "GIT_AI_EDITOR",
+    ])
+    .or_else(|| env_non_empty("TERM_PROGRAM"))
+    .or_else(|| std::env::var_os("VSCODE_GIT_IPC_HANDLE").map(|_| "VS Code".to_string()))
+    .map(|value| normalize_ide_name(&value))
+}
+
+fn ide_version() -> Option<String> {
+    env_first_non_empty(&[
+        "GIT_AI_REPORT_IDE_VERSION",
+        "GIT_AI_IDE_VERSION",
+        "GIT_AI_EDITOR_VERSION",
+    ])
+    .or_else(|| env_non_empty("TERM_PROGRAM_VERSION"))
+}
+
+fn plugin_version() -> Option<String> {
+    env_first_non_empty(&[
+        "GIT_AI_REPORT_PLUGIN_VERSION",
+        "GIT_AI_PLUGIN_VERSION",
+        "GIT_AI_REPORT_EXTENSION_VERSION",
+        "GIT_AI_EXTENSION_VERSION",
+    ])
+}
+
+fn build_client_context() -> Value {
+    json!({
+        "gitAiCliVersion": git_ai_cli_version(),
+        "gitAiPluginVersion": plugin_version(),
+        "ideName": ide_name(),
+        "ideVersion": ide_version(),
+        "gitVersion": git_version_string(),
+    })
 }
 
 /// Public entry point invoked from `post_commit` once the authorship note and
@@ -920,6 +1006,7 @@ fn build_payload_with_source(
         "source": source,
         "reviewDocumentId": Value::Null,
         "authorshipSchemaVersion": AUTHORSHIP_LOG_VERSION,
+        "clientContext": build_client_context(),
         "commits": [Value::Object(commit_entry)],
     });
 
@@ -1667,6 +1754,50 @@ mod tests {
         assert_eq!(file_stats[0]["aiAdditions"], 0);
     }
 
+    #[test]
+    fn build_payload_includes_client_context() {
+        let _g = EnvGuard::new();
+        unsafe {
+            std::env::set_var("GIT_AI_REPORT_IDE_NAME", "VS Code");
+            std::env::set_var("GIT_AI_REPORT_IDE_VERSION", "1.100.2");
+            std::env::set_var("GIT_AI_REPORT_PLUGIN_VERSION", "0.9.2");
+            std::env::remove_var("TERM_PROGRAM");
+            std::env::remove_var("TERM_PROGRAM_VERSION");
+        }
+
+        let tmp_repo = TmpRepo::new().expect("tmp repo");
+        tmp_repo
+            .write_file("test.txt", "seed\n", true)
+            .expect("seed file");
+        tmp_repo
+            .trigger_checkpoint_with_author("test_user")
+            .expect("known human checkpoint");
+        let authorship_log = tmp_repo
+            .commit_with_message("seed commit")
+            .expect("seed commit");
+        let head_sha = tmp_repo.get_head_commit_sha().expect("head sha");
+        let stats = stats_for_commit_stats(tmp_repo.gitai_repo(), &head_sha, &[])
+            .expect("stats for commit");
+
+        let payload = build_payload_with_source(
+            tmp_repo.gitai_repo(),
+            &head_sha,
+            &authorship_log,
+            &stats,
+            "manual",
+        )
+        .expect("payload");
+
+        assert_eq!(payload["clientContext"]["gitAiCliVersion"], git_ai_cli_version());
+        assert_eq!(payload["clientContext"]["gitAiPluginVersion"], "0.9.2");
+        assert_eq!(payload["clientContext"]["ideName"], "VS Code");
+        assert_eq!(payload["clientContext"]["ideVersion"], "1.100.2");
+        assert_eq!(
+            payload["clientContext"]["gitVersion"],
+            json!(git_version_string())
+        );
+    }
+
     fn run_git(repo_path: &Path, args: &[&str]) {
         let output = Command::new("git")
             .arg("-C")
@@ -1708,6 +1839,11 @@ mod tests {
         url: Option<String>,
         endpoint: Option<String>,
         path: Option<String>,
+        ide_name: Option<String>,
+        ide_version: Option<String>,
+        plugin_version: Option<String>,
+        term_program: Option<String>,
+        term_program_version: Option<String>,
     }
 
     impl EnvGuard {
@@ -1718,6 +1854,11 @@ mod tests {
                 url: std::env::var("GIT_AI_REPORT_REMOTE_URL").ok(),
                 endpoint: std::env::var("GIT_AI_REPORT_REMOTE_ENDPOINT").ok(),
                 path: std::env::var("GIT_AI_REPORT_REMOTE_PATH").ok(),
+                ide_name: std::env::var("GIT_AI_REPORT_IDE_NAME").ok(),
+                ide_version: std::env::var("GIT_AI_REPORT_IDE_VERSION").ok(),
+                plugin_version: std::env::var("GIT_AI_REPORT_PLUGIN_VERSION").ok(),
+                term_program: std::env::var("TERM_PROGRAM").ok(),
+                term_program_version: std::env::var("TERM_PROGRAM_VERSION").ok(),
             }
         }
     }
@@ -1736,6 +1877,26 @@ mod tests {
                 match &self.path {
                     Some(v) => std::env::set_var("GIT_AI_REPORT_REMOTE_PATH", v),
                     None => std::env::remove_var("GIT_AI_REPORT_REMOTE_PATH"),
+                }
+                match &self.ide_name {
+                    Some(v) => std::env::set_var("GIT_AI_REPORT_IDE_NAME", v),
+                    None => std::env::remove_var("GIT_AI_REPORT_IDE_NAME"),
+                }
+                match &self.ide_version {
+                    Some(v) => std::env::set_var("GIT_AI_REPORT_IDE_VERSION", v),
+                    None => std::env::remove_var("GIT_AI_REPORT_IDE_VERSION"),
+                }
+                match &self.plugin_version {
+                    Some(v) => std::env::set_var("GIT_AI_REPORT_PLUGIN_VERSION", v),
+                    None => std::env::remove_var("GIT_AI_REPORT_PLUGIN_VERSION"),
+                }
+                match &self.term_program {
+                    Some(v) => std::env::set_var("TERM_PROGRAM", v),
+                    None => std::env::remove_var("TERM_PROGRAM"),
+                }
+                match &self.term_program_version {
+                    Some(v) => std::env::set_var("TERM_PROGRAM_VERSION", v),
+                    None => std::env::remove_var("TERM_PROGRAM_VERSION"),
                 }
             }
         }
