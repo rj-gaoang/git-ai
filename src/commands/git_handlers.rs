@@ -20,6 +20,10 @@ use std::sync::atomic::{AtomicI32, Ordering};
 #[cfg(unix)]
 static CHILD_PGID: AtomicI32 = AtomicI32::new(0);
 
+fn should_run_post_commit_followups(parsed: &ParsedGitInvocation, command_succeeded: bool) -> bool {
+    command_succeeded && parsed.command.as_deref() == Some("commit")
+}
+
 #[cfg(unix)]
 extern "C" fn forward_signal_handler(sig: libc::c_int) {
     let pgid = CHILD_PGID.load(Ordering::Relaxed);
@@ -111,6 +115,9 @@ pub fn handle_git(args: &[String]) {
 
     if !daemon_connected {
         let exit_status = proxy_to_git(args, false, None);
+        if should_run_post_commit_followups(&parsed, exit_status.success()) {
+            crate::commands::upgrade::maybe_schedule_background_update_check();
+        }
         exit_with_status(exit_status);
     }
 
@@ -136,11 +143,11 @@ pub fn handle_git(args: &[String]) {
 
     // After a successful commit, wait briefly for the daemon to produce an
     // authorship note so we can show stats inline (same UX as plain wrapper mode).
-    if exit_status.success()
-        && parsed.command.as_deref() == Some("commit")
-        && let Some(repo) = repository.as_ref()
-    {
-        maybe_show_async_post_commit_stats(&parsed, repo);
+    if should_run_post_commit_followups(&parsed, exit_status.success()) {
+        crate::commands::upgrade::maybe_schedule_background_update_check();
+        if let Some(repo) = repository.as_ref() {
+            maybe_show_async_post_commit_stats(&parsed, repo);
+        }
     }
 
     exit_with_status(exit_status);
@@ -404,6 +411,22 @@ fn send_wrapper_post_state_to_daemon(
             invocation_id,
             e
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::git::cli_parser::parse_git_cli_args;
+
+    #[test]
+    fn post_commit_followups_require_successful_commit() {
+        let commit = parse_git_cli_args(&["commit".to_string(), "-m".to_string(), "msg".to_string()]);
+        let push = parse_git_cli_args(&["push".to_string()]);
+
+        assert!(should_run_post_commit_followups(&commit, true));
+        assert!(!should_run_post_commit_followups(&commit, false));
+        assert!(!should_run_post_commit_followups(&push, true));
     }
 }
 

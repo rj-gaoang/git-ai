@@ -242,6 +242,8 @@ Agents make fewer mistakes and produce more maintainable code when they understa
 3. **Post Commit** a Git Note with AI-attributions in it is attached to the commit
 4. **On `merge --squash`, `rebase`, `cherry-pick`, `stash`, `pop`, `commit --amend`, etc** AI-attributions are automatically moved 
 
+When a `git commit` succeeds, Git AI also schedules a background self-update check. If auto-updates are enabled and the running CLI is behind the selected release channel, Git AI fetches the latest verified release from GitHub in the background instead of blocking the commit.
+
 For GitHub Copilot in VS Code, Git AI scopes attribution to the current native hook tool call. If the hook payload omits file paths, Git AI falls back to the matching `tool_use_id` / `toolCallId` in the Copilot transcript instead of scanning the whole chat session, so unrelated edits from nearby tool calls are not mixed into the checkpoint.
 
 #### Example Note
