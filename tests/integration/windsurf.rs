@@ -569,6 +569,33 @@ fn test_known_human_not_suppressed_without_pending_ai_edit() {
     ]);
 }
 
+/// If a same-content KnownHuman save survives just before the AI post-edit
+/// checkpoint, the AI checkpoint must still be recorded instead of being
+/// skipped as a no-op.
+#[test]
+fn test_ai_checkpoint_not_skipped_after_same_content_known_human() {
+    let repo = TestRepo::new();
+    let file_path = repo.path().join("same_content_race.txt");
+
+    fs::write(&file_path, "base\n").unwrap();
+    repo.stage_all_and_commit("Initial commit").unwrap();
+
+    fs::write(&file_path, "base\nai line\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "same_content_race.txt"])
+        .unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "same_content_race.txt"])
+        .unwrap();
+
+    repo.stage_all_and_commit("KnownHuman then AI same content")
+        .unwrap();
+
+    let mut file = repo.filename("same_content_race.txt");
+    file.assert_committed_lines(crate::lines![
+        "base".unattributed_human(),
+        "ai line".ai(),
+    ]);
+}
+
 /// Verifies that after the AI post-edit checkpoint completes (clearing pending
 /// state), subsequent KnownHuman checkpoints on the same file are no longer
 /// suppressed.

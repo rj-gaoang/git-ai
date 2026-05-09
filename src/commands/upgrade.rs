@@ -50,10 +50,20 @@ unsafe extern "system" {
 
 const UPDATE_CHECK_INTERVAL_HOURS: u64 = 24;
 const GIT_AI_RELEASE_ENV: &str = "GIT_AI_RELEASE_TAG";
+const GIT_AI_GITHUB_REPO_ENV: &str = "GIT_AI_GITHUB_REPO";
+const GIT_AI_INSTALLER_URL_ENV: &str = "GIT_AI_INSTALLER_URL";
+const DEFAULT_GITHUB_RELEASE_REPO: &str = "rj-gaoang/git-ai";
+const GITHUB_API_BASE_URL: &str = "https://api.github.com";
+const RAW_GITHUB_CONTENT_BASE_URL: &str = "https://raw.githubusercontent.com";
 #[cfg(windows)]
 const GIT_AI_RESTART_DAEMON_AFTER_INSTALL_ENV: &str = "GIT_AI_RESTART_DAEMON_AFTER_INSTALL";
 const BACKGROUND_SPAWN_THROTTLE_SECS: u64 = 60;
 const ENV_BACKGROUND_UPGRADE_WORKER: &str = "GIT_AI_BACKGROUND_UPGRADE_WORKER";
+
+#[cfg(windows)]
+const INSTALL_SCRIPT_NAME: &str = "install.ps1";
+#[cfg(not(windows))]
+const INSTALL_SCRIPT_NAME: &str = "install.sh";
 
 static UPDATE_NOTICE_EMITTED: AtomicBool = AtomicBool::new(false);
 static LAST_BACKGROUND_SPAWN: AtomicU64 = AtomicU64::new(0);
@@ -81,7 +91,6 @@ impl UpgradeAction {
 struct ChannelRelease {
     tag: String,
     semver: String,
-    checksum: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -111,15 +120,26 @@ impl UpdateCache {
     }
 }
 
+#[cfg(test)]
 #[derive(Debug, Deserialize)]
 struct ChannelInfo {
     version: String,
     checksum: String,
 }
 
+#[cfg(test)]
 #[derive(Debug, Deserialize)]
 struct ReleasesResponse {
     channels: HashMap<String, ChannelInfo>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GitHubReleaseResponse {
+    tag_name: String,
+    #[serde(default)]
+    prerelease: bool,
+    #[serde(default)]
+    draft: bool,
 }
 
 fn get_update_check_cache_path() -> Option<PathBuf> {
@@ -318,10 +338,107 @@ pub(crate) fn clear_cached_update_state() {
     persist_update_state(channel, None);
 }
 
+#[allow(dead_code)]
 fn releases_endpoint() -> &'static str {
     "/worker/releases"
 }
 
+fn configured_github_repo() -> String {
+    std::env::var(GIT_AI_GITHUB_REPO_ENV)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| DEFAULT_GITHUB_RELEASE_REPO.to_string())
+}
+
+fn configured_installer_url(repo: &str) -> String {
+    std::env::var(GIT_AI_INSTALLER_URL_ENV)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| {
+            format!(
+                "{}/{}/main/{}",
+                RAW_GITHUB_CONTENT_BASE_URL, repo, INSTALL_SCRIPT_NAME
+            )
+        })
+}
+
+fn release_source_url(api_base_url: &str, repo: &str) -> String {
+    if api_base_url.starts_with("mock://") {
+        api_base_url.to_string()
+    } else {
+        format!("{}/repos/{}/releases", GITHUB_API_BASE_URL, repo)
+    }
+}
+
+fn fetch_text(url: &str, label: &str) -> Result<String, String> {
+    let (_agent, request) = ApiContext::http_get(url, Some(30));
+    let response = crate::http::send(request)
+        .map_err(|e| format!("Failed to fetch {}: {}", label, e))?;
+
+    if response.status_code != 200 {
+        return Err(format!(
+            "Failed to fetch {}: HTTP {}",
+            label, response.status_code
+        ));
+    }
+
+    response
+        .as_str()
+        .map(|body| body.to_string())
+        .map_err(|e| format!("{} is not valid UTF-8: {}", label, e))
+}
+
+fn release_from_github_release(release: GitHubReleaseResponse) -> Result<ChannelRelease, String> {
+    if release.draft {
+        return Err("Latest GitHub release is a draft".to_string());
+    }
+
+    let tag = release.tag_name.trim().to_string();
+    if tag.is_empty() {
+        return Err("Release tag not found in GitHub response".to_string());
+    }
+
+    let semver = semver_from_tag(&tag);
+    if semver.is_empty() {
+        return Err(format!("Unable to parse semver from tag '{}'", tag));
+    }
+
+    Ok(ChannelRelease {
+        tag,
+        semver,
+    })
+}
+
+fn fetch_latest_github_release(repo: &str) -> Result<ChannelRelease, String> {
+    let url = format!("{}/repos/{}/releases/latest", GITHUB_API_BASE_URL, repo);
+    let body = fetch_text(&url, "GitHub latest release")?;
+    let release: GitHubReleaseResponse = serde_json::from_str(&body)
+        .map_err(|e| format!("Failed to parse GitHub latest release response: {}", e))?;
+    release_from_github_release(release)
+}
+
+fn fetch_next_github_release(repo: &str) -> Result<ChannelRelease, String> {
+    let url = format!("{}/repos/{}/releases?per_page=20", GITHUB_API_BASE_URL, repo);
+    let body = fetch_text(&url, "GitHub release list")?;
+    let releases: Vec<GitHubReleaseResponse> = serde_json::from_str(&body)
+        .map_err(|e| format!("Failed to parse GitHub release list response: {}", e))?;
+
+    if let Some(release) = releases.into_iter().find(|release| !release.draft && release.prerelease)
+    {
+        return release_from_github_release(release);
+    }
+
+    fetch_latest_github_release(repo)
+}
+
+fn fetch_install_script(repo: &str) -> Result<String, String> {
+    let url = configured_installer_url(repo);
+    fetch_text(&url, INSTALL_SCRIPT_NAME)
+}
+
+#[allow(dead_code)]
 fn verify_sha256(content: &[u8], expected_hash: &str) -> Result<(), String> {
     let mut hasher = Sha256::new();
     hasher.update(content);
@@ -339,6 +456,7 @@ fn verify_sha256(content: &[u8], expected_hash: &str) -> Result<(), String> {
 
 /// Parse SHA256SUMS file content into a map of filename → hash.
 /// Format: `<hash>  <filename>` (two spaces between hash and filename)
+#[allow(dead_code)]
 fn parse_checksums(content: &str) -> HashMap<String, String> {
     let mut checksums = HashMap::new();
 
@@ -358,6 +476,7 @@ fn parse_checksums(content: &str) -> HashMap<String, String> {
 }
 
 /// Fetch SHA256SUMS from the releases API and verify against expected checksum.
+#[allow(dead_code)]
 fn fetch_and_verify_checksums(
     api_base_url: &str,
     channel: &str,
@@ -389,6 +508,7 @@ fn fetch_and_verify_checksums(
 }
 
 /// Fetch install script from the releases API and verify against checksums.
+#[allow(dead_code)]
 fn fetch_and_verify_install_script(
     api_base_url: &str,
     channel: &str,
@@ -429,29 +549,22 @@ fn fetch_and_verify_install_script(
 }
 
 fn fetch_release_for_channel(
-    api_base_url: &str,
+    _api_base_url: &str,
     channel: UpdateChannel,
 ) -> Result<ChannelRelease, String> {
     #[cfg(test)]
-    if let Some(result) = try_mock_releases(api_base_url, channel) {
+    if let Some(result) = try_mock_releases(_api_base_url, channel) {
         return result;
     }
 
-    let context = ApiContext::new(Some(api_base_url.to_string())).with_timeout(5);
-
-    let response = context
-        .get(releases_endpoint())
-        .map_err(|e| format!("Failed to check for updates: {}", e))?;
-
-    let body = response
-        .as_str()
-        .map_err(|e| format!("Failed to read response body: {}", e))?;
-    let releases: ReleasesResponse = serde_json::from_str(body)
-        .map_err(|e| format!("Failed to parse release response: {}", e))?;
-
-    release_from_response(releases, channel)
+    let repo = configured_github_repo();
+    match channel {
+        UpdateChannel::Latest | UpdateChannel::EnterpriseLatest => fetch_latest_github_release(&repo),
+        UpdateChannel::Next | UpdateChannel::EnterpriseNext => fetch_next_github_release(&repo),
+    }
 }
 
+#[cfg(test)]
 fn release_from_response(
     releases: ReleasesResponse,
     channel: UpdateChannel,
@@ -481,7 +594,6 @@ fn release_from_response(
     Ok(ChannelRelease {
         tag,
         semver,
-        checksum,
     })
 }
 
@@ -495,7 +607,7 @@ fn try_mock_releases(base: &str, channel: UpdateChannel) -> Option<Result<Channe
     )
 }
 
-fn run_install_script(script_content: &str, tag: &str, silent: bool) -> Result<(), String> {
+fn run_install_script(script_content: &str, repo: &str, tag: &str, silent: bool) -> Result<(), String> {
     #[cfg(windows)]
     {
         if let Ok(daemon_config) = crate::daemon::DaemonConfig::from_env_or_default_paths() {
@@ -561,6 +673,7 @@ fn run_install_script(script_content: &str, tag: &str, silent: bool) -> Result<(
                 .arg("Bypass")
                 .arg("-Command")
                 .arg(&ps_wrapper)
+                .env(GIT_AI_GITHUB_REPO_ENV, repo)
                 .env(GIT_AI_RELEASE_ENV, tag);
 
             // Hide the spawned console to prevent any host/UI bleed-through
@@ -623,7 +736,9 @@ fn run_install_script(script_content: &str, tag: &str, silent: bool) -> Result<(
         let script_path_str = script_path.to_string_lossy().to_string();
 
         let mut cmd = Command::new("bash");
-        cmd.arg(&script_path_str).env(GIT_AI_RELEASE_ENV, tag);
+        cmd.arg(&script_path_str)
+            .env(GIT_AI_GITHUB_REPO_ENV, repo)
+            .env(GIT_AI_RELEASE_ENV, tag);
 
         if silent {
             cmd.stdout(Stdio::null()).stderr(Stdio::null());
@@ -686,8 +801,15 @@ fn run_impl_with_url(
     skip_install: bool,
 ) -> UpgradeAction {
     let current_version = env!("CARGO_PKG_VERSION");
+    let repo = configured_github_repo();
+    let release_source = release_source_url(api_base_url, &repo);
+    let installer_url = configured_installer_url(&repo);
 
-    println!("Checking for updates (channel: {})...", channel.as_str());
+    println!(
+        "Checking for updates (channel: {}, repo: {})...",
+        channel.as_str(),
+        repo
+    );
 
     let release = match fetch_release_for_channel(api_base_url, channel) {
         Ok(release) => release,
@@ -715,7 +837,8 @@ fn run_impl_with_url(
         "info",
         Some(serde_json::json!({
             "current_version": current_version,
-            "api_base_url": api_base_url,
+            "release_source": release_source,
+            "release_repo": repo,
             "channel": channel.as_str(),
             "result": action.to_string()
         })),
@@ -753,42 +876,27 @@ fn run_impl_with_url(
         return action;
     }
 
-    println!("Fetching and verifying release artifacts...");
+    println!("Fetching installer script...");
 
-    // Fetch and verify SHA256SUMS against the release's master checksum
-    let checksums =
-        match fetch_and_verify_checksums(api_base_url, channel.as_str(), &release.checksum) {
-            Ok(checksums) => {
-                println!("\x1b[1;32m✓\x1b[0m SHA256SUMS verified");
-                checksums
-            }
-            Err(err) => {
-                eprintln!("Failed to fetch/verify checksums: {}", err);
-                std::process::exit(1);
-            }
-        };
-
-    // Fetch and verify the install script
-    let script_content =
-        match fetch_and_verify_install_script(api_base_url, channel.as_str(), &checksums) {
-            Ok(content) => {
-                #[cfg(windows)]
-                println!("\x1b[1;32m✓\x1b[0m install.ps1 verified");
-                #[cfg(not(windows))]
-                println!("\x1b[1;32m✓\x1b[0m install.sh verified");
-                content
-            }
-            Err(err) => {
-                eprintln!("Failed to fetch/verify install script: {}", err);
-                std::process::exit(1);
-            }
-        };
+    let script_content = match fetch_install_script(&repo) {
+        Ok(content) => {
+            #[cfg(windows)]
+            println!("\x1b[1;32m✓\x1b[0m install.ps1 fetched from {}", installer_url);
+            #[cfg(not(windows))]
+            println!("\x1b[1;32m✓\x1b[0m install.sh fetched from {}", installer_url);
+            content
+        }
+        Err(err) => {
+            eprintln!("Failed to fetch install script: {}", err);
+            std::process::exit(1);
+        }
+    };
 
     println!();
     println!("Running installation script...");
     println!();
 
-    match run_install_script(&script_content, &release.tag, false) {
+    match run_install_script(&script_content, &repo, &release.tag, false) {
         Ok(()) => {
             // On Windows, we spawn the installer in the background and can't verify success
             #[cfg(not(windows))]
@@ -802,7 +910,9 @@ fn run_impl_with_url(
                 Some(serde_json::json!({
                     "release_tag": release.tag,
                     "current_version": current_version,
-                    "api_base_url": api_base_url,
+                    "release_source": release_source,
+                    "release_repo": repo,
+                    "installer_url": installer_url,
                     "channel": channel.as_str()
                 })),
             );
@@ -915,6 +1025,9 @@ pub fn check_and_install_update_if_available() -> Result<DaemonUpdateCheckResult
 
     let channel = config.update_channel();
     let api_base_url = config.api_base_url();
+    let repo = configured_github_repo();
+    let release_source = release_source_url(api_base_url, &repo);
+    let installer_url = configured_installer_url(&repo);
 
     // Read the cache that check_for_update_available() populated earlier.
     // We intentionally skip should_check_for_updates() here because the
@@ -947,16 +1060,15 @@ pub fn check_and_install_update_if_available() -> Result<DaemonUpdateCheckResult
         Some(serde_json::json!({
             "current_version": current_version,
             "release_tag": release.tag,
-            "api_base_url": api_base_url,
+            "release_source": release_source,
+            "release_repo": repo,
+            "installer_url": installer_url,
             "channel": channel.as_str()
         })),
     );
 
-    // Fetch, verify, and run the install script silently.
-    let checksums = fetch_and_verify_checksums(api_base_url, channel.as_str(), &release.checksum)?;
-    let script_content =
-        fetch_and_verify_install_script(api_base_url, channel.as_str(), &checksums)?;
-    run_install_script(&script_content, &release.tag, true)?;
+    let script_content = fetch_install_script(&repo)?;
+    run_install_script(&script_content, &repo, &release.tag, true)?;
 
     // Clear the cached update now that we've installed it.
     persist_update_state(channel, None);
@@ -967,7 +1079,9 @@ pub fn check_and_install_update_if_available() -> Result<DaemonUpdateCheckResult
         Some(serde_json::json!({
             "release_tag": release.tag,
             "current_version": current_version,
-            "api_base_url": api_base_url,
+            "release_source": release_source,
+            "release_repo": repo,
+            "installer_url": installer_url,
             "channel": channel.as_str()
         })),
     );
@@ -988,6 +1102,8 @@ pub fn check_for_update_available() -> Result<DaemonUpdateCheckResult, String> {
 
     let channel = config.update_channel();
     let api_base_url = config.api_base_url();
+    let repo = configured_github_repo();
+    let release_source = release_source_url(api_base_url, &repo);
     let cache = read_update_cache();
 
     if !should_check_for_updates(channel, cache.as_ref()) {
@@ -1013,7 +1129,8 @@ pub fn check_for_update_available() -> Result<DaemonUpdateCheckResult, String> {
         "info",
         Some(serde_json::json!({
             "current_version": current_version,
-            "api_base_url": api_base_url,
+            "release_source": release_source,
+            "release_repo": repo,
             "channel": channel.as_str(),
             "result": action.to_string()
         })),
@@ -1122,6 +1239,47 @@ mod tests {
         assert_eq!(semver_from_tag("v1.2.3-next-abc"), "1.2.3");
         assert_eq!(semver_from_tag("enterprise-v1.2.3"), "1.2.3");
         assert_eq!(semver_from_tag("enterprise-v1.2.3-next-abc"), "1.2.3");
+    }
+
+    #[test]
+    #[serial]
+    fn test_configured_github_repo_defaults_to_rj_gaoang_repo() {
+        unsafe {
+            std::env::remove_var(GIT_AI_GITHUB_REPO_ENV);
+        }
+
+        assert_eq!(configured_github_repo(), DEFAULT_GITHUB_RELEASE_REPO);
+    }
+
+    #[test]
+    #[serial]
+    fn test_configured_installer_url_uses_override_then_repo_default() {
+        unsafe {
+            std::env::remove_var(GIT_AI_INSTALLER_URL_ENV);
+        }
+
+        assert_eq!(
+            configured_installer_url(DEFAULT_GITHUB_RELEASE_REPO),
+            format!(
+                "{}/{}/main/{}",
+                RAW_GITHUB_CONTENT_BASE_URL,
+                DEFAULT_GITHUB_RELEASE_REPO,
+                INSTALL_SCRIPT_NAME
+            )
+        );
+
+        unsafe {
+            std::env::set_var(GIT_AI_INSTALLER_URL_ENV, "https://example.com/install-script");
+        }
+
+        assert_eq!(
+            configured_installer_url(DEFAULT_GITHUB_RELEASE_REPO),
+            "https://example.com/install-script"
+        );
+
+        unsafe {
+            std::env::remove_var(GIT_AI_INSTALLER_URL_ENV);
+        }
     }
 
     #[test]
@@ -1426,7 +1584,6 @@ mod tests {
         let release = ChannelRelease {
             tag: "v1.0.0".to_string(),
             semver: "1.0.0".to_string(),
-            checksum: "abc".to_string(),
         };
         let action = determine_action(true, &release, "1.0.0");
         assert_eq!(action, UpgradeAction::ForceReinstall);
@@ -1437,7 +1594,6 @@ mod tests {
         let release = ChannelRelease {
             tag: "v1.0.0".to_string(),
             semver: "1.0.0".to_string(),
-            checksum: "abc".to_string(),
         };
         let action = determine_action(false, &release, "1.0.0");
         assert_eq!(action, UpgradeAction::AlreadyLatest);
@@ -1448,7 +1604,6 @@ mod tests {
         let release = ChannelRelease {
             tag: "v2.0.0".to_string(),
             semver: "2.0.0".to_string(),
-            checksum: "abc".to_string(),
         };
         let action = determine_action(false, &release, "1.0.0");
         assert_eq!(action, UpgradeAction::UpgradeAvailable);
@@ -1459,7 +1614,6 @@ mod tests {
         let release = ChannelRelease {
             tag: "v1.0.0".to_string(),
             semver: "1.0.0".to_string(),
-            checksum: "abc".to_string(),
         };
         let action = determine_action(false, &release, "2.0.0");
         assert_eq!(action, UpgradeAction::RunningNewerVersion);
@@ -1624,7 +1778,6 @@ mod tests {
         let release = result.unwrap();
         assert_eq!(release.tag, "v1.2.3");
         assert_eq!(release.semver, "1.2.3");
-        assert_eq!(release.checksum, "abc123def456");
     }
 
     #[test]
@@ -1682,7 +1835,6 @@ mod tests {
         let release = ChannelRelease {
             tag: "v1.5.0".to_string(),
             semver: "1.5.0".to_string(),
-            checksum: "test".to_string(),
         };
 
         // Manually construct what persist_update_state would create

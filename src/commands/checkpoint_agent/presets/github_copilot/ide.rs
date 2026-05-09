@@ -186,7 +186,13 @@ pub(super) fn parse_vscode_native_hooks(
     let transcript_path = transcript_path_from_hook_data(data)
         .or_else(|| chat_session_path_from_hook_data(data))
         .map(|s| s.to_string());
-    let chat_session_path = chat_session_path_from_hook_data(data).map(|s| s.to_string());
+    let chat_session_path = chat_session_path_from_hook_data(data)
+        .map(|s| s.to_string())
+        .or_else(|| {
+            transcript_path
+                .as_deref()
+                .and_then(|path| derive_chat_session_path_from_transcript(path, &session_id))
+        });
 
     if let Some(ref path) = transcript_path
         && looks_like_claude_transcript_path(path)
@@ -636,6 +642,40 @@ fn transcript_path_from_hook_data(data: &serde_json::Value) -> Option<&str> {
 
 fn chat_session_path_from_hook_data(data: &serde_json::Value) -> Option<&str> {
     parse::optional_str_multi(data, &["chat_session_path", "chatSessionPath"])
+}
+
+fn derive_chat_session_path_from_transcript(
+    transcript_path: &str,
+    session_id: &str,
+) -> Option<String> {
+    let transcript_path = Path::new(transcript_path);
+    let parent = transcript_path.parent()?;
+    let parent_name = parent.file_name()?.to_str()?;
+
+    if parent_name.eq_ignore_ascii_case("chatSessions") {
+        return transcript_path
+            .is_file()
+            .then(|| transcript_path.to_string_lossy().to_string());
+    }
+
+    if !parent_name.eq_ignore_ascii_case("transcripts") {
+        return None;
+    }
+
+    let copilot_dir = parent.parent()?;
+    let copilot_dir_name = copilot_dir.file_name()?.to_str()?;
+    if !copilot_dir_name.eq_ignore_ascii_case("GitHub.copilot-chat") {
+        return None;
+    }
+
+    let workspace_storage_dir = copilot_dir.parent()?;
+    let chat_sessions_dir = workspace_storage_dir.join("chatSessions");
+
+    ["jsonl", "json"]
+        .into_iter()
+        .map(|ext| chat_sessions_dir.join(format!("{}.{}", session_id, ext)))
+        .find(|candidate| candidate.is_file())
+        .map(|candidate| candidate.to_string_lossy().to_string())
 }
 
 fn infer_copilot_transcript_format(path: &str) -> TranscriptFormat {
@@ -1372,6 +1412,60 @@ mod tests {
                 );
             }
             _ => panic!("Expected PreFileEdit"),
+        }
+    }
+
+    #[test]
+    fn test_copilot_native_derives_chat_session_path_for_model() {
+        let temp = tempfile::tempdir().unwrap();
+        let cwd = temp.path().join("repo");
+        std::fs::create_dir_all(&cwd).unwrap();
+
+        let workspace_storage = temp.path().join("workspaceStorage").join("abc");
+        let transcript_dir = workspace_storage.join("GitHub.copilot-chat").join("transcripts");
+        std::fs::create_dir_all(&transcript_dir).unwrap();
+
+        let transcript_path = transcript_dir.join("session.jsonl");
+        let transcript = r#"{"type":"assistant.message","data":{"toolRequests":[{"toolCallId":"call_exact","name":"apply_patch","arguments":"{\"input\":\"*** Begin Patch\\n*** Update File: src/main.rs\\n+fn main() {}\\n*** End Patch\"}"}]}}
+    {"type":"tool.execution_start","data":{"toolCallId":"call_exact","toolName":"apply_patch","arguments":{"input":"..."}}}
+    "#;
+        std::fs::write(&transcript_path, transcript).unwrap();
+
+        let chat_session_dir = workspace_storage.join("chatSessions");
+        std::fs::create_dir_all(&chat_session_dir).unwrap();
+        let chat_session_path = chat_session_dir.join("session-1.jsonl");
+        std::fs::write(
+            &chat_session_path,
+            r#"{"kind":0,"v":{"inputState":{"selectedModel":{"identifier":"copilot/gpt-5.4-mini"}},"requests":[{"modelId":"copilot/gpt-5.4-mini"}]}}"#,
+        )
+        .unwrap();
+
+        let input = json!({
+            "hook_event_name": "PostToolUse",
+            "cwd": cwd.to_string_lossy(),
+            "tool_name": "apply_patch",
+            "session_id": "session-1",
+            "tool_use_id": "call_exact",
+            "tool_input": "...",
+            "tool_response": "",
+            "transcript_path": transcript_path.to_string_lossy()
+        })
+        .to_string();
+
+        let events = GithubCopilotPreset
+            .parse(&input, "t_test123456789a")
+            .unwrap();
+
+        match &events[0] {
+            ParsedHookEvent::PostFileEdit(e) => {
+                assert_eq!(e.context.agent_id.model, "copilot/gpt-5.4-mini");
+                assert_eq!(
+                    e.context.metadata.get("chat_session_path").map(String::as_str),
+                    Some(chat_session_path.to_string_lossy().as_ref())
+                );
+                assert_eq!(e.file_paths, vec![cwd.join("src/main.rs")]);
+            }
+            _ => panic!("Expected PostFileEdit"),
         }
     }
 

@@ -196,7 +196,7 @@ git-ai config set prompt_storage notes
 | `GIT_AI_RELEASE_TAG` | 覆盖 release tag，例如 `latest` 或固定版本 tag |
 | `GIT_AI_LOCAL_BINARY` | 跳过下载，直接把本地 binary 复制到安装目录 |
 | `GIT_AI_SKIP_PATH_UPDATE` | Windows 安装时设为 `1` 可跳过 PATH 更新 |
-| `GIT_AI_INSTALLER_URL` | 供上层集成脚本选择 installer 下载地址；当前安装脚本本身不直接消费这个变量 |
+| `GIT_AI_INSTALLER_URL` | 覆盖 installer 脚本下载地址；上层集成脚本和 `git-ai upgrade` 都会使用它 |
 
 ## 八、内部 / 调试 / 测试变量
 

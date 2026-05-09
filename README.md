@@ -78,7 +78,7 @@ Non-WSL Windows support is currently experimental and under active development. 
 powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://usegitai.com/install.ps1 | iex"
 ```
 
-If you need the installer to pull binaries from a different GitHub repository, set `GIT_AI_GITHUB_REPO=<owner/repo>` before running it, and optionally set `GIT_AI_RELEASE_TAG=<tag-or-latest>` to pin a specific release. For local development validation, set `GIT_AI_LOCAL_BINARY` to a built executable instead. The installer still consumes release assets, so a branch URL by itself is not enough unless that branch has a published tag/release.
+If you need the installer or built-in `git-ai upgrade` flow to pull binaries from a different GitHub repository, set `GIT_AI_GITHUB_REPO=<owner/repo>` before running it. `git-ai upgrade` now checks GitHub releases directly and defaults to `rj-gaoang/git-ai` latest stable release; set `GIT_AI_RELEASE_TAG=<tag-or-latest>` to pin a specific release, or `GIT_AI_INSTALLER_URL=<raw-install-script-url>` to override the installer script source while still downloading binaries from the selected release repo/tag. For local development validation, set `GIT_AI_LOCAL_BINARY` to a built executable instead.
 
 On Windows, both the installer and the runtime Git resolver skip any existing `git-ai` shim on `PATH` and look for a standard Git binary instead. Git for Windows still needs to be installed and reachable somewhere on `PATH`, typically via `C:\Program Files\Git\cmd`.
 

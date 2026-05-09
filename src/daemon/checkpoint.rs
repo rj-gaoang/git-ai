@@ -37,6 +37,7 @@ pub struct FileLineStats {
 struct PreviousFileState {
     blob_sha: String,
     attributions: Vec<Attribution>,
+    kind: CheckpointKind,
 }
 
 use crate::authorship::working_log::AgentId;
@@ -536,20 +537,22 @@ fn working_log_entry_has_non_human_attribution(entry: &WorkingLogEntry) -> bool 
 fn build_previous_file_state_maps(
     previous_checkpoints: &[Checkpoint],
     initial_attributions: &HashMap<String, Vec<LineAttribution>>,
-) -> (HashMap<String, PreviousFileState>, HashSet<String>) {
-    let mut previous_file_state_by_file: HashMap<String, PreviousFileState> = HashMap::new();
+) -> (HashMap<String, Vec<PreviousFileState>>, HashSet<String>) {
+    let mut previous_file_state_by_file: HashMap<String, Vec<PreviousFileState>> = HashMap::new();
     let mut ai_touched_files: HashSet<String> = initial_attributions.keys().cloned().collect();
 
-    // Keep only the latest entry for each file.
+    // Keep per-file checkpoint history so AI checkpoints can look past a
+    // same-content KnownHuman save that landed just before the AI checkpoint.
     for checkpoint in previous_checkpoints {
         for entry in &checkpoint.entries {
-            previous_file_state_by_file.insert(
-                entry.file.clone(),
-                PreviousFileState {
+            previous_file_state_by_file
+                .entry(entry.file.clone())
+                .or_default()
+                .push(PreviousFileState {
                     blob_sha: entry.blob_sha.clone(),
                     attributions: entry.attributions.clone(),
-                },
-            );
+                    kind: checkpoint.kind,
+                });
 
             if checkpoint.kind.is_ai() || working_log_entry_has_non_human_attribution(entry) {
                 ai_touched_files.insert(entry.file.clone());
@@ -560,13 +563,39 @@ fn build_previous_file_state_maps(
     (previous_file_state_by_file, ai_touched_files)
 }
 
+fn select_previous_state_for_ai_checkpoint(
+    current_content: &str,
+    working_log: &PersistedWorkingLog,
+    file_history: &[PreviousFileState],
+) -> Option<(String, Vec<Attribution>)> {
+    let latest = file_history.last()?;
+    let latest_content = working_log
+        .get_file_version(&latest.blob_sha)
+        .unwrap_or_default();
+
+    if latest.kind != CheckpointKind::KnownHuman
+        || !content_eq_normalized(current_content, &latest_content)
+    {
+        return Some((latest_content, latest.attributions.clone()));
+    }
+
+    for state in file_history.iter().rev().skip(1) {
+        let state_content = working_log.get_file_version(&state.blob_sha).unwrap_or_default();
+        if !content_eq_normalized(current_content, &state_content) {
+            return Some((state_content, state.attributions.clone()));
+        }
+    }
+
+    None
+}
+
 #[allow(clippy::too_many_arguments)]
 fn get_checkpoint_entry_for_file(
     file_path: String,
     kind: CheckpointKind,
     repo: Repository,
     working_log: PersistedWorkingLog,
-    previous_file_state_by_file: Arc<HashMap<String, PreviousFileState>>,
+    previous_file_state_by_file: Arc<HashMap<String, Vec<PreviousFileState>>>,
     ai_touched_files: Arc<HashSet<String>>,
     file_content_hash: String,
     author_id: Arc<String>,
@@ -582,7 +611,11 @@ fn get_checkpoint_entry_for_file(
         .unwrap_or_default();
     let initial_snapshot_content = initial_snapshot_contents.get(&file_path).cloned();
 
-    let previous_state = previous_file_state_by_file.get(&file_path).cloned();
+    let previous_file_history = previous_file_state_by_file
+        .get(&file_path)
+        .cloned()
+        .unwrap_or_default();
+    let previous_state = previous_file_history.last().cloned();
     let has_prior_ai_edits = ai_touched_files.contains(&file_path);
 
     let current_content = working_log
@@ -612,14 +645,22 @@ fn get_checkpoint_entry_for_file(
         return Ok(Some((entry, stats)));
     }
 
-    let from_checkpoint = previous_state.as_ref().map(|state| {
-        (
-            working_log
-                .get_file_version(&state.blob_sha)
-                .unwrap_or_default(),
-            state.attributions.clone(),
+    let from_checkpoint = if kind.is_ai() {
+        select_previous_state_for_ai_checkpoint(
+            &current_content,
+            &working_log,
+            &previous_file_history,
         )
-    });
+    } else {
+        previous_state.as_ref().map(|state| {
+            (
+                working_log
+                    .get_file_version(&state.blob_sha)
+                    .unwrap_or_default(),
+                state.attributions.clone(),
+            )
+        })
+    };
 
     let is_from_checkpoint = from_checkpoint.is_some();
     let (previous_content, prev_attributions) = if let Some((content, attrs)) = from_checkpoint {
