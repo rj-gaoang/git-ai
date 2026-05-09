@@ -35,13 +35,39 @@ pub fn update_prompt_from_tool(
         return PromptUpdateResult::Unchanged;
     };
 
-    match transcript_from_json_or_jsonl(Path::new(path)) {
+    let transcript_path = Path::new(path);
+
+    match transcript_from_json_or_jsonl(transcript_path) {
         Ok(transcript) if !transcript.messages().is_empty() => {
-            PromptUpdateResult::Updated(transcript, current_model.to_string())
+            let latest_model = latest_model_from_transcript(tool, transcript_path, current_model);
+            PromptUpdateResult::Updated(transcript, latest_model)
         }
         Ok(_) => PromptUpdateResult::Unchanged,
         Err(error) => PromptUpdateResult::Failed(error),
     }
+}
+
+fn latest_model_from_transcript(tool: &str, transcript_path: &Path, current_model: &str) -> String {
+    let inferred_format = match tool {
+        "github-copilot" => {
+            if transcript_path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("jsonl"))
+            {
+                crate::transcripts::sweep::TranscriptFormat::CopilotEventStreamJsonl
+            } else {
+                crate::transcripts::sweep::TranscriptFormat::CopilotSessionJson
+            }
+        }
+        _ => return current_model.to_string(),
+    };
+
+    crate::transcripts::model_extraction::extract_model(transcript_path, inferred_format, None)
+        .ok()
+        .flatten()
+        .filter(|model| !model.trim().is_empty())
+        .unwrap_or_else(|| current_model.to_string())
 }
 
 fn transcript_from_json_or_jsonl(path: &Path) -> Result<AiTranscript, GitAiError> {
@@ -92,11 +118,13 @@ fn message_from_object(object: &serde_json::Map<String, Value>) -> Option<Messag
         .or_else(|| object.get("type"))
         .and_then(Value::as_str)?
         .to_ascii_lowercase();
+    let normalized_role = role.split('.').next().unwrap_or(role.as_str());
 
     let text = object
         .get("text")
         .or_else(|| object.get("content"))
         .or_else(|| object.get("message"))
+        .or_else(|| object.get("data"))
         .and_then(text_from_value)?;
 
     let timestamp = object
@@ -106,12 +134,73 @@ fn message_from_object(object: &serde_json::Map<String, Value>) -> Option<Messag
         .and_then(Value::as_str)
         .map(ToString::to_string);
 
-    match role.as_str() {
+    match normalized_role {
         "user" | "human" => Some(Message::user(text, timestamp)),
         "assistant" | "ai" => Some(Message::assistant(text, timestamp)),
         "thinking" => Some(Message::thinking(text, timestamp)),
         "plan" => Some(Message::plan(text, timestamp)),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn transcript_from_jsonl_parses_copilot_event_stream_messages() {
+        let mut file = tempfile::NamedTempFile::with_suffix(".jsonl").unwrap();
+        writeln!(
+            file,
+            r#"{{"type":"user.message","data":{{"content":"write tests"}},"timestamp":"2026-05-09T10:00:00Z"}}"#
+        )
+        .unwrap();
+        writeln!(
+            file,
+            r#"{{"type":"assistant.message","data":{{"content":"I will update the test file.","modelId":"copilot/gpt-5.4"}},"timestamp":"2026-05-09T10:00:01Z"}}"#
+        )
+        .unwrap();
+        file.flush().unwrap();
+
+        let transcript = transcript_from_json_or_jsonl(file.path()).unwrap();
+        let messages = transcript.messages();
+
+        assert_eq!(messages.len(), 2);
+        assert!(matches!(&messages[0], Message::User { text, .. } if text == "write tests"));
+        assert!(matches!(&messages[1], Message::Assistant { text, .. } if text == "I will update the test file."));
+    }
+
+    #[test]
+    fn update_prompt_from_tool_refreshes_copilot_model_from_event_stream() {
+        let mut file = tempfile::NamedTempFile::with_suffix(".jsonl").unwrap();
+        writeln!(
+            file,
+            r#"{{"type":"user.message","data":{{"content":"add tests"}},"timestamp":"2026-05-09T10:00:00Z"}}"#
+        )
+        .unwrap();
+        writeln!(
+            file,
+            r#"{{"type":"assistant.message","data":{{"content":"Done","modelId":"copilot/gpt-5.4"}},"timestamp":"2026-05-09T10:00:01Z"}}"#
+        )
+        .unwrap();
+        file.flush().unwrap();
+
+        let metadata = HashMap::from([(
+            "transcript_path".to_string(),
+            file.path().to_string_lossy().to_string(),
+        )]);
+
+        let result = update_prompt_from_tool("github-copilot", "session-1", Some(&metadata), "unknown");
+
+        match result {
+            PromptUpdateResult::Updated(transcript, model) => {
+                assert_eq!(model, "copilot/gpt-5.4");
+                assert_eq!(transcript.messages().len(), 2);
+            }
+            PromptUpdateResult::Unchanged => panic!("expected Updated result"),
+            PromptUpdateResult::Failed(error) => panic!("unexpected error: {error}"),
+        }
     }
 }
 

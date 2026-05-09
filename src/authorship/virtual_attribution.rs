@@ -32,6 +32,99 @@ pub struct VirtualAttributions {
     pub sessions: BTreeMap<String, SessionRecord>,
 }
 
+fn checkpoint_prompt_record(
+    agent_id: &crate::authorship::working_log::AgentId,
+    checkpoint: &crate::authorship::working_log::Checkpoint,
+    human_author: &Option<String>,
+) -> PromptRecord {
+    PromptRecord {
+        agent_id: agent_id.clone(),
+        human_author: human_author.clone(),
+        messages: checkpoint
+            .transcript
+            .as_ref()
+            .map(|t| t.messages().to_vec())
+            .unwrap_or_default(),
+        total_additions: 0,
+        total_deletions: 0,
+        accepted_lines: 0,
+        overriden_lines: 0,
+        custom_attributes: None,
+        messages_url: None,
+    }
+}
+
+fn session_prompt_id(session_id: &str, trace_id: Option<&str>) -> String {
+    trace_id
+        .filter(|trace| !trace.trim().is_empty())
+        .map(|trace| format!("{}::{}", session_id, trace))
+        .unwrap_or_else(|| session_id.to_string())
+}
+
+fn session_metrics_lookup_key(prompt_id: &str) -> &str {
+    if prompt_id.starts_with("s_") {
+        prompt_id.split("::").next().unwrap_or(prompt_id)
+    } else {
+        prompt_id
+    }
+}
+
+fn record_checkpoint_agent_metadata(
+    prompts: &mut BTreeMap<String, BTreeMap<String, PromptRecord>>,
+    sessions: &mut BTreeMap<String, SessionRecord>,
+    session_additions: &mut HashMap<String, u32>,
+    session_deletions: &mut HashMap<String, u32>,
+    initial_only_prompt_ids: &mut HashSet<String>,
+    checkpoint: &crate::authorship::working_log::Checkpoint,
+    agent_id: &crate::authorship::working_log::AgentId,
+    human_author: &Option<String>,
+) {
+    if checkpoint.trace_id.is_some() {
+        let session_id = crate::authorship::authorship_log_serialization::generate_session_id(
+            &agent_id.id,
+            &agent_id.tool,
+        );
+
+        sessions.insert(
+            session_id.clone(),
+            SessionRecord {
+                agent_id: agent_id.clone(),
+                human_author: human_author.clone(),
+                custom_attributes: None,
+            },
+        );
+
+        let prompt_id = session_prompt_id(&session_id, checkpoint.trace_id.as_deref());
+        prompts
+            .entry(prompt_id.clone())
+            .or_insert_with(BTreeMap::new)
+            .insert(
+                String::new(),
+                checkpoint_prompt_record(agent_id, checkpoint, human_author),
+            );
+        initial_only_prompt_ids.remove(&prompt_id);
+
+        *session_additions.entry(session_id.clone()).or_insert(0) += checkpoint.line_stats.additions;
+        *session_deletions.entry(session_id).or_insert(0) += checkpoint.line_stats.deletions;
+    } else {
+        let prompt_id = crate::authorship::authorship_log_serialization::generate_short_hash(
+            &agent_id.id,
+            &agent_id.tool,
+        );
+        prompts
+            .entry(prompt_id.clone())
+            .or_insert_with(BTreeMap::new)
+            .insert(
+                String::new(),
+                checkpoint_prompt_record(agent_id, checkpoint, human_author),
+            );
+        initial_only_prompt_ids.remove(&prompt_id);
+
+        *session_additions.entry(prompt_id.clone()).or_insert(0) += checkpoint.line_stats.additions;
+        *session_deletions.entry(prompt_id).or_insert(0) += checkpoint.line_stats.deletions;
+    }
+}
+
 impl VirtualAttributions {
     /// Create a new VirtualAttributions for the given base commit with initial pathspecs
     pub async fn new_for_base_commit(
@@ -451,69 +544,16 @@ impl VirtualAttributions {
         for checkpoint in &checkpoints {
             // Add prompts or sessions from checkpoint
             if let Some(agent_id) = &checkpoint.agent_id {
-                let is_session_format = checkpoint.trace_id.is_some();
-
-                if is_session_format {
-                    // New format: derive session_id from this checkpoint's own agent_id
-                    let session_id =
-                        crate::authorship::authorship_log_serialization::generate_session_id(
-                            &agent_id.id,
-                            &agent_id.tool,
-                        );
-
-                    let session_record = SessionRecord {
-                        agent_id: agent_id.clone(),
-                        human_author: human_author.clone(),
-                        custom_attributes: None,
-                    };
-
-                    sessions.insert(session_id.clone(), session_record);
-
-                    // Track additions/deletions keyed by session_id
-                    *session_additions.entry(session_id.clone()).or_insert(0) +=
-                        checkpoint.line_stats.additions;
-                    *session_deletions.entry(session_id).or_insert(0) +=
-                        checkpoint.line_stats.deletions;
-                } else {
-                    // Old format: use existing prompts logic
-                    let author_id =
-                        crate::authorship::authorship_log_serialization::generate_short_hash(
-                            &agent_id.id,
-                            &agent_id.tool,
-                        );
-                    // For working log checkpoints, use empty string as commit_sha since they're uncommitted
-                    // Always overwrite with the latest checkpoint for this agent so refreshed
-                    // transcripts/models from post-commit aren't lost.
-                    let prompt_record = crate::authorship::authorship_log::PromptRecord {
-                        agent_id: agent_id.clone(),
-                        human_author: human_author.clone(),
-                        messages: checkpoint
-                            .transcript
-                            .as_ref()
-                            .map(|t| t.messages().to_vec())
-                            .unwrap_or_default(),
-                        total_additions: 0,
-                        total_deletions: 0,
-                        accepted_lines: 0,
-                        overriden_lines: 0,
-                        custom_attributes: None,
-                        messages_url: None,
-                    };
-
-                    prompts
-                        .entry(author_id.clone())
-                        .or_insert_with(BTreeMap::new)
-                        .insert(String::new(), prompt_record);
-                    // This prompt was actively used in a checkpoint, so it's not
-                    // INITIAL-only (even if it was also in INITIAL).
-                    initial_only_prompt_ids.remove(&author_id);
-
-                    // Track additions and deletions from checkpoint line_stats
-                    *session_additions.entry(author_id.clone()).or_insert(0) +=
-                        checkpoint.line_stats.additions;
-                    *session_deletions.entry(author_id).or_insert(0) +=
-                        checkpoint.line_stats.deletions;
-                }
+                record_checkpoint_agent_metadata(
+                    &mut prompts,
+                    &mut sessions,
+                    &mut session_additions,
+                    &mut session_deletions,
+                    &mut initial_only_prompt_ids,
+                    checkpoint,
+                    agent_id,
+                    &human_author,
+                );
             }
 
             if checkpoint.kind == CheckpointKind::KnownHuman {
@@ -654,65 +694,16 @@ impl VirtualAttributions {
 
         for checkpoint in &checkpoints {
             if let Some(agent_id) = &checkpoint.agent_id {
-                let is_session_format = checkpoint.trace_id.is_some();
-
-                if is_session_format {
-                    // New format: derive session_id from this checkpoint's own agent_id
-                    let session_id =
-                        crate::authorship::authorship_log_serialization::generate_session_id(
-                            &agent_id.id,
-                            &agent_id.tool,
-                        );
-
-                    let session_record = SessionRecord {
-                        agent_id: agent_id.clone(),
-                        human_author: human_author.clone(),
-                        custom_attributes: None,
-                    };
-
-                    sessions.insert(session_id.clone(), session_record);
-
-                    // Track additions/deletions keyed by session_id
-                    *session_additions.entry(session_id.clone()).or_insert(0) +=
-                        checkpoint.line_stats.additions;
-                    *session_deletions.entry(session_id).or_insert(0) +=
-                        checkpoint.line_stats.deletions;
-                } else {
-                    // Old format: use existing prompts logic
-                    let author_id =
-                        crate::authorship::authorship_log_serialization::generate_short_hash(
-                            &agent_id.id,
-                            &agent_id.tool,
-                        );
-                    let prompt_record = crate::authorship::authorship_log::PromptRecord {
-                        agent_id: agent_id.clone(),
-                        human_author: human_author.clone(),
-                        messages: checkpoint
-                            .transcript
-                            .as_ref()
-                            .map(|t| t.messages().to_vec())
-                            .unwrap_or_default(),
-
-                        total_additions: 0,
-                        total_deletions: 0,
-                        accepted_lines: 0,
-                        overriden_lines: 0,
-
-                        custom_attributes: None,
-                        messages_url: None,
-                    };
-
-                    prompts
-                        .entry(author_id.clone())
-                        .or_insert_with(BTreeMap::new)
-                        .insert(String::new(), prompt_record);
-                    initial_only_prompt_ids.remove(&author_id);
-
-                    *session_additions.entry(author_id.clone()).or_insert(0) +=
-                        checkpoint.line_stats.additions;
-                    *session_deletions.entry(author_id.clone()).or_insert(0) +=
-                        checkpoint.line_stats.deletions;
-                }
+                record_checkpoint_agent_metadata(
+                    &mut prompts,
+                    &mut sessions,
+                    &mut session_additions,
+                    &mut session_deletions,
+                    &mut initial_only_prompt_ids,
+                    checkpoint,
+                    agent_id,
+                    &human_author,
+                );
             }
 
             if checkpoint.kind == CheckpointKind::KnownHuman {
@@ -845,65 +836,16 @@ impl VirtualAttributions {
 
         for checkpoint in &checkpoints {
             if let Some(agent_id) = &checkpoint.agent_id {
-                let is_session_format = checkpoint.trace_id.is_some();
-
-                if is_session_format {
-                    // New format: derive session_id from this checkpoint's own agent_id
-                    let session_id =
-                        crate::authorship::authorship_log_serialization::generate_session_id(
-                            &agent_id.id,
-                            &agent_id.tool,
-                        );
-
-                    let session_record = SessionRecord {
-                        agent_id: agent_id.clone(),
-                        human_author: human_author.clone(),
-                        custom_attributes: None,
-                    };
-
-                    sessions.insert(session_id.clone(), session_record);
-
-                    // Track additions/deletions keyed by session_id
-                    *session_additions.entry(session_id.clone()).or_insert(0) +=
-                        checkpoint.line_stats.additions;
-                    *session_deletions.entry(session_id).or_insert(0) +=
-                        checkpoint.line_stats.deletions;
-                } else {
-                    // Old format: use existing prompts logic
-                    let author_id =
-                        crate::authorship::authorship_log_serialization::generate_short_hash(
-                            &agent_id.id,
-                            &agent_id.tool,
-                        );
-                    let prompt_record = crate::authorship::authorship_log::PromptRecord {
-                        agent_id: agent_id.clone(),
-                        human_author: human_author.clone(),
-                        messages: checkpoint
-                            .transcript
-                            .as_ref()
-                            .map(|t| t.messages().to_vec())
-                            .unwrap_or_default(),
-
-                        total_additions: 0,
-                        total_deletions: 0,
-                        accepted_lines: 0,
-                        overriden_lines: 0,
-
-                        custom_attributes: None,
-                        messages_url: None,
-                    };
-
-                    prompts
-                        .entry(author_id.clone())
-                        .or_insert_with(BTreeMap::new)
-                        .insert(String::new(), prompt_record);
-                    initial_only_prompt_ids.remove(&author_id);
-
-                    *session_additions.entry(author_id.clone()).or_insert(0) +=
-                        checkpoint.line_stats.additions;
-                    *session_deletions.entry(author_id.clone()).or_insert(0) +=
-                        checkpoint.line_stats.deletions;
-                }
+                record_checkpoint_agent_metadata(
+                    &mut prompts,
+                    &mut sessions,
+                    &mut session_additions,
+                    &mut session_deletions,
+                    &mut initial_only_prompt_ids,
+                    checkpoint,
+                    agent_id,
+                    &human_author,
+                );
             }
 
             if checkpoint.kind == CheckpointKind::KnownHuman {
@@ -1560,6 +1502,20 @@ impl VirtualAttributions {
         use crate::git::repo_storage::InitialAttributions;
         use std::collections::{HashMap as StdHashMap, HashSet};
 
+        crate::diagnostics::append_debug_event(
+            "virtual_attributions_authorship_materialize_started",
+            serde_json::json!({
+                "repo": repo.canonical_workdir().to_string_lossy().to_string(),
+                "parentSha": parent_sha,
+                "commitSha": commit_sha,
+                "promptCount": self.prompts.len(),
+                "sessionCount": self.sessions.len(),
+                "initialOnlyPromptCount": self.initial_only_prompt_ids.len(),
+                "promptIdsSample": self.prompts.keys().take(5).cloned().collect::<Vec<_>>(),
+                "initialOnlyPromptIdsSample": self.initial_only_prompt_ids.iter().take(5).cloned().collect::<Vec<_>>(),
+            }),
+        );
+
         let mut authorship_log = AuthorshipLog::new();
         authorship_log.metadata.base_commit_sha = self.base_commit.clone();
         // Flatten the nested prompts map: take the most recent (first) prompt for each prompt_id
@@ -1968,6 +1924,19 @@ impl VirtualAttributions {
             sessions: initial_sessions,
         };
 
+        crate::diagnostics::append_debug_event(
+            "virtual_attributions_authorship_materialize_finished",
+            serde_json::json!({
+                "repo": repo.canonical_workdir().to_string_lossy().to_string(),
+                "parentSha": parent_sha,
+                "commitSha": commit_sha,
+                "promptCount": authorship_log.metadata.prompts.len(),
+                "sessionCount": authorship_log.metadata.sessions.len(),
+                "attestationFileCount": authorship_log.attestations.len(),
+                "promptIdsSample": authorship_log.metadata.prompts.keys().take(5).cloned().collect::<Vec<_>>(),
+            }),
+        );
+
         Ok((authorship_log, initial_attributions))
     }
 
@@ -2290,17 +2259,19 @@ impl VirtualAttributions {
         }
 
         // Update all prompt records with calculated metrics
-        for (session_id, commits) in prompts.iter_mut() {
+        for (prompt_id, commits) in prompts.iter_mut() {
+            let metrics_key = session_metrics_lookup_key(prompt_id);
             for prompt_record in commits.values_mut() {
-                prompt_record.total_additions = *session_additions.get(session_id).unwrap_or(&0);
-                prompt_record.total_deletions = *session_deletions.get(session_id).unwrap_or(&0);
+                prompt_record.total_additions = *session_additions.get(metrics_key).unwrap_or(&0);
+                prompt_record.total_deletions = *session_deletions.get(metrics_key).unwrap_or(&0);
                 prompt_record.accepted_lines =
-                    *session_accepted_lines.get(session_id).unwrap_or(&0);
+                    *session_accepted_lines.get(prompt_id).or_else(|| session_accepted_lines.get(metrics_key)).unwrap_or(&0);
                 prompt_record.overriden_lines =
-                    *session_overridden_lines.get(session_id).unwrap_or(&0);
+                    *session_overridden_lines.get(prompt_id).or_else(|| session_overridden_lines.get(metrics_key)).unwrap_or(&0);
             }
         }
     }
+
 
     /// Filter prompts and attributions to only include those from specific commits
     /// This is useful for range analysis where we only want to count AI contributions
@@ -2817,6 +2788,127 @@ fn ceil_char_boundary(content: &str, idx: usize) -> usize {
         i += 1;
     }
     i
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::authorship::attribution_tracker::LineAttribution;
+    use crate::authorship::transcript::{AiTranscript, Message};
+    use crate::authorship::working_log::{AgentId, Checkpoint, CheckpointKind};
+
+    #[test]
+    fn record_checkpoint_agent_metadata_for_session_format_creates_prompt_and_session() {
+        let agent_id = AgentId {
+            tool: "github-copilot".to_string(),
+            id: "verify-session".to_string(),
+            model: "copilot/gpt-5.4".to_string(),
+        };
+        let mut transcript = AiTranscript::new();
+        transcript.add_message(Message::user("Add one validation test".to_string(), None));
+
+        let checkpoint = Checkpoint {
+            kind: CheckpointKind::AiAgent,
+            diff: String::new(),
+            author: "ai".to_string(),
+            entries: Vec::new(),
+            timestamp: 0,
+            agent_id: Some(agent_id.clone()),
+            agent_metadata: None,
+            transcript: Some(transcript),
+            line_stats: Default::default(),
+            api_version: "checkpoint/1.0.0".to_string(),
+            git_ai_version: None,
+            known_human_metadata: None,
+            trace_id: Some("t_trace123".to_string()),
+        };
+
+        let mut prompts = BTreeMap::new();
+        let mut sessions = BTreeMap::new();
+        let mut session_additions = HashMap::new();
+        let mut session_deletions = HashMap::new();
+        let mut initial_only_prompt_ids = HashSet::new();
+        let human_author = Some("gaoang <gaoang@ruijie.com.cn>".to_string());
+
+        record_checkpoint_agent_metadata(
+            &mut prompts,
+            &mut sessions,
+            &mut session_additions,
+            &mut session_deletions,
+            &mut initial_only_prompt_ids,
+            &checkpoint,
+            &agent_id,
+            &human_author,
+        );
+
+        let session_id = crate::authorship::authorship_log_serialization::generate_session_id(
+            &agent_id.id,
+            &agent_id.tool,
+        );
+        let prompt_id = format!("{}::t_trace123", session_id);
+
+        assert!(sessions.contains_key(&session_id));
+        assert!(prompts.contains_key(&prompt_id));
+        assert_eq!(
+            prompts[&prompt_id].values().next().unwrap().agent_id.model,
+            "copilot/gpt-5.4"
+        );
+        assert_eq!(prompts[&prompt_id].values().next().unwrap().messages.len(), 1);
+    }
+
+    #[test]
+    fn calculate_and_update_prompt_metrics_supports_session_trace_prompt_ids() {
+        let prompt_id = "s_session123::t_trace456".to_string();
+        let mut prompts = BTreeMap::from([(
+            prompt_id.clone(),
+            BTreeMap::from([(
+                String::new(),
+                PromptRecord {
+                    agent_id: AgentId {
+                        tool: "github-copilot".to_string(),
+                        id: "verify-session".to_string(),
+                        model: "copilot/gpt-5.4".to_string(),
+                    },
+                    human_author: None,
+                    messages: Vec::new(),
+                    total_additions: 0,
+                    total_deletions: 0,
+                    accepted_lines: 0,
+                    overriden_lines: 0,
+                    custom_attributes: None,
+                    messages_url: None,
+                },
+            )]),
+        )]);
+
+        let attributions = HashMap::from([(
+            "src/test/java/com/ruijie/opreturnexchange/AITest.java".to_string(),
+            (
+                Vec::new(),
+                vec![LineAttribution {
+                    start_line: 22,
+                    end_line: 26,
+                    author_id: prompt_id.clone(),
+                    overrode: None,
+                }],
+            ),
+        )]);
+
+        let session_additions = HashMap::from([("s_session123".to_string(), 5)]);
+        let session_deletions = HashMap::from([("s_session123".to_string(), 0)]);
+
+        VirtualAttributions::calculate_and_update_prompt_metrics(
+            &mut prompts,
+            &attributions,
+            &session_additions,
+            &session_deletions,
+        );
+
+        let prompt_record = prompts[&prompt_id].values().next().unwrap();
+        assert_eq!(prompt_record.total_additions, 5);
+        assert_eq!(prompt_record.total_deletions, 0);
+        assert_eq!(prompt_record.accepted_lines, 5);
+    }
 }
 
 /// Compute attributions for a single file at a specific commit

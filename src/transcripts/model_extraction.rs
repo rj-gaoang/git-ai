@@ -79,7 +79,17 @@ fn extract_model_from_jsonl_tail(path: &Path) -> Result<Option<String>, Transcri
             .get("message")
             .and_then(|m| m.get("model"))
             .and_then(|v| v.as_str())
-            .or_else(|| json.get("model").and_then(|v| v.as_str()));
+            .or_else(|| json.get("model").and_then(|v| v.as_str()))
+            .or_else(|| {
+                json.get("data")
+                    .and_then(|data| data.get("modelId"))
+                    .and_then(|v| v.as_str())
+            })
+            .or_else(|| {
+                json.get("data")
+                    .and_then(|data| data.get("modelID"))
+                    .and_then(|v| v.as_str())
+            });
 
         if let Some(model) = candidate
             && model != "<synthetic>"
@@ -228,6 +238,23 @@ mod tests {
         let result = extract_model(&path, TranscriptFormat::CopilotEventStreamJsonl, None).unwrap();
         // No model field in this fixture
         assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_extract_model_copilot_event_stream_from_data_model_id() {
+        use std::io::Write;
+
+        let mut file = tempfile::NamedTempFile::with_suffix(".jsonl").unwrap();
+        writeln!(
+            file,
+            r#"{{"type":"assistant.message","data":{{"content":"Hi there","modelId":"copilot/gpt-5.4"}},"timestamp":"2026-05-09T10:00:01Z"}}"#
+        )
+        .unwrap();
+        file.flush().unwrap();
+
+        let result = extract_model(file.path(), TranscriptFormat::CopilotEventStreamJsonl, None)
+            .unwrap();
+        assert_eq!(result, Some("copilot/gpt-5.4".to_string()));
     }
 
     #[test]

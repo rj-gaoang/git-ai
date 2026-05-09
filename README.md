@@ -244,7 +244,9 @@ Agents make fewer mistakes and produce more maintainable code when they understa
 
 When a `git commit` succeeds, Git AI also schedules a background self-update check. If auto-updates are enabled and the running CLI is behind the selected release channel, Git AI fetches the latest verified release from GitHub in the background instead of blocking the commit.
 
-For GitHub Copilot in VS Code, Git AI scopes attribution to the current native hook tool call. If the hook payload omits file paths, Git AI falls back to the matching `tool_use_id` / `toolCallId` in the Copilot transcript instead of scanning the whole chat session, so unrelated edits from nearby tool calls are not mixed into the checkpoint.
+For GitHub Copilot in VS Code, Git AI scopes attribution to the current native hook tool call. If the hook payload omits file paths, Git AI falls back to the matching `tool_use_id` / `toolCallId` in the Copilot transcript instead of scanning the whole chat session, so unrelated edits from nearby tool calls are not mixed into the checkpoint. During post-commit refresh, Git AI also reloads prompt text and model metadata from that Copilot transcript so future uploads can include both fields.
+
+On Windows, if you are validating a locally built binary while an older installed `~/.git-ai/bin/git-ai.exe` is still locked, rerun `install-hooks` from the binary you want Copilot to execute, or repoint `~/.copilot/hooks/git-ai.json` to that binary. Replacement daemon runtimes repoint Git trace2 pipes and background sockets, but Copilot native hooks keep invoking whichever `git-ai.exe` path is configured in that hook JSON.
 
 #### Example Note
 `refs/notes/ai/commit_sha`
