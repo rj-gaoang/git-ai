@@ -46,7 +46,13 @@ fn extract_model_from_jsonl_tail(path: &Path) -> Result<Option<String>, Transcri
 }
 
 fn extract_model_from_copilot_event_stream_jsonl(path: &Path) -> Result<Option<String>, TranscriptError> {
-    extract_model_from_jsonl_tail_with(path, extract_copilot_model_candidate)
+    let tail_model = extract_model_from_jsonl_tail_with(path, extract_copilot_model_candidate)?;
+    if tail_model.is_some() {
+        return Ok(tail_model);
+    }
+
+    // VS Code chatSessions keeps selected model information in the initial snapshot.
+    extract_model_from_jsonl_head_with(path, extract_copilot_model_candidate, 50)
 }
 
 fn extract_model_from_jsonl_tail_with(
@@ -80,6 +86,38 @@ fn extract_model_from_jsonl_tail_with(
     let lines: Vec<String> = reader.lines().map_while(Result::ok).collect();
 
     for line in lines.iter().rev() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Ok(json) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+            continue;
+        };
+
+        if let Some(model) = extract_candidate(&json)
+            && model != "<synthetic>"
+        {
+            return Ok(Some(model.to_string()));
+        }
+    }
+
+    Ok(None)
+}
+
+fn extract_model_from_jsonl_head_with(
+    path: &Path,
+    extract_candidate: fn(&serde_json::Value) -> Option<String>,
+    max_lines: usize,
+) -> Result<Option<String>, TranscriptError> {
+    let file = match File::open(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => return Ok(None),
+        Err(_) => return Ok(None),
+    };
+
+    let reader = BufReader::new(file);
+    for line in reader.lines().map_while(Result::ok).take(max_lines) {
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
@@ -354,6 +392,33 @@ mod tests {
         let result = extract_model(file.path(), TranscriptFormat::CopilotEventStreamJsonl, None)
             .unwrap();
         assert_eq!(result, Some("copilot/gpt-5.4".to_string()));
+    }
+
+    #[test]
+    fn test_extract_model_copilot_event_stream_falls_back_to_head_for_large_files() {
+        use std::io::Write;
+
+        let mut file = tempfile::NamedTempFile::with_suffix(".jsonl").unwrap();
+        writeln!(
+            file,
+            r#"{{"kind":0,"v":{{"inputState":{{"selectedModel":{{"identifier":"copilot/gpt-5.4-mini"}}}},"requests":[{{"modelId":"copilot/gpt-5.4-mini"}}]}}}}"#
+        )
+        .unwrap();
+
+        for index in 0..4000 {
+            writeln!(
+                file,
+                r#"{{"kind":2,"k":["requests",{},"response"],"v":[{{"value":"filler"}}]}}"#,
+                index
+            )
+            .unwrap();
+        }
+
+        file.flush().unwrap();
+
+        let result = extract_model(file.path(), TranscriptFormat::CopilotEventStreamJsonl, None)
+            .unwrap();
+        assert_eq!(result, Some("copilot/gpt-5.4-mini".to_string()));
     }
 
     #[test]
