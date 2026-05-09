@@ -1,0 +1,34 @@
+src/transcripts/model_extraction.rs
+  s_62ad5d9390958d::t_7e2a742d8acff9 49-55,107-138,397-423
+---
+{
+  "schema_version": "authorship/3.1.0",
+  "git_ai_version": "2.1.7",
+  "x_user_id": "108",
+  "base_commit_sha": "3524b44077f2164e0433e41c938e93ee4ccba47b",
+  "prompts": {
+    "s_62ad5d9390958d::t_7e2a742d8acff9": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "251a8065-02b5-4f27-9cfa-eb3dd11a5bac",
+        "model": "unknown"
+      },
+      "human_author": "gaoang <gaoang@ruijie.com.cn>",
+      "messages": [],
+      "total_additions": 66,
+      "total_deletions": 1,
+      "accepted_lines": 530,
+      "overriden_lines": 0
+    }
+  },
+  "sessions": {
+    "s_62ad5d9390958d": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "251a8065-02b5-4f27-9cfa-eb3dd11a5bac",
+        "model": "unknown"
+      },
+      "human_author": "gaoang <gaoang@ruijie.com.cn>"
+    }
+  }
+}
