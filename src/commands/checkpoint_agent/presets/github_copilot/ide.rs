@@ -174,7 +174,8 @@ pub(super) fn parse_vscode_native_hooks(
         .to_string();
 
     // Extract file paths from tool_input and tool_response only (not session-level data)
-    let mut extracted_paths = extract_filepaths_from_current_copilot_tool_call(
+    let (mut extracted_paths, mut path_extraction_source) =
+        extract_filepaths_from_current_copilot_tool_call(
         tool_input,
         tool_response,
         cwd,
@@ -211,6 +212,22 @@ pub(super) fn parse_vscode_native_hooks(
             &tool_use_id,
             tool_name,
             cwd,
+        );
+        if !extracted_paths.is_empty() {
+            path_extraction_source = CopilotPathExtractionSource::ExactTranscriptToolCall;
+        }
+    }
+
+    if hook_event_name == "PostToolUse" {
+        append_copilot_native_hook_path_debug_event(
+            hook_event_name,
+            tool_name,
+            &tool_use_id,
+            cwd,
+            transcript_path.as_deref(),
+            chat_session_path.as_deref(),
+            path_extraction_source,
+            &extracted_paths,
         );
     }
 
@@ -345,13 +362,61 @@ const COPILOT_TOOL_CALL_ID_KEYS: &[&str] = &[
 
 const COPILOT_TOOL_CALL_NAME_KEYS: &[&str] = &["toolName", "tool_name", "name"];
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CopilotPathExtractionSource {
+    CurrentToolCall,
+    HookPayloadFallback,
+    ExactTranscriptToolCall,
+    None,
+}
+
+impl CopilotPathExtractionSource {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::CurrentToolCall => "current_tool_call",
+            Self::HookPayloadFallback => "hook_payload_fallback",
+            Self::ExactTranscriptToolCall => "exact_transcript_tool_call",
+            Self::None => "none",
+        }
+    }
+}
+
+fn append_copilot_native_hook_path_debug_event(
+    hook_event_name: &str,
+    tool_name: &str,
+    tool_use_id: &str,
+    cwd: &str,
+    transcript_path: Option<&str>,
+    chat_session_path: Option<&str>,
+    path_extraction_source: CopilotPathExtractionSource,
+    extracted_paths: &[PathBuf],
+) {
+    crate::diagnostics::append_debug_event(
+        "copilot_native_hook_tool_call_paths_parsed",
+        serde_json::json!({
+            "hookEventName": hook_event_name,
+            "toolName": tool_name,
+            "toolUseId": tool_use_id,
+            "cwd": cwd.replace('\\', "/"),
+            "transcriptPath": transcript_path,
+            "chatSessionPath": chat_session_path,
+            "pathExtractionSource": path_extraction_source.as_str(),
+            "parsedFileCount": extracted_paths.len(),
+            "parsedFilepaths": extracted_paths
+                .iter()
+                .map(|path| path.to_string_lossy().replace('\\', "/"))
+                .collect::<Vec<_>>(),
+        }),
+    );
+}
+
 fn extract_filepaths_from_current_copilot_tool_call(
     tool_input: Option<&serde_json::Value>,
     tool_response: Option<&serde_json::Value>,
     cwd: &str,
     tool_use_id: &str,
     tool_name: &str,
-) -> Vec<PathBuf> {
+) -> (Vec<PathBuf>, CopilotPathExtractionSource) {
     for value in [tool_input, tool_response].into_iter().flatten() {
         if let Some(paths) = extract_filepaths_from_matching_copilot_tool_call(
             value,
@@ -362,11 +427,17 @@ fn extract_filepaths_from_current_copilot_tool_call(
             cwd,
         ) && !paths.is_empty()
         {
-            return paths;
+            return (paths, CopilotPathExtractionSource::CurrentToolCall);
         }
     }
 
-    super::extract_filepaths_from_vscode_hook_payload(tool_input, tool_response, cwd)
+    let fallback_paths = super::extract_filepaths_from_vscode_hook_payload(tool_input, tool_response, cwd);
+    let source = if fallback_paths.is_empty() {
+        CopilotPathExtractionSource::None
+    } else {
+        CopilotPathExtractionSource::HookPayloadFallback
+    };
+    (fallback_paths, source)
 }
 
 fn extract_filepaths_from_exact_copilot_tool_call(

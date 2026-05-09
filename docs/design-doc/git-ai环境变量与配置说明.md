@@ -228,7 +228,9 @@ $env:GIT_AI_ASYNC_MODE
 Get-Content "$env:USERPROFILE\.git-ai\logs\debug.jsonl" -Tail 120
 ```
 
-重点看 checkpoint 事件：`checkpoint_explicit_path_resolution`、`checkpoint_attribution_decision`、`checkpoint_no_entries`、`known_human_checkpoint_rejected`。
+如果是 VS Code native hook 的 `PostToolUse` 显示成功，但 working log 里没有对应 `AiAgent` checkpoint，先看 `copilot_native_hook_tool_call_paths_parsed`（确认 `toolUseId`、`parsedFilepaths`、`pathExtractionSource`），再看 `daemon_checkpoint_request_resolved_files`（确认 `requestFilepaths`、`resolvedFileCount`、`reason`）。
+
+再结合 checkpoint 事件：`checkpoint_explicit_path_resolution`、`checkpoint_attribution_decision`、`checkpoint_no_entries`、`known_human_checkpoint_rejected`。
 
 ### 统计未上传
 

@@ -1407,6 +1407,12 @@ fn daemon_reflog_delta_from_offsets(
 
 fn apply_checkpoint_side_effect(request: CheckpointRequest) -> Result<(), GitAiError> {
     if request.files.is_empty() {
+        append_checkpoint_request_resolution_debug_event(
+            &request,
+            None,
+            &[],
+            Some("request_has_no_files"),
+        );
         return Ok(());
     }
 
@@ -1521,6 +1527,12 @@ fn resolve_checkpoint_request(
     }
 
     if files.is_empty() {
+        append_checkpoint_request_resolution_debug_event(
+            request,
+            Some(repo),
+            &files,
+            Some("no_resolved_files_after_request_filtering"),
+        );
         return Ok(None);
     }
 
@@ -1528,6 +1540,8 @@ fn resolve_checkpoint_request(
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis();
+
+    append_checkpoint_request_resolution_debug_event(request, Some(repo), &files, None);
 
     Ok(Some(
         crate::daemon::checkpoint::ResolvedCheckpointExecution {
@@ -1537,6 +1551,37 @@ fn resolve_checkpoint_request(
             dirty_files,
         },
     ))
+}
+
+fn append_checkpoint_request_resolution_debug_event(
+    request: &CheckpointRequest,
+    repo: Option<&crate::git::repository::Repository>,
+    resolved_files: &[String],
+    reason: Option<&str>,
+) {
+    let requested_filepaths = request
+        .files
+        .iter()
+        .map(|file| file.path.to_string_lossy().replace('\\', "/"))
+        .collect::<Vec<_>>();
+
+    crate::diagnostics::append_debug_event(
+        "daemon_checkpoint_request_resolved_files",
+        json!({
+            "repo": repo
+                .map(|repo| repo.canonical_workdir().to_string_lossy().to_string())
+                .or_else(|| request.files.first().map(|file| file.repo_work_dir.to_string_lossy().to_string()))
+                .map(|path| path.replace('\\', "/")),
+            "traceId": request.trace_id,
+            "checkpointKind": request.checkpoint_kind.to_str(),
+            "toolUseId": request.metadata.get("tool_use_id"),
+            "requestFileCount": requested_filepaths.len(),
+            "requestFilepaths": requested_filepaths,
+            "resolvedFileCount": resolved_files.len(),
+            "resolvedFilepaths": resolved_files,
+            "reason": reason,
+        }),
+    );
 }
 
 fn compute_watermarks_from_stat(
