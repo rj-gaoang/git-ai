@@ -11,8 +11,10 @@ pub fn extract_model(
 ) -> Result<Option<String>, TranscriptError> {
     match format {
         TranscriptFormat::ClaudeJsonl
-        | TranscriptFormat::CopilotEventStreamJsonl
         | TranscriptFormat::GeminiJsonl => extract_model_from_jsonl_tail(path),
+        TranscriptFormat::CopilotEventStreamJsonl => {
+            extract_model_from_copilot_event_stream_jsonl(path)
+        }
         TranscriptFormat::CopilotSessionJson => extract_model_from_copilot_session_json(path),
         TranscriptFormat::AmpThreadJson => extract_model_from_amp_thread_json(path),
         TranscriptFormat::OpenCodeSqlite => extract_model_from_opencode_sqlite(path, session_id),
@@ -40,6 +42,17 @@ pub fn extract_model_from_droid_settings(
 }
 
 fn extract_model_from_jsonl_tail(path: &Path) -> Result<Option<String>, TranscriptError> {
+    extract_model_from_jsonl_tail_with(path, extract_generic_model_candidate)
+}
+
+fn extract_model_from_copilot_event_stream_jsonl(path: &Path) -> Result<Option<String>, TranscriptError> {
+    extract_model_from_jsonl_tail_with(path, extract_copilot_model_candidate)
+}
+
+fn extract_model_from_jsonl_tail_with(
+    path: &Path,
+    extract_candidate: fn(&serde_json::Value) -> Option<String>,
+) -> Result<Option<String>, TranscriptError> {
     let mut file = match File::open(path) {
         Ok(f) => f,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -75,23 +88,7 @@ fn extract_model_from_jsonl_tail(path: &Path) -> Result<Option<String>, Transcri
             continue;
         };
 
-        let candidate = json
-            .get("message")
-            .and_then(|m| m.get("model"))
-            .and_then(|v| v.as_str())
-            .or_else(|| json.get("model").and_then(|v| v.as_str()))
-            .or_else(|| {
-                json.get("data")
-                    .and_then(|data| data.get("modelId"))
-                    .and_then(|v| v.as_str())
-            })
-            .or_else(|| {
-                json.get("data")
-                    .and_then(|data| data.get("modelID"))
-                    .and_then(|v| v.as_str())
-            });
-
-        if let Some(model) = candidate
+        if let Some(model) = extract_candidate(&json)
             && model != "<synthetic>"
         {
             return Ok(Some(model.to_string()));
@@ -99,6 +96,82 @@ fn extract_model_from_jsonl_tail(path: &Path) -> Result<Option<String>, Transcri
     }
 
     Ok(None)
+}
+
+fn extract_generic_model_candidate(json: &serde_json::Value) -> Option<String> {
+    json.get("message")
+        .and_then(|m| m.get("model"))
+        .and_then(|v| v.as_str())
+        .or_else(|| json.get("model").and_then(|v| v.as_str()))
+        .or_else(|| {
+            json.get("data")
+                .and_then(|data| data.get("modelId"))
+                .and_then(|v| v.as_str())
+        })
+        .or_else(|| {
+            json.get("data")
+                .and_then(|data| data.get("modelID"))
+                .and_then(|v| v.as_str())
+        })
+        .map(String::from)
+}
+
+fn extract_copilot_model_candidate(json: &serde_json::Value) -> Option<String> {
+    extract_generic_model_candidate(json)
+        .or_else(|| json.get("data").and_then(extract_copilot_model_hint))
+        .or_else(|| extract_copilot_model_hint(json))
+}
+
+fn extract_copilot_model_hint(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::Object(map) => {
+            if let Some(model_id) = map.get("modelId").and_then(|v| v.as_str())
+                && model_id.starts_with("copilot/")
+            {
+                return Some(model_id.to_string());
+            }
+            if let Some(model_id) = map.get("modelID").and_then(|v| v.as_str())
+                && model_id.starts_with("copilot/")
+            {
+                return Some(model_id.to_string());
+            }
+            if let Some(model) = map.get("model").and_then(|v| v.as_str())
+                && model.starts_with("copilot/")
+            {
+                return Some(model.to_string());
+            }
+            if let Some(identifier) = map
+                .get("selectedModel")
+                .and_then(|v| v.get("identifier"))
+                .and_then(|v| v.as_str())
+                && identifier.starts_with("copilot/")
+            {
+                return Some(identifier.to_string());
+            }
+            if let Some(identifier) = map
+                .get("inputState")
+                .and_then(|v| v.get("selectedModel"))
+                .and_then(|v| v.get("identifier"))
+                .and_then(|v| v.as_str())
+                && identifier.starts_with("copilot/")
+            {
+                return Some(identifier.to_string());
+            }
+
+            for nested in map.values() {
+                if let Some(found) = extract_copilot_model_hint(nested) {
+                    return Some(found);
+                }
+            }
+
+            None
+        }
+        serde_json::Value::Array(items) => items.iter().find_map(extract_copilot_model_hint),
+        serde_json::Value::String(text) => text
+            .starts_with("copilot/")
+            .then(|| text.to_string()),
+        _ => None,
+    }
 }
 
 fn extract_model_from_copilot_session_json(path: &Path) -> Result<Option<String>, TranscriptError> {
@@ -113,15 +186,24 @@ fn extract_model_from_copilot_session_json(path: &Path) -> Result<Option<String>
     };
 
     let model = json
-        .get("requests")
-        .and_then(|v| v.as_array())
-        .and_then(|arr| {
-            arr.iter().find_map(|req| {
-                req.get("modelId")
-                    .and_then(|v| v.as_str())
-                    .map(String::from)
-            })
-        });
+        .get("inputState")
+        .and_then(|state| state.get("selectedModel"))
+        .and_then(|model| model.get("identifier"))
+        .and_then(|v| v.as_str())
+        .map(String::from)
+        .or_else(|| {
+            json.get("requests")
+                .and_then(|v| v.as_array())
+                .and_then(|arr| {
+                    arr.iter().find_map(|req| {
+                        req.get("modelId")
+                            .or_else(|| req.get("modelID"))
+                            .and_then(|v| v.as_str())
+                            .map(String::from)
+                    })
+                })
+        })
+        .or_else(|| extract_copilot_model_hint(&json));
 
     Ok(model)
 }
@@ -253,6 +335,40 @@ mod tests {
         file.flush().unwrap();
 
         let result = extract_model(file.path(), TranscriptFormat::CopilotEventStreamJsonl, None)
+            .unwrap();
+        assert_eq!(result, Some("copilot/gpt-5.4".to_string()));
+    }
+
+    #[test]
+    fn test_extract_model_copilot_event_stream_from_selected_model_identifier() {
+        use std::io::Write;
+
+        let mut file = tempfile::NamedTempFile::with_suffix(".jsonl").unwrap();
+        writeln!(
+            file,
+            r#"{{"type":"session.start","data":{{"conversation":{{"selectedModel":{{"identifier":"copilot/gpt-5.4"}}}}}},"timestamp":"2026-05-09T10:00:01Z"}}"#
+        )
+        .unwrap();
+        file.flush().unwrap();
+
+        let result = extract_model(file.path(), TranscriptFormat::CopilotEventStreamJsonl, None)
+            .unwrap();
+        assert_eq!(result, Some("copilot/gpt-5.4".to_string()));
+    }
+
+    #[test]
+    fn test_extract_model_copilot_session_from_selected_model_identifier() {
+        use std::io::Write;
+
+        let mut file = tempfile::NamedTempFile::with_suffix(".json").unwrap();
+        writeln!(
+            file,
+            r#"{{"inputState":{{"selectedModel":{{"identifier":"copilot/gpt-5.4"}}}},"requests":[]}}"#
+        )
+        .unwrap();
+        file.flush().unwrap();
+
+        let result = extract_model(file.path(), TranscriptFormat::CopilotSessionJson, None)
             .unwrap();
         assert_eq!(result, Some("copilot/gpt-5.4".to_string()));
     }

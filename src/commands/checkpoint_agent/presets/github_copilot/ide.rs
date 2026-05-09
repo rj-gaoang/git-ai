@@ -182,7 +182,10 @@ pub(super) fn parse_vscode_native_hooks(
         tool_name,
     );
 
-    let transcript_path = transcript_path_from_hook_data(data).map(|s| s.to_string());
+    let transcript_path = transcript_path_from_hook_data(data)
+        .or_else(|| chat_session_path_from_hook_data(data))
+        .map(|s| s.to_string());
+    let chat_session_path = chat_session_path_from_hook_data(data).map(|s| s.to_string());
 
     if let Some(ref path) = transcript_path
         && looks_like_claude_transcript_path(path)
@@ -217,28 +220,25 @@ pub(super) fn parse_vscode_native_hooks(
     let mut metadata = HashMap::new();
     if let Some(ref path) = transcript_path {
         metadata.insert("transcript_path".to_string(), path.clone());
+    }
+    if let Some(ref path) = chat_session_path {
         metadata.insert("chat_session_path".to_string(), path.clone());
     }
 
-    // Determine transcript format: newer native uses EventStreamJsonl
-    let transcript_format = if transcript_path
+    let transcript_format = transcript_path
         .as_deref()
-        .map(|p| p.contains("/workspaceStorage/") || p.contains("\\workspaceStorage\\"))
-        .unwrap_or(false)
-    {
-        TranscriptFormat::CopilotEventStreamJsonl
-    } else {
-        TranscriptFormat::CopilotSessionJson
-    };
+        .map(infer_copilot_transcript_format)
+        .unwrap_or(TranscriptFormat::CopilotSessionJson);
 
     let context = PresetContext {
         agent_id: AgentId {
             tool: "github-copilot".to_string(),
             id: session_id.clone(),
-            model: transcript_path
+            model: chat_session_path
                 .as_ref()
+                .or(transcript_path.as_ref())
                 .and_then(|tp| {
-                    let sweep_format = match transcript_format {
+                    let sweep_format = match infer_copilot_transcript_format(tp.as_str()) {
                         TranscriptFormat::CopilotEventStreamJsonl => {
                             crate::transcripts::sweep::TranscriptFormat::CopilotEventStreamJsonl
                         }
@@ -560,15 +560,25 @@ fn normalize_copilot_tool_arguments(value: &serde_json::Value) -> serde_json::Va
 }
 
 fn transcript_path_from_hook_data(data: &serde_json::Value) -> Option<&str> {
-    parse::optional_str_multi(
-        data,
-        &[
-            "transcript_path",
-            "transcriptPath",
-            "chat_session_path",
-            "chatSessionPath",
-        ],
-    )
+    parse::optional_str_multi(data, &["transcript_path", "transcriptPath"])
+}
+
+fn chat_session_path_from_hook_data(data: &serde_json::Value) -> Option<&str> {
+    parse::optional_str_multi(data, &["chat_session_path", "chatSessionPath"])
+}
+
+fn infer_copilot_transcript_format(path: &str) -> TranscriptFormat {
+    let is_workspace_storage = path.contains("/workspaceStorage/") || path.contains("\\workspaceStorage\\");
+    let is_jsonl = Path::new(path)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("jsonl"));
+
+    if is_jsonl || is_workspace_storage {
+        TranscriptFormat::CopilotEventStreamJsonl
+    } else {
+        TranscriptFormat::CopilotSessionJson
+    }
 }
 
 fn looks_like_claude_transcript_path(path: &str) -> bool {
@@ -1103,6 +1113,70 @@ mod tests {
         match &events[0] {
             ParsedHookEvent::PostFileEdit(e) => {
                 assert_eq!(e.file_paths, vec![cwd.join("src/main.rs")]);
+                assert!(matches!(
+                    e.transcript_source,
+                    Some(TranscriptSource {
+                        format: TranscriptFormat::CopilotEventStreamJsonl,
+                        ..
+                    })
+                ));
+            }
+            _ => panic!("Expected PostFileEdit"),
+        }
+    }
+
+    #[test]
+    fn test_copilot_native_prefers_chat_session_path_for_model() {
+        let temp = tempfile::tempdir().unwrap();
+        let cwd = temp.path().join("repo");
+        std::fs::create_dir_all(&cwd).unwrap();
+
+        let transcript_dir = temp
+            .path()
+            .join("workspaceStorage")
+            .join("abc")
+            .join("GitHub.copilot-chat")
+            .join("transcripts");
+        std::fs::create_dir_all(&transcript_dir).unwrap();
+
+        let transcript_path = transcript_dir.join("session.jsonl");
+        let transcript = r#"{"type":"assistant.message","data":{"toolRequests":[{"toolCallId":"call_exact","name":"apply_patch","arguments":"{\"input\":\"*** Begin Patch\\n*** Update File: src/main.rs\\n+fn main() {}\\n*** End Patch\"}"}]}}
+{"type":"tool.execution_start","data":{"toolCallId":"call_exact","toolName":"apply_patch","arguments":{"input":"..."}}}
+"#;
+        std::fs::write(&transcript_path, transcript).unwrap();
+
+        let chat_session_path = temp.path().join("session.json");
+        std::fs::write(
+            &chat_session_path,
+            r#"{"inputState":{"selectedModel":{"identifier":"copilot/gpt-5.4"}},"requests":[]}"#,
+        )
+        .unwrap();
+
+        let input = json!({
+            "hook_event_name": "PostToolUse",
+            "cwd": cwd.to_string_lossy(),
+            "tool_name": "apply_patch",
+            "session_id": "session-1",
+            "tool_use_id": "call_exact",
+            "tool_input": "...",
+            "tool_response": "",
+            "transcript_path": transcript_path.to_string_lossy(),
+            "chat_session_path": chat_session_path.to_string_lossy()
+        })
+        .to_string();
+
+        let events = GithubCopilotPreset
+            .parse(&input, "t_test123456789a")
+            .unwrap();
+
+        match &events[0] {
+            ParsedHookEvent::PostFileEdit(e) => {
+                assert_eq!(e.context.agent_id.model, "copilot/gpt-5.4");
+                assert_eq!(e.file_paths, vec![cwd.join("src/main.rs")]);
+                assert_eq!(
+                    e.context.metadata.get("chat_session_path").map(String::as_str),
+                    Some(chat_session_path.to_string_lossy().as_ref())
+                );
                 assert!(matches!(
                     e.transcript_source,
                     Some(TranscriptSource {
