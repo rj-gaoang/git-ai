@@ -174,7 +174,7 @@ pub(super) fn parse_vscode_native_hooks(
         .to_string();
 
     // Extract file paths from tool_input and tool_response only (not session-level data)
-    let extracted_paths = extract_filepaths_from_current_copilot_tool_call(
+    let mut extracted_paths = extract_filepaths_from_current_copilot_tool_call(
         tool_input,
         tool_response,
         cwd,
@@ -198,6 +198,17 @@ pub(super) fn parse_vscode_native_hooks(
             "Skipping VS Code hook for non-Copilot session (tool_name: {}).",
             tool_name,
         )));
+    }
+
+    if extracted_paths.is_empty()
+        && let Some(path) = transcript_path.as_deref()
+    {
+        extracted_paths = extract_filepaths_from_exact_copilot_tool_call(
+            path,
+            &tool_use_id,
+            tool_name,
+            cwd,
+        );
     }
 
     let tool_class = classify_copilot_tool(tool_name);
@@ -324,6 +335,16 @@ pub(super) fn parse_vscode_native_hooks(
 // IDE-specific helpers
 // ---------------------------------------------------------------------------
 
+const COPILOT_TOOL_CALL_ID_KEYS: &[&str] = &[
+    "toolCallId",
+    "tool_call_id",
+    "toolUseId",
+    "tool_use_id",
+    "id",
+];
+
+const COPILOT_TOOL_CALL_NAME_KEYS: &[&str] = &["toolName", "tool_name", "name"];
+
 fn extract_filepaths_from_current_copilot_tool_call(
     tool_input: Option<&serde_json::Value>,
     tool_response: Option<&serde_json::Value>,
@@ -331,20 +352,11 @@ fn extract_filepaths_from_current_copilot_tool_call(
     tool_use_id: &str,
     tool_name: &str,
 ) -> Vec<PathBuf> {
-    const ID_KEYS: &[&str] = &[
-        "toolCallId",
-        "tool_call_id",
-        "toolUseId",
-        "tool_use_id",
-        "id",
-    ];
-    const NAME_KEYS: &[&str] = &["toolName", "tool_name", "name"];
-
     for value in [tool_input, tool_response].into_iter().flatten() {
         if let Some(paths) = extract_filepaths_from_matching_copilot_tool_call(
             value,
-            ID_KEYS,
-            NAME_KEYS,
+            COPILOT_TOOL_CALL_ID_KEYS,
+            COPILOT_TOOL_CALL_NAME_KEYS,
             tool_use_id,
             tool_name,
             cwd,
@@ -355,6 +367,112 @@ fn extract_filepaths_from_current_copilot_tool_call(
     }
 
     super::extract_filepaths_from_vscode_hook_payload(tool_input, tool_response, cwd)
+}
+
+fn extract_filepaths_from_exact_copilot_tool_call(
+    transcript_path: &str,
+    tool_use_id: &str,
+    tool_name: &str,
+    cwd: &str,
+) -> Vec<PathBuf> {
+    if is_copilot_event_stream_transcript(transcript_path) {
+        return extract_filepaths_from_copilot_event_stream_jsonl(
+            transcript_path,
+            tool_use_id,
+            tool_name,
+            cwd,
+        );
+    }
+
+    extract_filepaths_from_copilot_session_json(transcript_path, tool_use_id, tool_name, cwd)
+}
+
+fn is_copilot_event_stream_transcript(transcript_path: &str) -> bool {
+    if Path::new(transcript_path)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("jsonl"))
+    {
+        return true;
+    }
+
+    let normalized = transcript_path.replace('\\', "/").to_ascii_lowercase();
+    normalized.contains("/workspacestorage/") || normalized.contains("/transcripts/")
+}
+
+fn extract_filepaths_from_copilot_event_stream_jsonl(
+    transcript_path: &str,
+    tool_use_id: &str,
+    tool_name: &str,
+    cwd: &str,
+) -> Vec<PathBuf> {
+    let Ok(jsonl_content) = std::fs::read_to_string(transcript_path) else {
+        return Vec::new();
+    };
+
+    for line in jsonl_content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let Ok(entry) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+            continue;
+        };
+
+        if let Some(paths) = find_matching_copilot_tool_call_paths(&entry, tool_use_id, tool_name, cwd)
+            && !paths.is_empty()
+        {
+            return paths;
+        }
+    }
+
+    Vec::new()
+}
+
+fn extract_filepaths_from_copilot_session_json(
+    transcript_path: &str,
+    tool_use_id: &str,
+    tool_name: &str,
+    cwd: &str,
+) -> Vec<PathBuf> {
+    let Ok(session_json) = std::fs::read_to_string(transcript_path) else {
+        return Vec::new();
+    };
+    let Ok(entry) = serde_json::from_str::<serde_json::Value>(&session_json) else {
+        return Vec::new();
+    };
+
+    find_matching_copilot_tool_call_paths(&entry, tool_use_id, tool_name, cwd).unwrap_or_default()
+}
+
+fn find_matching_copilot_tool_call_paths(
+    value: &serde_json::Value,
+    tool_use_id: &str,
+    tool_name: &str,
+    cwd: &str,
+) -> Option<Vec<PathBuf>> {
+    if let Some(paths) = extract_filepaths_from_matching_copilot_tool_call(
+        value,
+        COPILOT_TOOL_CALL_ID_KEYS,
+        COPILOT_TOOL_CALL_NAME_KEYS,
+        tool_use_id,
+        tool_name,
+        cwd,
+    ) && !paths.is_empty()
+    {
+        return Some(paths);
+    }
+
+    match value {
+        serde_json::Value::Object(map) => map
+            .values()
+            .find_map(|child| find_matching_copilot_tool_call_paths(child, tool_use_id, tool_name, cwd)),
+        serde_json::Value::Array(items) => items
+            .iter()
+            .find_map(|child| find_matching_copilot_tool_call_paths(child, tool_use_id, tool_name, cwd)),
+        _ => None,
+    }
 }
 
 fn extract_filepaths_from_matching_copilot_tool_call(
@@ -943,6 +1061,142 @@ mod tests {
             "tu-1__vscode-123",
             "tu-1__vscode-456"
         ));
+    }
+
+    #[test]
+    fn test_copilot_native_post_file_edit_uses_exact_transcript_tool_call_fallback() {
+        let temp = tempfile::tempdir().unwrap();
+        let cwd = temp.path().join("repo");
+        std::fs::create_dir_all(&cwd).unwrap();
+
+        let transcript_dir = temp
+            .path()
+            .join("workspaceStorage")
+            .join("abc")
+            .join("GitHub.copilot-chat")
+            .join("transcripts");
+        std::fs::create_dir_all(&transcript_dir).unwrap();
+
+        let transcript_path = transcript_dir.join("session.jsonl");
+        let transcript = r#"{"type":"session.start","data":{"sessionId":"session-1","producer":"copilot-agent"}}
+{"type":"assistant.message","data":{"toolRequests":[{"toolCallId":"call_exact","name":"apply_patch","arguments":"{\"input\":\"*** Begin Patch\\n*** Update File: src/main.rs\\n+fn main() {}\\n*** End Patch\"}"}]}}
+{"type":"tool.execution_start","data":{"toolCallId":"call_exact","toolName":"apply_patch","arguments":{"input":"..."}}}
+"#;
+        std::fs::write(&transcript_path, transcript).unwrap();
+
+        let input = json!({
+            "hook_event_name": "PostToolUse",
+            "cwd": cwd.to_string_lossy(),
+            "tool_name": "apply_patch",
+            "session_id": "session-1",
+            "tool_use_id": "call_exact",
+            "tool_input": "...",
+            "tool_response": "",
+            "transcript_path": transcript_path.to_string_lossy()
+        })
+        .to_string();
+
+        let events = GithubCopilotPreset
+            .parse(&input, "t_test123456789a")
+            .unwrap();
+
+        match &events[0] {
+            ParsedHookEvent::PostFileEdit(e) => {
+                assert_eq!(e.file_paths, vec![cwd.join("src/main.rs")]);
+                assert!(matches!(
+                    e.transcript_source,
+                    Some(TranscriptSource {
+                        format: TranscriptFormat::CopilotEventStreamJsonl,
+                        ..
+                    })
+                ));
+            }
+            _ => panic!("Expected PostFileEdit"),
+        }
+    }
+
+    #[test]
+    fn test_copilot_native_transcript_fallback_accepts_vscode_suffix_tool_use_id() {
+        let temp = tempfile::tempdir().unwrap();
+        let cwd = temp.path().join("repo");
+        std::fs::create_dir_all(&cwd).unwrap();
+
+        let transcript_dir = temp
+            .path()
+            .join("workspaceStorage")
+            .join("abc")
+            .join("GitHub.copilot-chat")
+            .join("transcripts");
+        std::fs::create_dir_all(&transcript_dir).unwrap();
+
+        let transcript_path = transcript_dir.join("session.jsonl");
+        let transcript = r#"{"type":"assistant.message","data":{"toolRequests":[{"toolCallId":"call_exact","name":"apply_patch","arguments":"{\"input\":\"*** Begin Patch\\n*** Update File: src/main.rs\\n+fn main() {}\\n*** End Patch\"}"}]}}
+{"type":"tool.execution_start","data":{"toolCallId":"call_exact","toolName":"apply_patch","arguments":{"input":"..."}}}
+"#;
+        std::fs::write(&transcript_path, transcript).unwrap();
+
+        let input = json!({
+            "hook_event_name": "PostToolUse",
+            "cwd": cwd.to_string_lossy(),
+            "tool_name": "apply_patch",
+            "session_id": "session-1",
+            "tool_use_id": "call_exact__vscode-1777821655374",
+            "tool_input": "...",
+            "tool_response": "",
+            "transcript_path": transcript_path.to_string_lossy()
+        })
+        .to_string();
+
+        let events = GithubCopilotPreset
+            .parse(&input, "t_test123456789a")
+            .unwrap();
+
+        match &events[0] {
+            ParsedHookEvent::PostFileEdit(e) => {
+                assert_eq!(e.file_paths, vec![cwd.join("src/main.rs")]);
+            }
+            _ => panic!("Expected PostFileEdit"),
+        }
+    }
+
+    #[test]
+    fn test_copilot_native_transcript_fallback_ignores_other_tool_calls() {
+        let temp = tempfile::tempdir().unwrap();
+        let cwd = temp.path().join("repo");
+        std::fs::create_dir_all(&cwd).unwrap();
+
+        let transcript_dir = temp
+            .path()
+            .join("workspaceStorage")
+            .join("abc")
+            .join("GitHub.copilot-chat")
+            .join("transcripts");
+        std::fs::create_dir_all(&transcript_dir).unwrap();
+
+        let transcript_path = transcript_dir.join("session.jsonl");
+        let transcript = r#"{"type":"assistant.message","data":{"toolRequests":[{"toolCallId":"call_other","name":"apply_patch","arguments":"{\"input\":\"*** Begin Patch\\n*** Update File: src/other.rs\\n+fn other() {}\\n*** End Patch\"}"}]}}
+"#;
+        std::fs::write(&transcript_path, transcript).unwrap();
+
+        let input = json!({
+            "hook_event_name": "PostToolUse",
+            "cwd": cwd.to_string_lossy(),
+            "tool_name": "apply_patch",
+            "session_id": "session-1",
+            "tool_use_id": "call_exact",
+            "tool_input": "...",
+            "tool_response": "",
+            "transcript_path": transcript_path.to_string_lossy()
+        })
+        .to_string();
+
+        let result = GithubCopilotPreset.parse(&input, "t_test123456789a");
+        assert!(result.is_err());
+
+        let Err(GitAiError::PresetError(message)) = result else {
+            panic!("Expected PresetError when no exact tool-call paths are found");
+        };
+        assert!(message.contains("No editable file paths found"));
     }
 
     #[test]
