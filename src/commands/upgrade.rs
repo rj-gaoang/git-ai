@@ -68,6 +68,12 @@ const INSTALL_SCRIPT_NAME: &str = "install.sh";
 static UPDATE_NOTICE_EMITTED: AtomicBool = AtomicBool::new(false);
 static LAST_BACKGROUND_SPAWN: AtomicU64 = AtomicU64::new(0);
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UpdateCheckPolicy {
+    Default,
+    AfterCommit,
+}
+
 #[derive(Debug, PartialEq)]
 enum UpgradeAction {
     UpgradeAvailable,
@@ -286,7 +292,16 @@ fn windows_process_entry_template() -> ProcessEntry32W {
     }
 }
 
-fn should_check_for_updates(channel: UpdateChannel, cache: Option<&UpdateCache>) -> bool {
+fn should_check_for_updates(
+    channel: UpdateChannel,
+    cache: Option<&UpdateCache>,
+    policy: UpdateCheckPolicy,
+    auto_updates_disabled: bool,
+) -> bool {
+    if policy == UpdateCheckPolicy::AfterCommit && !auto_updates_disabled {
+        return true;
+    }
+
     let now = current_timestamp();
     match cache {
         Some(cache) if cache.last_checked_at > 0 => {
@@ -390,9 +405,9 @@ fn fetch_text(url: &str, label: &str) -> Result<String, String> {
         .map_err(|e| format!("{} is not valid UTF-8: {}", label, e))
 }
 
-fn release_from_github_release(release: GitHubReleaseResponse) -> Result<ChannelRelease, String> {
+fn release_from_github_release(release: &GitHubReleaseResponse) -> Result<ChannelRelease, String> {
     if release.draft {
-        return Err("Latest GitHub release is a draft".to_string());
+        return Err("GitHub release is a draft".to_string());
     }
 
     let tag = release.tag_name.trim().to_string();
@@ -411,26 +426,66 @@ fn release_from_github_release(release: GitHubReleaseResponse) -> Result<Channel
     })
 }
 
+fn fetch_github_release_list(repo: &str) -> Result<Vec<GitHubReleaseResponse>, String> {
+    let url = format!("{}/repos/{}/releases?per_page=100", GITHUB_API_BASE_URL, repo);
+    let body = fetch_text(&url, "GitHub release list")?;
+    serde_json::from_str(&body)
+        .map_err(|e| format!("Failed to parse GitHub release list response: {}", e))
+}
+
+fn select_newest_github_release(
+    releases: &[GitHubReleaseResponse],
+    include_prerelease: bool,
+) -> Result<ChannelRelease, String> {
+    let mut newest_release: Option<ChannelRelease> = None;
+    let mut parse_error: Option<String> = None;
+
+    for release in releases {
+        if release.draft || release.prerelease != include_prerelease {
+            continue;
+        }
+
+        match release_from_github_release(release) {
+            Ok(candidate) => {
+                let should_replace = match newest_release.as_ref() {
+                    Some(current) => is_newer_version(&candidate.semver, &current.semver),
+                    None => true,
+                };
+
+                if should_replace {
+                    newest_release = Some(candidate);
+                }
+            }
+            Err(err) => {
+                if parse_error.is_none() {
+                    parse_error = Some(err);
+                }
+            }
+        }
+    }
+
+    newest_release.ok_or_else(|| {
+        parse_error.unwrap_or_else(|| {
+            if include_prerelease {
+                "No GitHub prerelease found".to_string()
+            } else {
+                "No GitHub stable release found".to_string()
+            }
+        })
+    })
+}
+
 fn fetch_latest_github_release(repo: &str) -> Result<ChannelRelease, String> {
-    let url = format!("{}/repos/{}/releases/latest", GITHUB_API_BASE_URL, repo);
-    let body = fetch_text(&url, "GitHub latest release")?;
-    let release: GitHubReleaseResponse = serde_json::from_str(&body)
-        .map_err(|e| format!("Failed to parse GitHub latest release response: {}", e))?;
-    release_from_github_release(release)
+    // Prefer the releases list over GitHub's /latest pointer because the pointer can lag
+    // behind a freshly published stable release and block commit-triggered auto-updates.
+    let releases = fetch_github_release_list(repo)?;
+    select_newest_github_release(&releases, false)
 }
 
 fn fetch_next_github_release(repo: &str) -> Result<ChannelRelease, String> {
-    let url = format!("{}/repos/{}/releases?per_page=20", GITHUB_API_BASE_URL, repo);
-    let body = fetch_text(&url, "GitHub release list")?;
-    let releases: Vec<GitHubReleaseResponse> = serde_json::from_str(&body)
-        .map_err(|e| format!("Failed to parse GitHub release list response: {}", e))?;
-
-    if let Some(release) = releases.into_iter().find(|release| !release.draft && release.prerelease)
-    {
-        return release_from_github_release(release);
-    }
-
-    fetch_latest_github_release(repo)
+    let releases = fetch_github_release_list(repo)?;
+    select_newest_github_release(&releases, true)
+        .or_else(|_| select_newest_github_release(&releases, false))
 }
 
 fn fetch_install_script(repo: &str) -> Result<String, String> {
@@ -958,6 +1013,14 @@ fn print_cached_notice(cache: &UpdateCache) {
 }
 
 pub fn maybe_schedule_background_update_check() {
+    maybe_schedule_background_update_check_with_policy(UpdateCheckPolicy::Default);
+}
+
+pub fn maybe_schedule_background_update_check_after_commit() {
+    maybe_schedule_background_update_check_with_policy(UpdateCheckPolicy::AfterCommit);
+}
+
+fn maybe_schedule_background_update_check_with_policy(policy: UpdateCheckPolicy) {
     let config = config::Config::get();
     if config.version_checks_disabled() {
         return;
@@ -974,7 +1037,12 @@ pub fn maybe_schedule_background_update_check() {
         print_cached_notice(cache);
     }
 
-    if !should_check_for_updates(channel, cache.as_ref()) {
+    if !should_check_for_updates(
+        channel,
+        cache.as_ref(),
+        policy,
+        config.auto_updates_disabled(),
+    ) {
         return;
     }
 
@@ -1106,7 +1174,12 @@ pub fn check_for_update_available() -> Result<DaemonUpdateCheckResult, String> {
     let release_source = release_source_url(api_base_url, &repo);
     let cache = read_update_cache();
 
-    if !should_check_for_updates(channel, cache.as_ref()) {
+    if !should_check_for_updates(
+        channel,
+        cache.as_ref(),
+        UpdateCheckPolicy::Default,
+        config.auto_updates_disabled(),
+    ) {
         // Even if it's not time to re-check, an earlier check may have found an update.
         if let Some(ref c) = cache
             && c.matches_channel(channel)
@@ -1239,6 +1312,98 @@ mod tests {
         assert_eq!(semver_from_tag("v1.2.3-next-abc"), "1.2.3");
         assert_eq!(semver_from_tag("enterprise-v1.2.3"), "1.2.3");
         assert_eq!(semver_from_tag("enterprise-v1.2.3-next-abc"), "1.2.3");
+    }
+
+    fn github_release(tag_name: &str, prerelease: bool, draft: bool) -> GitHubReleaseResponse {
+        GitHubReleaseResponse {
+            tag_name: tag_name.to_string(),
+            prerelease,
+            draft,
+        }
+    }
+
+    #[test]
+    fn test_select_newest_github_release_uses_highest_stable_semver() {
+        let releases = vec![
+            github_release("v2.1.9", false, false),
+            github_release("v2.1.11", false, false),
+            github_release("v2.1.12-next-deadbeef", true, false),
+            github_release("v2.1.12", false, true),
+        ];
+
+        let release = select_newest_github_release(&releases, false).unwrap();
+
+        assert_eq!(release.tag, "v2.1.11");
+        assert_eq!(release.semver, "2.1.11");
+    }
+
+    #[test]
+    fn test_select_newest_github_release_uses_highest_prerelease_semver() {
+        let releases = vec![
+            github_release("v2.1.10-next-aaaa1111", true, false),
+            github_release("v2.1.11-next-bbbb2222", true, false),
+            github_release("v2.1.11", false, false),
+        ];
+
+        let release = select_newest_github_release(&releases, true).unwrap();
+
+        assert_eq!(release.tag, "v2.1.11-next-bbbb2222");
+        assert_eq!(release.semver, "2.1.11");
+    }
+
+    #[test]
+    fn test_select_newest_github_release_errors_when_channel_missing() {
+        let releases = vec![github_release("v2.1.11-next-bbbb2222", true, false)];
+
+        let result = select_newest_github_release(&releases, false);
+
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "No GitHub stable release found");
+    }
+
+    #[test]
+    #[serial]
+    fn test_should_check_for_updates_respects_cache_by_default() {
+        let channel = UpdateChannel::Latest;
+        let mut cache = UpdateCache::new(channel);
+        cache.last_checked_at = current_timestamp();
+
+        assert!(!should_check_for_updates(
+            channel,
+            Some(&cache),
+            UpdateCheckPolicy::Default,
+            false,
+        ));
+    }
+
+    #[test]
+    #[serial]
+    fn test_should_check_for_updates_bypasses_no_update_cache_after_commit() {
+        let channel = UpdateChannel::Latest;
+        let mut cache = UpdateCache::new(channel);
+        cache.last_checked_at = current_timestamp();
+
+        assert!(should_check_for_updates(
+            channel,
+            Some(&cache),
+            UpdateCheckPolicy::AfterCommit,
+            false,
+        ));
+    }
+
+    #[test]
+    #[serial]
+    fn test_should_check_for_updates_keeps_cache_when_auto_updates_disabled() {
+        let channel = UpdateChannel::Latest;
+        let mut cache = UpdateCache::new(channel);
+        cache.last_checked_at = current_timestamp();
+
+        assert!(!should_check_for_updates(
+            channel,
+            Some(&cache),
+            UpdateCheckPolicy::AfterCommit,
+            true,
+        ));
     }
 
     #[test]
@@ -1431,17 +1596,26 @@ mod tests {
         cache.last_checked_at = now;
         assert!(!should_check_for_updates(
             UpdateChannel::Latest,
-            Some(&cache)
+            Some(&cache),
+            UpdateCheckPolicy::Default,
+            false,
         ));
 
         let stale_offset = (UPDATE_CHECK_INTERVAL_HOURS * 3600) + 10;
         cache.last_checked_at = now.saturating_sub(stale_offset);
         assert!(should_check_for_updates(
             UpdateChannel::Latest,
-            Some(&cache)
+            Some(&cache),
+            UpdateCheckPolicy::Default,
+            false,
         ));
 
-        assert!(should_check_for_updates(UpdateChannel::Latest, None));
+        assert!(should_check_for_updates(
+            UpdateChannel::Latest,
+            None,
+            UpdateCheckPolicy::Default,
+            false,
+        ));
     }
 
     #[test]
@@ -1453,11 +1627,18 @@ mod tests {
         // Cache matches channel - should respect interval
         assert!(!should_check_for_updates(
             UpdateChannel::Latest,
-            Some(&cache)
+            Some(&cache),
+            UpdateCheckPolicy::Default,
+            false,
         ));
 
         // Cache doesn't match channel - should check for updates
-        assert!(should_check_for_updates(UpdateChannel::Next, Some(&cache)));
+        assert!(should_check_for_updates(
+            UpdateChannel::Next,
+            Some(&cache),
+            UpdateCheckPolicy::Default,
+            false,
+        ));
     }
 
     #[test]
@@ -1782,7 +1963,12 @@ mod tests {
 
     #[test]
     fn test_should_check_for_updates_no_cache() {
-        assert!(should_check_for_updates(UpdateChannel::Latest, None));
+        assert!(should_check_for_updates(
+            UpdateChannel::Latest,
+            None,
+            UpdateCheckPolicy::Default,
+            false,
+        ));
     }
 
     #[test]
@@ -1795,7 +1981,9 @@ mod tests {
         };
         assert!(should_check_for_updates(
             UpdateChannel::Latest,
-            Some(&cache)
+            Some(&cache),
+            UpdateCheckPolicy::Default,
+            false,
         ));
     }
 
@@ -1808,7 +1996,12 @@ mod tests {
             available_semver: None,
             channel: "latest".to_string(),
         };
-        assert!(should_check_for_updates(UpdateChannel::Next, Some(&cache)));
+        assert!(should_check_for_updates(
+            UpdateChannel::Next,
+            Some(&cache),
+            UpdateCheckPolicy::Default,
+            false,
+        ));
     }
 
     #[test]
@@ -1941,7 +2134,9 @@ mod tests {
         cache.last_checked_at = current_timestamp();
         assert!(!should_check_for_updates(
             UpdateChannel::Latest,
-            Some(&cache)
+            Some(&cache),
+            UpdateCheckPolicy::Default,
+            false,
         ));
     }
 

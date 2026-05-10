@@ -23,28 +23,62 @@ pub fn update_prompt_from_tool(
         return PromptUpdateResult::Unchanged;
     };
 
-    let path = match tool {
-        "github-copilot" => metadata
-            .get("chat_session_path")
-            .or_else(|| metadata.get("transcript_path")),
-        "pi" => metadata.get("session_path"),
-        _ => metadata.get("transcript_path"),
-    };
+    let candidate_paths = candidate_transcript_paths(tool, metadata);
 
-    let Some(path) = path.filter(|p| !p.trim().is_empty()) else {
+    if candidate_paths.is_empty() {
         return PromptUpdateResult::Unchanged;
+    }
+
+    let mut first_error = None;
+
+    for path in candidate_paths {
+        let transcript_path = Path::new(path);
+
+        match transcript_from_json_or_jsonl(transcript_path) {
+            Ok(transcript) if !transcript.messages().is_empty() => {
+                let latest_model =
+                    latest_model_from_transcript(tool, transcript_path, current_model);
+                return PromptUpdateResult::Updated(transcript, latest_model);
+            }
+            Ok(_) => {}
+            Err(error) => {
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+            }
+        }
+    }
+
+    match first_error {
+        Some(error) => PromptUpdateResult::Failed(error),
+        None => PromptUpdateResult::Unchanged,
+    }
+}
+
+fn candidate_transcript_paths<'a>(
+    tool: &str,
+    metadata: &'a HashMap<String, String>,
+) -> Vec<&'a str> {
+    let mut paths = Vec::new();
+
+    let mut push_path = |path: Option<&'a String>| {
+        if let Some(path) = path.map(String::as_str).filter(|path| !path.trim().is_empty())
+            && !paths.contains(&path)
+        {
+            paths.push(path);
+        }
     };
 
-    let transcript_path = Path::new(path);
-
-    match transcript_from_json_or_jsonl(transcript_path) {
-        Ok(transcript) if !transcript.messages().is_empty() => {
-            let latest_model = latest_model_from_transcript(tool, transcript_path, current_model);
-            PromptUpdateResult::Updated(transcript, latest_model)
+    match tool {
+        "github-copilot" => {
+            push_path(metadata.get("transcript_path"));
+            push_path(metadata.get("chat_session_path"));
         }
-        Ok(_) => PromptUpdateResult::Unchanged,
-        Err(error) => PromptUpdateResult::Failed(error),
+        "pi" => push_path(metadata.get("session_path")),
+        _ => push_path(metadata.get("transcript_path")),
     }
+
+    paths
 }
 
 fn latest_model_from_transcript(tool: &str, transcript_path: &Path, current_model: &str) -> String {
@@ -197,6 +231,56 @@ mod tests {
             PromptUpdateResult::Updated(transcript, model) => {
                 assert_eq!(model, "copilot/gpt-5.4");
                 assert_eq!(transcript.messages().len(), 2);
+            }
+            PromptUpdateResult::Unchanged => panic!("expected Updated result"),
+            PromptUpdateResult::Failed(error) => panic!("unexpected error: {error}"),
+        }
+    }
+
+    #[test]
+    fn update_prompt_from_tool_prefers_copilot_transcript_path_over_chat_session_path() {
+        let mut chat_session = tempfile::NamedTempFile::with_suffix(".jsonl").unwrap();
+        writeln!(
+            chat_session,
+            r#"{{"type":"assistant.message","data":{{"content":"session-state assistant message","modelId":"copilot/gpt-5-mini"}},"timestamp":"2026-05-09T10:00:00Z"}}"#
+        )
+        .unwrap();
+        chat_session.flush().unwrap();
+
+        let mut transcript = tempfile::NamedTempFile::with_suffix(".jsonl").unwrap();
+        writeln!(
+            transcript,
+            r#"{{"type":"user.message","data":{{"content":"capture this prompt"}},"timestamp":"2026-05-09T10:00:00Z"}}"#
+        )
+        .unwrap();
+        writeln!(
+            transcript,
+            r#"{{"type":"assistant.message","data":{{"content":"Captured","modelId":"copilot/gpt-5.4"}},"timestamp":"2026-05-09T10:00:01Z"}}"#
+        )
+        .unwrap();
+        transcript.flush().unwrap();
+
+        let metadata = HashMap::from([
+            (
+                "chat_session_path".to_string(),
+                chat_session.path().to_string_lossy().to_string(),
+            ),
+            (
+                "transcript_path".to_string(),
+                transcript.path().to_string_lossy().to_string(),
+            ),
+        ]);
+
+        let result = update_prompt_from_tool("github-copilot", "session-1", Some(&metadata), "unknown");
+
+        match result {
+            PromptUpdateResult::Updated(transcript, model) => {
+                assert_eq!(model, "copilot/gpt-5.4");
+                assert_eq!(transcript.messages().len(), 2);
+                assert!(matches!(
+                    &transcript.messages()[0],
+                    Message::User { text, .. } if text == "capture this prompt"
+                ));
             }
             PromptUpdateResult::Unchanged => panic!("expected Updated result"),
             PromptUpdateResult::Failed(error) => panic!("unexpected error: {error}"),

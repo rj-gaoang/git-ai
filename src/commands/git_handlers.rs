@@ -116,7 +116,7 @@ pub fn handle_git(args: &[String]) {
     if !daemon_connected {
         let exit_status = proxy_to_git(args, false, None);
         if should_run_post_commit_followups(&parsed, exit_status.success()) {
-            crate::commands::upgrade::maybe_schedule_background_update_check();
+            crate::commands::upgrade::maybe_schedule_background_update_check_after_commit();
         }
         exit_with_status(exit_status);
     }
@@ -144,7 +144,7 @@ pub fn handle_git(args: &[String]) {
     // After a successful commit, wait briefly for the daemon to produce an
     // authorship note so we can show stats inline (same UX as plain wrapper mode).
     if should_run_post_commit_followups(&parsed, exit_status.success()) {
-        crate::commands::upgrade::maybe_schedule_background_update_check();
+        crate::commands::upgrade::maybe_schedule_background_update_check_after_commit();
         if let Some(repo) = repository.as_ref() {
             maybe_show_async_post_commit_stats(&parsed, repo);
         }
