@@ -59,6 +59,9 @@ const RAW_GITHUB_CONTENT_BASE_URL: &str = "https://raw.githubusercontent.com";
 const GIT_AI_RESTART_DAEMON_AFTER_INSTALL_ENV: &str = "GIT_AI_RESTART_DAEMON_AFTER_INSTALL";
 const BACKGROUND_SPAWN_THROTTLE_SECS: u64 = 60;
 const ENV_BACKGROUND_UPGRADE_WORKER: &str = "GIT_AI_BACKGROUND_UPGRADE_WORKER";
+const ENV_BACKGROUND_UPGRADE_DELAY_SECS: &str = "GIT_AI_BACKGROUND_UPGRADE_DELAY_SECS";
+const AFTER_COMMIT_BACKGROUND_UPGRADE_DELAY_SECS: &str = "30";
+const UPLOAD_ACTIVITY_WAIT_SECS: u64 = 300;
 
 #[cfg(windows)]
 const INSTALL_SCRIPT_NAME: &str = "install.ps1";
@@ -366,17 +369,26 @@ fn configured_github_repo() -> String {
         .unwrap_or_else(|| DEFAULT_GITHUB_RELEASE_REPO.to_string())
 }
 
-fn configured_installer_url(repo: &str) -> String {
+fn release_installer_url(repo: &str, release_tag: &str) -> String {
+    format!(
+        "https://github.com/{}/releases/download/{}/{}",
+        repo, release_tag, INSTALL_SCRIPT_NAME
+    )
+}
+
+fn raw_main_installer_url(repo: &str) -> String {
+    format!(
+        "{}/{}/main/{}",
+        RAW_GITHUB_CONTENT_BASE_URL, repo, INSTALL_SCRIPT_NAME
+    )
+}
+
+fn configured_installer_url(repo: &str, release_tag: &str) -> String {
     std::env::var(GIT_AI_INSTALLER_URL_ENV)
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| {
-            format!(
-                "{}/{}/main/{}",
-                RAW_GITHUB_CONTENT_BASE_URL, repo, INSTALL_SCRIPT_NAME
-            )
-        })
+        .unwrap_or_else(|| release_installer_url(repo, release_tag))
 }
 
 fn release_source_url(api_base_url: &str, repo: &str) -> String {
@@ -488,9 +500,44 @@ fn fetch_next_github_release(repo: &str) -> Result<ChannelRelease, String> {
         .or_else(|_| select_newest_github_release(&releases, false))
 }
 
-fn fetch_install_script(repo: &str) -> Result<String, String> {
-    let url = configured_installer_url(repo);
-    fetch_text(&url, INSTALL_SCRIPT_NAME)
+fn fetch_install_script(repo: &str, release_tag: &str) -> Result<String, String> {
+    let url = configured_installer_url(repo, release_tag);
+    match fetch_text(&url, INSTALL_SCRIPT_NAME) {
+        Ok(script) => Ok(script),
+        Err(primary_error) => {
+            let has_override = std::env::var(GIT_AI_INSTALLER_URL_ENV)
+                .ok()
+                .map(|value| !value.trim().is_empty())
+                .unwrap_or(false);
+
+            if has_override {
+                Err(primary_error)
+            } else {
+                let fallback_url = raw_main_installer_url(repo);
+                fetch_text(&fallback_url, INSTALL_SCRIPT_NAME).map_err(|fallback_error| {
+                    format!(
+                        "Failed to fetch installer from release asset {}: {}; fallback {} also failed: {}",
+                        url, primary_error, fallback_url, fallback_error
+                    )
+                })
+            }
+        }
+    }
+}
+
+fn maybe_wait_before_background_upgrade() {
+    let delay_secs = std::env::var(ENV_BACKGROUND_UPGRADE_DELAY_SECS)
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|value| *value > 0);
+
+    if let Some(delay_secs) = delay_secs {
+        std::thread::sleep(Duration::from_secs(delay_secs));
+    }
+
+    let _ = crate::integration::upload_stats::wait_for_upload_activity_to_finish(
+        Duration::from_secs(UPLOAD_ACTIVITY_WAIT_SECS),
+    );
 }
 
 #[allow(dead_code)]
@@ -843,6 +890,10 @@ pub fn run_with_args(args: &[String]) {
 }
 
 fn run_impl(force: bool, background: bool) {
+    if background {
+        maybe_wait_before_background_upgrade();
+    }
+
     let config = config::Config::fresh();
     let channel = config.update_channel();
     let skip_install = background && config.auto_updates_disabled();
@@ -858,7 +909,6 @@ fn run_impl_with_url(
     let current_version = env!("CARGO_PKG_VERSION");
     let repo = configured_github_repo();
     let release_source = release_source_url(api_base_url, &repo);
-    let installer_url = configured_installer_url(&repo);
 
     println!(
         "Checking for updates (channel: {}, repo: {})...",
@@ -873,6 +923,8 @@ fn run_impl_with_url(
             std::process::exit(1);
         }
     };
+
+    let installer_url = configured_installer_url(&repo, &release.tag);
 
     println!("Current version: v{}", current_version);
     println!(
@@ -933,7 +985,7 @@ fn run_impl_with_url(
 
     println!("Fetching installer script...");
 
-    let script_content = match fetch_install_script(&repo) {
+    let script_content = match fetch_install_script(&repo, &release.tag) {
         Ok(content) => {
             #[cfg(windows)]
             println!("\x1b[1;32m✓\x1b[0m install.ps1 fetched from {}", installer_url);
@@ -1052,7 +1104,12 @@ fn maybe_schedule_background_update_check_with_policy(policy: UpdateCheckPolicy)
         return;
     }
 
-    if spawn_background_upgrade_process() {
+    let spawned = match policy {
+        UpdateCheckPolicy::Default => spawn_background_upgrade_process(),
+        UpdateCheckPolicy::AfterCommit => spawn_background_upgrade_process_after_commit(),
+    };
+
+    if spawned {
         LAST_BACKGROUND_SPAWN.store(now, Ordering::SeqCst);
     }
 }
@@ -1063,6 +1120,18 @@ fn spawn_background_upgrade_process() -> bool {
         &["--background"],
         ENV_BACKGROUND_UPGRADE_WORKER,
         &[],
+    )
+}
+
+fn spawn_background_upgrade_process_after_commit() -> bool {
+    crate::utils::spawn_internal_git_ai_subcommand(
+        "upgrade",
+        &["--background"],
+        ENV_BACKGROUND_UPGRADE_WORKER,
+        &[(
+            ENV_BACKGROUND_UPGRADE_DELAY_SECS,
+            AFTER_COMMIT_BACKGROUND_UPGRADE_DELAY_SECS,
+        )],
     )
 }
 
@@ -1091,11 +1160,14 @@ pub fn check_and_install_update_if_available() -> Result<DaemonUpdateCheckResult
         return Ok(DaemonUpdateCheckResult::NoUpdate);
     }
 
+    let _ = crate::integration::upload_stats::wait_for_upload_activity_to_finish(
+        Duration::from_secs(UPLOAD_ACTIVITY_WAIT_SECS),
+    );
+
     let channel = config.update_channel();
     let api_base_url = config.api_base_url();
     let repo = configured_github_repo();
     let release_source = release_source_url(api_base_url, &repo);
-    let installer_url = configured_installer_url(&repo);
 
     // Read the cache that check_for_update_available() populated earlier.
     // We intentionally skip should_check_for_updates() here because the
@@ -1115,6 +1187,7 @@ pub fn check_and_install_update_if_available() -> Result<DaemonUpdateCheckResult
     let release = fetch_release_for_channel(api_base_url, channel)?;
     let current_version = env!("CARGO_PKG_VERSION");
     let action = determine_action(false, &release, current_version);
+    let installer_url = configured_installer_url(&repo, &release.tag);
 
     if action != UpgradeAction::UpgradeAvailable {
         // Cache was stale or version changed between check and install.
@@ -1135,7 +1208,7 @@ pub fn check_and_install_update_if_available() -> Result<DaemonUpdateCheckResult
         })),
     );
 
-    let script_content = fetch_install_script(&repo)?;
+    let script_content = fetch_install_script(&repo, &release.tag)?;
     run_install_script(&script_content, &repo, &release.tag, true)?;
 
     // Clear the cached update now that we've installed it.
@@ -1424,11 +1497,11 @@ mod tests {
         }
 
         assert_eq!(
-            configured_installer_url(DEFAULT_GITHUB_RELEASE_REPO),
+            configured_installer_url(DEFAULT_GITHUB_RELEASE_REPO, "v2.1.13"),
             format!(
-                "{}/{}/main/{}",
-                RAW_GITHUB_CONTENT_BASE_URL,
+                "https://github.com/{}/releases/download/{}/{}",
                 DEFAULT_GITHUB_RELEASE_REPO,
+                "v2.1.13",
                 INSTALL_SCRIPT_NAME
             )
         );
@@ -1438,13 +1511,26 @@ mod tests {
         }
 
         assert_eq!(
-            configured_installer_url(DEFAULT_GITHUB_RELEASE_REPO),
+            configured_installer_url(DEFAULT_GITHUB_RELEASE_REPO, "v2.1.13"),
             "https://example.com/install-script"
         );
 
         unsafe {
             std::env::remove_var(GIT_AI_INSTALLER_URL_ENV);
         }
+    }
+
+    #[test]
+    fn test_raw_main_installer_url_points_to_main_branch_script() {
+        assert_eq!(
+            raw_main_installer_url(DEFAULT_GITHUB_RELEASE_REPO),
+            format!(
+                "{}/{}/main/{}",
+                RAW_GITHUB_CONTENT_BASE_URL,
+                DEFAULT_GITHUB_RELEASE_REPO,
+                INSTALL_SCRIPT_NAME
+            )
+        );
     }
 
     #[test]

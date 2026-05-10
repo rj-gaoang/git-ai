@@ -32,16 +32,81 @@ use crate::git::refs::get_authorship;
 use crate::git::repository::Repository;
 use crate::http;
 use crate::integration::ide_mcp::resolve_x_user_id;
+use crate::utils::LockFile;
 use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, HashMap};
-use std::path::Path;
-use std::time::Duration;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 const DEFAULT_UPLOAD_URL: &str =
     "https://service-gw.ruijie.com.cn/api/ai-cr-manage-service/api/public/upload/ai-stats";
 const UPLOAD_TIMEOUT_SECS: u64 = 20;
 const UPLOAD_MAX_ATTEMPTS: usize = 3;
 const UPLOAD_RETRY_DELAY_MILLIS: u64 = 1500;
+const UPLOAD_ACTIVITY_LOCK_FILE: &str = "upload_activity.lock";
+const UPLOAD_ACTIVITY_LOCK_WAIT_SECS: u64 = 300;
+const UPLOAD_ACTIVITY_LOCK_RETRY_MILLIS: u64 = 250;
+
+fn upload_activity_lock_path_from_internal_dir(internal_dir: &Path) -> PathBuf {
+    internal_dir.join(UPLOAD_ACTIVITY_LOCK_FILE)
+}
+
+pub(crate) fn upload_activity_lock_path() -> Option<PathBuf> {
+    crate::config::internal_dir_path().map(|dir| upload_activity_lock_path_from_internal_dir(&dir))
+}
+
+fn acquire_lock_with_retry(
+    lock_path: &Path,
+    max_wait: Duration,
+    retry_interval: Duration,
+) -> Option<LockFile> {
+    if let Some(parent) = lock_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+
+    let started_at = Instant::now();
+    loop {
+        if let Some(lock) = LockFile::try_acquire(lock_path) {
+            return Some(lock);
+        }
+
+        if started_at.elapsed() >= max_wait {
+            return None;
+        }
+
+        std::thread::sleep(retry_interval);
+    }
+}
+
+fn acquire_upload_activity_lock() -> Result<LockFile, String> {
+    let lock_path = upload_activity_lock_path()
+        .ok_or_else(|| "Could not determine git-ai upload activity lock path".to_string())?;
+
+    acquire_lock_with_retry(
+        &lock_path,
+        Duration::from_secs(UPLOAD_ACTIVITY_LOCK_WAIT_SECS),
+        Duration::from_millis(UPLOAD_ACTIVITY_LOCK_RETRY_MILLIS),
+    )
+    .ok_or_else(|| {
+        format!(
+            "Timed out waiting for upload activity lock at {}",
+            lock_path.display()
+        )
+    })
+}
+
+pub(crate) fn wait_for_upload_activity_to_finish(max_wait: Duration) -> bool {
+    let Some(lock_path) = upload_activity_lock_path() else {
+        return true;
+    };
+
+    acquire_lock_with_retry(
+        &lock_path,
+        max_wait,
+        Duration::from_millis(UPLOAD_ACTIVITY_LOCK_RETRY_MILLIS),
+    )
+    .is_some()
+}
 
 #[derive(Debug, Clone)]
 pub enum ManualUploadOutcome {
@@ -786,6 +851,7 @@ fn perform_upload(
     user_id: Option<&str>,
     debug_context: &UploadDebugContext,
 ) -> Result<u16, String> {
+    let _upload_activity_lock = acquire_upload_activity_lock()?;
     let mut last_error = None;
 
     for attempt in 1..=UPLOAD_MAX_ATTEMPTS {
@@ -1786,6 +1852,45 @@ mod tests {
             .recv_timeout(Duration::from_secs(1))
             .expect("background upload task should complete");
         assert!(ran.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn upload_activity_lock_path_uses_internal_dir() {
+        let internal_dir = Path::new("C:/tmp/.git-ai/internal");
+
+        let lock_path = upload_activity_lock_path_from_internal_dir(internal_dir);
+
+        assert_eq!(
+            lock_path,
+            Path::new("C:/tmp/.git-ai/internal/upload_activity.lock")
+        );
+    }
+
+    #[test]
+    fn acquire_lock_with_retry_waits_for_existing_upload_lock() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let lock_path = upload_activity_lock_path_from_internal_dir(dir.path());
+        let lock_path_for_thread = lock_path.clone();
+        let (ready_tx, ready_rx) = mpsc::channel();
+
+        let worker = std::thread::spawn(move || {
+            let _lock = LockFile::try_acquire(&lock_path_for_thread).expect("worker lock");
+            let _ = ready_tx.send(());
+            std::thread::sleep(Duration::from_millis(120));
+        });
+
+        ready_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("worker should acquire lock");
+
+        let acquired = acquire_lock_with_retry(
+            &lock_path,
+            Duration::from_secs(1),
+            Duration::from_millis(10),
+        );
+
+        assert!(acquired.is_some(), "lock should become available after worker exits");
+        worker.join().expect("worker join");
     }
 
     #[test]

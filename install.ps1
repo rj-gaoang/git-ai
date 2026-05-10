@@ -167,6 +167,39 @@ function Wait-ForFileAvailable {
     return $false
 }
 
+function Get-UploadActivityLockPath {
+    $internalDir = Join-Path $HOME '.git-ai\internal'
+    New-Item -ItemType Directory -Force -Path $internalDir | Out-Null
+    return Join-Path $internalDir 'upload_activity.lock'
+}
+
+function Acquire-UploadActivityLock {
+    param(
+        [Parameter(Mandatory = $false)][int]$MaxWaitSeconds = 300,
+        [Parameter(Mandatory = $false)][int]$RetryIntervalMilliseconds = 250
+    )
+
+    $lockPath = Get-UploadActivityLockPath
+    $elapsedMilliseconds = 0
+    $maxWaitMilliseconds = $MaxWaitSeconds * 1000
+
+    while ($elapsedMilliseconds -lt $maxWaitMilliseconds) {
+        try {
+            return [System.IO.File]::Open(
+                $lockPath,
+                [System.IO.FileMode]::OpenOrCreate,
+                [System.IO.FileAccess]::ReadWrite,
+                [System.IO.FileShare]::None
+            )
+        } catch {
+            Start-Sleep -Milliseconds $RetryIntervalMilliseconds
+            $elapsedMilliseconds += $RetryIntervalMilliseconds
+        }
+    }
+
+    Write-ErrorAndExit 'Timeout waiting for in-flight uploads to finish before install'
+}
+
 function Verify-Checksum {
     param(
         [Parameter(Mandatory = $true)][string]$File,
@@ -584,6 +617,8 @@ try {
 # Verify checksum if embedded (release builds only)
 Verify-Checksum -File $tmpFile -BinaryName $downloadedBinaryName
 
+$uploadActivityLock = Acquire-UploadActivityLock
+
 $finalExe = Join-Path $installDir 'git-ai.exe'
 
 # Wait for git-ai.exe to be available if it exists and is in use
@@ -755,6 +790,11 @@ try {
     }
 } catch {
     Write-Host "Warning: Failed to write config.json: $($_.Exception.Message)" -ForegroundColor Yellow
+}
+
+if ($uploadActivityLock) {
+    $uploadActivityLock.Dispose()
+    $uploadActivityLock = $null
 }
 
 Write-Host 'Close and reopen your terminal and IDE sessions to use git-ai.' -ForegroundColor Yellow
