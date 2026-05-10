@@ -35,10 +35,13 @@ use crate::integration::ide_mcp::resolve_x_user_id;
 use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
+use std::time::Duration;
 
 const DEFAULT_UPLOAD_URL: &str =
     "https://service-gw.ruijie.com.cn/api/ai-cr-manage-service/api/public/upload/ai-stats";
-const UPLOAD_TIMEOUT_SECS: u64 = 10;
+const UPLOAD_TIMEOUT_SECS: u64 = 20;
+const UPLOAD_MAX_ATTEMPTS: usize = 3;
+const UPLOAD_RETRY_DELAY_MILLIS: u64 = 1500;
 
 #[derive(Debug, Clone)]
 pub enum ManualUploadOutcome {
@@ -783,6 +786,77 @@ fn perform_upload(
     user_id: Option<&str>,
     debug_context: &UploadDebugContext,
 ) -> Result<u16, String> {
+    let mut last_error = None;
+
+    for attempt in 1..=UPLOAD_MAX_ATTEMPTS {
+        crate::diagnostics::append_debug_event(
+            "upload_stats_attempt_started",
+            json!({
+                "commitSha": debug_context.commit_sha.as_str(),
+                "commitShort": debug_context.commit_short.as_str(),
+                "source": debug_context.source.as_str(),
+                "mode": debug_context.mode.as_str(),
+                "url": url,
+                "attempt": attempt,
+                "maxAttempts": UPLOAD_MAX_ATTEMPTS,
+            }),
+        );
+
+        match perform_upload_once(url, payload, api_key, user_id, debug_context) {
+            Ok(status_code) => {
+                if attempt > 1 {
+                    crate::diagnostics::append_debug_event(
+                        "upload_stats_retry_recovered",
+                        json!({
+                            "commitSha": debug_context.commit_sha.as_str(),
+                            "commitShort": debug_context.commit_short.as_str(),
+                            "source": debug_context.source.as_str(),
+                            "mode": debug_context.mode.as_str(),
+                            "url": url,
+                            "attempt": attempt,
+                            "statusCode": status_code,
+                        }),
+                    );
+                }
+                return Ok(status_code);
+            }
+            Err(error) => {
+                let retryable = is_retryable_upload_error(&error);
+                crate::diagnostics::append_debug_event(
+                    "upload_stats_attempt_failed",
+                    json!({
+                        "commitSha": debug_context.commit_sha.as_str(),
+                        "commitShort": debug_context.commit_short.as_str(),
+                        "source": debug_context.source.as_str(),
+                        "mode": debug_context.mode.as_str(),
+                        "url": url,
+                        "attempt": attempt,
+                        "maxAttempts": UPLOAD_MAX_ATTEMPTS,
+                        "retryable": retryable,
+                        "error": error,
+                    }),
+                );
+                last_error = Some(error);
+
+                if !retryable || attempt == UPLOAD_MAX_ATTEMPTS {
+                    break;
+                }
+
+                std::thread::sleep(Duration::from_millis(UPLOAD_RETRY_DELAY_MILLIS));
+            }
+        }
+    }
+
+    Err(last_error.unwrap_or_else(|| "upload failed without an error message".to_string()))
+}
+
+fn perform_upload_once(
+    url: &str,
+    payload: &Value,
+    api_key: Option<&str>,
+    user_id: Option<&str>,
+    debug_context: &UploadDebugContext,
+) -> Result<u16, String> {
     log_debug(&format!(
         "perform_upload url={} has_api_key={} has_user_id={}",
         url,
@@ -922,6 +996,23 @@ fn perform_upload(
         );
         Err(format!("HTTP {}: {}", response.status_code, body_excerpt))
     }
+}
+
+fn is_retryable_upload_error(error: &str) -> bool {
+    let lowered = error.to_ascii_lowercase();
+
+    lowered.contains("connection failed")
+        || lowered.contains("connect error")
+        || lowered.contains("timed out")
+        || lowered.contains("timeout")
+        || lowered.contains("temporarily unavailable")
+        || lowered.contains("http 408")
+        || lowered.contains("http 425")
+        || lowered.contains("http 429")
+        || lowered.contains("http 500")
+        || lowered.contains("http 502")
+        || lowered.contains("http 503")
+        || lowered.contains("http 504")
 }
 
 fn inspect_backend_response_body(body: &[u8]) -> Result<Option<(i64, Option<String>)>, String> {
@@ -1653,6 +1744,19 @@ mod tests {
             inspect_backend_response_body(b"ok").expect("non-json success body should not fail");
 
         assert_eq!(result, None);
+    }
+
+    #[test]
+    fn retryable_upload_error_detects_transient_network_and_gateway_failures() {
+        assert!(is_retryable_upload_error(
+            "Connection Failed: Connect error: os error 10060"
+        ));
+        assert!(is_retryable_upload_error("HTTP 503: service unavailable"));
+        assert!(is_retryable_upload_error("HTTP 429: too many requests"));
+        assert!(!is_retryable_upload_error(
+            "backend returned code 500: duplicate commit"
+        ));
+        assert!(!is_retryable_upload_error("HTTP 400: bad request"));
     }
 
     #[test]

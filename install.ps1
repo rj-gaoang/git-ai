@@ -486,6 +486,66 @@ function Try-Download {
     }
 }
 
+function Get-GitHubReleaseApiUrl {
+    param(
+        [Parameter(Mandatory = $true)][string]$Repository,
+        [Parameter(Mandatory = $true)][string]$ReleaseTag
+    )
+
+    if ($ReleaseTag -eq 'latest') {
+        return "https://api.github.com/repos/$Repository/releases/latest"
+    }
+
+    return "https://api.github.com/repos/$Repository/releases/tags/$ReleaseTag"
+}
+
+function Try-DownloadFromGitHubApiAsset {
+    param(
+        [Parameter(Mandatory = $true)][string]$Repository,
+        [Parameter(Mandatory = $true)][string]$ReleaseTag,
+        [Parameter(Mandatory = $true)][string[]]$CandidateAssetNames
+    )
+
+    $apiUrl = Get-GitHubReleaseApiUrl -Repository $Repository -ReleaseTag $ReleaseTag
+    $headers = @{
+        'Accept' = 'application/vnd.github+json'
+        'User-Agent' = 'git-ai-installer'
+        'X-GitHub-Api-Version' = '2022-11-28'
+    }
+
+    try {
+        $release = Invoke-RestMethod -Uri $apiUrl -Headers $headers -ErrorAction Stop
+    } catch {
+        return $null
+    }
+
+    foreach ($assetName in $CandidateAssetNames) {
+        $asset = @($release.assets | Where-Object { $_.name -eq $assetName } | Select-Object -First 1)
+        if (-not $asset) {
+            continue
+        }
+
+        try {
+            $oldProgressPreference = $ProgressPreference
+            $ProgressPreference = 'SilentlyContinue'
+            try {
+                Invoke-WebRequest -Uri $asset.url -Headers @{
+                    'Accept' = 'application/octet-stream'
+                    'User-Agent' = 'git-ai-installer'
+                    'X-GitHub-Api-Version' = '2022-11-28'
+                } -OutFile $tmpFile -UseBasicParsing -ErrorAction Stop
+            } finally {
+                $ProgressPreference = $oldProgressPreference
+            }
+            return $assetName
+        } catch {
+            Remove-Item -Force -ErrorAction SilentlyContinue $tmpFile
+        }
+    }
+
+    return $null
+}
+
 # Track which download URL succeeded for checksum verification
 $downloadedBinaryName = $null
 if (-not [string]::IsNullOrWhiteSpace($env:GIT_AI_LOCAL_BINARY)) {
@@ -499,6 +559,11 @@ if (-not [string]::IsNullOrWhiteSpace($env:GIT_AI_LOCAL_BINARY)) {
     $downloadedBinaryName = "$binaryName.exe"
 } elseif (Try-Download -Url $downloadUrlNoExt) {
     $downloadedBinaryName = $binaryName
+} else {
+    $downloadedBinaryName = Try-DownloadFromGitHubApiAsset -Repository $Repo -ReleaseTag $releaseTag -CandidateAssetNames @(
+        "$binaryName.exe",
+        $binaryName
+    )
 }
 
 if (-not $downloadedBinaryName) {
