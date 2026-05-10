@@ -1,0 +1,57 @@
+install.ps1
+  s_1d232e5e1761ee::t_a2cf36c64c4ef2 489-548,562-566
+Cargo.toml
+  h_413aef030e07df 3
+src/integration/upload_stats.rs
+  s_1d232e5e1761ee::t_57ca72a2b7ab5c 38,42-44,788-858,1001-1017,1749-1761
+src/mdm/agents/claude_code.rs
+  s_1d232e5e1761ee::t_57ca72a2b7ab5c 5-6,24-27,96,383,1189,1210,1212,1218-1219,1223-1224,1231,1240-1249
+---
+{
+  "schema_version": "authorship/3.1.0",
+  "git_ai_version": "2.1.9",
+  "base_commit_sha": "e7ff94fcb2770865b8723b853bdca3997b190c6f",
+  "prompts": {
+    "s_1d232e5e1761ee::t_57ca72a2b7ab5c": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "7d9b7d43-3621-4aaf-8cfc-1e4d6bcd5ead",
+        "model": "copilot/gpt-5-mini"
+      },
+      "human_author": "gaoang <gaoang@ruijie.com.cn>",
+      "messages": [],
+      "total_additions": 196,
+      "total_deletions": 13,
+      "accepted_lines": 3279,
+      "overriden_lines": 0
+    },
+    "s_1d232e5e1761ee::t_a2cf36c64c4ef2": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "7d9b7d43-3621-4aaf-8cfc-1e4d6bcd5ead",
+        "model": "copilot/gpt-5-mini"
+      },
+      "human_author": "gaoang <gaoang@ruijie.com.cn>",
+      "messages": [],
+      "total_additions": 196,
+      "total_deletions": 13,
+      "accepted_lines": 767,
+      "overriden_lines": 0
+    }
+  },
+  "humans": {
+    "h_413aef030e07df": {
+      "author": "gaoang <gaoang@ruijie.com.cn>"
+    }
+  },
+  "sessions": {
+    "s_1d232e5e1761ee": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "7d9b7d43-3621-4aaf-8cfc-1e4d6bcd5ead",
+        "model": "copilot/gpt-5-mini"
+      },
+      "human_author": "gaoang <gaoang@ruijie.com.cn>"
+    }
+  }
+}
