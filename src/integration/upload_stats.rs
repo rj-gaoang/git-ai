@@ -44,7 +44,8 @@ const UPLOAD_TIMEOUT_SECS: u64 = 20;
 const UPLOAD_MAX_ATTEMPTS: usize = 3;
 const UPLOAD_RETRY_DELAY_MILLIS: u64 = 1500;
 const UPLOAD_ACTIVITY_LOCK_FILE: &str = "upload_activity.lock";
-const UPLOAD_ACTIVITY_LOCK_WAIT_SECS: u64 = 300;
+const UPLOAD_ACTIVITY_LOCK_WAIT_SECS_AUTO: u64 = 5;
+const UPLOAD_ACTIVITY_LOCK_WAIT_SECS_MANUAL: u64 = 30;
 const UPLOAD_ACTIVITY_LOCK_RETRY_MILLIS: u64 = 250;
 
 fn upload_activity_lock_path_from_internal_dir(internal_dir: &Path) -> PathBuf {
@@ -78,21 +79,73 @@ fn acquire_lock_with_retry(
     }
 }
 
-fn acquire_upload_activity_lock() -> Result<LockFile, String> {
+fn upload_activity_lock_wait_duration(mode: &str) -> Duration {
+    match mode {
+        "manual" => Duration::from_secs(UPLOAD_ACTIVITY_LOCK_WAIT_SECS_MANUAL),
+        _ => Duration::from_secs(UPLOAD_ACTIVITY_LOCK_WAIT_SECS_AUTO),
+    }
+}
+
+fn acquire_upload_activity_lock(debug_context: &UploadDebugContext) -> Result<LockFile, String> {
     let lock_path = upload_activity_lock_path()
         .ok_or_else(|| "Could not determine git-ai upload activity lock path".to_string())?;
+    let max_wait = upload_activity_lock_wait_duration(debug_context.mode.as_str());
+    let wait_started_at = Instant::now();
 
-    acquire_lock_with_retry(
+    crate::diagnostics::append_debug_event(
+        "upload_stats_activity_lock_wait_started",
+        json!({
+            "commitSha": debug_context.commit_sha.as_str(),
+            "commitShort": debug_context.commit_short.as_str(),
+            "source": debug_context.source.as_str(),
+            "mode": debug_context.mode.as_str(),
+            "lockPath": lock_path.display().to_string(),
+            "maxWaitSecs": max_wait.as_secs(),
+        }),
+    );
+
+    let lock = acquire_lock_with_retry(
         &lock_path,
-        Duration::from_secs(UPLOAD_ACTIVITY_LOCK_WAIT_SECS),
+        max_wait,
         Duration::from_millis(UPLOAD_ACTIVITY_LOCK_RETRY_MILLIS),
-    )
-    .ok_or_else(|| {
-        format!(
-            "Timed out waiting for upload activity lock at {}",
-            lock_path.display()
-        )
-    })
+    );
+    let waited_ms = wait_started_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+
+    match lock {
+        Some(lock) => {
+            crate::diagnostics::append_debug_event(
+                "upload_stats_activity_lock_acquired",
+                json!({
+                    "commitSha": debug_context.commit_sha.as_str(),
+                    "commitShort": debug_context.commit_short.as_str(),
+                    "source": debug_context.source.as_str(),
+                    "mode": debug_context.mode.as_str(),
+                    "lockPath": lock_path.display().to_string(),
+                    "waitedMs": waited_ms,
+                }),
+            );
+            Ok(lock)
+        }
+        None => {
+            crate::diagnostics::append_debug_event(
+                "upload_stats_activity_lock_timeout",
+                json!({
+                    "commitSha": debug_context.commit_sha.as_str(),
+                    "commitShort": debug_context.commit_short.as_str(),
+                    "source": debug_context.source.as_str(),
+                    "mode": debug_context.mode.as_str(),
+                    "lockPath": lock_path.display().to_string(),
+                    "maxWaitSecs": max_wait.as_secs(),
+                    "waitedMs": waited_ms,
+                }),
+            );
+            Err(format!(
+                "Timed out waiting {}s for upload activity lock at {}",
+                max_wait.as_secs(),
+                lock_path.display()
+            ))
+        }
+    }
 }
 
 pub(crate) fn wait_for_upload_activity_to_finish(max_wait: Duration) -> bool {
@@ -851,7 +904,7 @@ fn perform_upload(
     user_id: Option<&str>,
     debug_context: &UploadDebugContext,
 ) -> Result<u16, String> {
-    let _upload_activity_lock = acquire_upload_activity_lock()?;
+    let _upload_activity_lock = acquire_upload_activity_lock(debug_context)?;
     let mut last_error = None;
 
     for attempt in 1..=UPLOAD_MAX_ATTEMPTS {
@@ -1863,6 +1916,26 @@ mod tests {
         assert_eq!(
             lock_path,
             Path::new("C:/tmp/.git-ai/internal/upload_activity.lock")
+        );
+    }
+
+    #[test]
+    fn upload_activity_lock_wait_duration_is_short_for_non_manual_uploads() {
+        assert_eq!(
+            upload_activity_lock_wait_duration("background"),
+            Duration::from_secs(UPLOAD_ACTIVITY_LOCK_WAIT_SECS_AUTO)
+        );
+        assert_eq!(
+            upload_activity_lock_wait_duration("inline"),
+            Duration::from_secs(UPLOAD_ACTIVITY_LOCK_WAIT_SECS_AUTO)
+        );
+    }
+
+    #[test]
+    fn upload_activity_lock_wait_duration_is_longer_for_manual_uploads() {
+        assert_eq!(
+            upload_activity_lock_wait_duration("manual"),
+            Duration::from_secs(UPLOAD_ACTIVITY_LOCK_WAIT_SECS_MANUAL)
         );
     }
 
