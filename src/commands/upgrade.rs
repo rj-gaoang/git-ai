@@ -52,6 +52,8 @@ const UPDATE_CHECK_INTERVAL_HOURS: u64 = 24;
 const GIT_AI_RELEASE_ENV: &str = "GIT_AI_RELEASE_TAG";
 const GIT_AI_GITHUB_REPO_ENV: &str = "GIT_AI_GITHUB_REPO";
 const GIT_AI_INSTALLER_URL_ENV: &str = "GIT_AI_INSTALLER_URL";
+#[cfg(windows)]
+const GIT_AI_DEFER_IF_BUSY_ENV: &str = "GIT_AI_DEFER_IF_BUSY";
 const DEFAULT_GITHUB_RELEASE_REPO: &str = "rj-gaoang/git-ai";
 const GITHUB_API_BASE_URL: &str = "https://api.github.com";
 const RAW_GITHUB_CONTENT_BASE_URL: &str = "https://raw.githubusercontent.com";
@@ -782,6 +784,7 @@ fn run_install_script(script_content: &str, repo: &str, tag: &str, silent: bool)
             cmd.creation_flags(CREATE_NO_WINDOW);
 
             if silent {
+                cmd.env(GIT_AI_DEFER_IF_BUSY_ENV, "1");
                 cmd.env(GIT_AI_RESTART_DAEMON_AFTER_INSTALL_ENV, "1");
                 cmd.stdout(Stdio::null()).stderr(Stdio::null());
             }

@@ -42,6 +42,10 @@ function Write-Warning {
     Write-Host $Message -ForegroundColor Yellow
 }
 
+function Test-PassiveAutoUpdateMode {
+    return $env:GIT_AI_DEFER_IF_BUSY -eq '1'
+}
+
 function Normalize-PathString {
     param(
         [Parameter(Mandatory = $true)][string]$Path
@@ -78,13 +82,13 @@ function Stop-GitAiBackgroundService {
         return $false
     }
 
-    $args = @('bg', 'shutdown')
+    $commandArgs = @('bg', 'shutdown')
     if ($Hard) {
-        $args += '--hard'
+        $commandArgs += '--hard'
     }
 
     try {
-        & $GitAiExe @args *> $null
+        & $GitAiExe @commandArgs *> $null
         return $LASTEXITCODE -eq 0
     } catch {
         return $false
@@ -102,9 +106,24 @@ function Get-GitAiManagedProcesses {
     )
 
     $processes = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
-            $_.ProcessId -ne $PID -and
-            $_.ExecutablePath -and
-            ($targetPaths -contains (Normalize-PathString $_.ExecutablePath))
+            if ($_.ProcessId -eq $PID) {
+                return $false
+            }
+
+            if ($_.ExecutablePath -and ($targetPaths -contains (Normalize-PathString $_.ExecutablePath))) {
+                return $true
+            }
+
+            if ($_.CommandLine) {
+                $commandLine = $_.CommandLine.ToLowerInvariant()
+                foreach ($targetPath in $targetPaths) {
+                    if ($commandLine.Contains($targetPath)) {
+                        return $true
+                    }
+                }
+            }
+
+            return $_.Name -ieq 'git-ai.exe'
         })
 
     return $processes
@@ -143,25 +162,40 @@ function Wait-ForFileAvailable {
 
     $elapsed = 0
     $gitAiExe = Join-Path $InstallDir 'git-ai.exe'
+    $passiveAutoUpdate = Test-PassiveAutoUpdateMode
+    $effectiveMaxWaitSeconds = $MaxWaitSeconds
+    $effectiveRetryIntervalSeconds = $RetryIntervalSeconds
+
+    if ($passiveAutoUpdate) {
+        $effectiveMaxWaitSeconds = [Math]::Min($MaxWaitSeconds, 5)
+        $effectiveRetryIntervalSeconds = 1
+    }
 
     [void](Stop-GitAiBackgroundService -GitAiExe $gitAiExe)
+    if (-not $passiveAutoUpdate) {
+        [void](Stop-GitAiManagedProcesses -InstallDir $InstallDir)
+    }
 
-    while ($elapsed -lt $MaxWaitSeconds) {
+    while ($elapsed -lt $effectiveMaxWaitSeconds) {
         if (Test-FileAvailable -Path $Path) {
             return $true
         }
 
-        if ($elapsed -ge $ForceKillAfterSeconds) {
+        if (-not $passiveAutoUpdate -and $elapsed -ge $ForceKillAfterSeconds) {
             [void](Stop-GitAiBackgroundService -GitAiExe $gitAiExe -Hard)
             [void](Stop-GitAiManagedProcesses -InstallDir $InstallDir)
         }
 
         if (-not (Test-FileAvailable -Path $Path)) {
             if ($elapsed -eq 0) {
+                if ($passiveAutoUpdate) {
+                    Write-Warning "git-ai is busy; deferring this auto-update instead of interrupting active work: $Path"
+                } else {
                 Write-Host "Waiting for file to be available: $Path" -ForegroundColor Yellow
+                }
             }
-            Start-Sleep -Seconds $RetryIntervalSeconds
-            $elapsed += $RetryIntervalSeconds
+            Start-Sleep -Seconds $effectiveRetryIntervalSeconds
+            $elapsed += $effectiveRetryIntervalSeconds
         }
     }
     return $false
@@ -620,11 +654,22 @@ Verify-Checksum -File $tmpFile -BinaryName $downloadedBinaryName
 $uploadActivityLock = Acquire-UploadActivityLock
 
 $finalExe = Join-Path $installDir 'git-ai.exe'
+$gitShim = Join-Path $installDir 'git.exe'
+
+if ((Test-PassiveAutoUpdateMode) -and (Test-Path -LiteralPath $gitShim)) {
+    if (-not (Wait-ForFileAvailable -Path $gitShim -InstallDir $installDir -MaxWaitSeconds 300 -RetryIntervalSeconds 5)) {
+        Remove-Item -Force -ErrorAction SilentlyContinue $tmpFile
+        Write-ErrorAndExit "Deferred auto-update because $gitShim is still in use. git-ai will retry on a later update check."
+    }
+}
 
 # Wait for git-ai.exe to be available if it exists and is in use
 if (Test-Path -LiteralPath $finalExe) {
     if (-not (Wait-ForFileAvailable -Path $finalExe -InstallDir $installDir -MaxWaitSeconds 300 -RetryIntervalSeconds 5)) {
         Remove-Item -Force -ErrorAction SilentlyContinue $tmpFile
+        if (Test-PassiveAutoUpdateMode) {
+            Write-ErrorAndExit "Deferred auto-update because $finalExe is still in use. git-ai will retry on a later update check."
+        }
         Write-ErrorAndExit "Timeout waiting for $finalExe to be available. Please close any running git-ai processes and try again."
     }
 }
@@ -633,11 +678,12 @@ Move-Item -Force -Path $tmpFile -Destination $finalExe
 try { Unblock-File -Path $finalExe -ErrorAction SilentlyContinue } catch { }
 
 # Create a shim so calling `git` goes through git-ai by PATH precedence
-$gitShim = Join-Path $installDir 'git.exe'
-
 # Wait for git.exe shim to be available if it exists and is in use
 if (Test-Path -LiteralPath $gitShim) {
     if (-not (Wait-ForFileAvailable -Path $gitShim -InstallDir $installDir -MaxWaitSeconds 300 -RetryIntervalSeconds 5)) {
+        if (Test-PassiveAutoUpdateMode) {
+            Write-ErrorAndExit "Deferred auto-update because $gitShim is still in use. git-ai will retry on a later update check."
+        }
         Write-ErrorAndExit "Timeout waiting for $gitShim to be available. Please close any running git processes and try again."
     }
 }
