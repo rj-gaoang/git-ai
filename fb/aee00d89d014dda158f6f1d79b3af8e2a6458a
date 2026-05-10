@@ -1,0 +1,72 @@
+src/authorship/internal_db.rs
+  127becf925fb23fd 667-722
+src/integration/upload_stats.rs
+  127becf925fb23fd 293,504,516-524,545-550,552,557-560,563-631,633-634,636,639,1753,1771-1868
+Cargo.toml
+  h_c122390aeb95ca 3
+---
+{
+  "schema_version": "authorship/3.1.0",
+  "git_ai_version": "2.0.26",
+  "x_user_id": "108",
+  "base_commit_sha": "fbaee00d89d014dda158f6f1d79b3af8e2a6458a",
+  "prompts": {
+    "127becf925fb23fd": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "c6a1eca2-8f6f-460a-99cd-3c1e523c21b4",
+        "model": "copilot/gpt-5.4"
+      },
+      "human_author": "shunfei",
+      "messages": [],
+      "total_additions": 255,
+      "total_deletions": 26,
+      "accepted_lines": 255,
+      "overriden_lines": 0
+    },
+    "b1bb83cf3072fb34": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "c6a1eca2-8f6f-460a-99cd-3c1e523c21b4",
+        "model": "copilot/gpt-5.4"
+      },
+      "human_author": "shunfei",
+      "messages": [],
+      "total_additions": 21,
+      "total_deletions": 20,
+      "accepted_lines": 0,
+      "overriden_lines": 0
+    },
+    "c84f2b7205d5d529": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "c6a1eca2-8f6f-460a-99cd-3c1e523c21b4",
+        "model": "copilot/gpt-5.4"
+      },
+      "human_author": "shunfei",
+      "messages": [],
+      "total_additions": 31,
+      "total_deletions": 5,
+      "accepted_lines": 0,
+      "overriden_lines": 0
+    },
+    "e2e5d9b5dcf8db28": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "c6a1eca2-8f6f-460a-99cd-3c1e523c21b4",
+        "model": "copilot/gpt-5.4"
+      },
+      "human_author": "shunfei",
+      "messages": [],
+      "total_additions": 225,
+      "total_deletions": 23,
+      "accepted_lines": 1,
+      "overriden_lines": 0
+    }
+  },
+  "humans": {
+    "h_c122390aeb95ca": {
+      "author": "shunfei"
+    }
+  }
+}

@@ -1,0 +1,365 @@
+README.md
+  h_413aef030e07df 249
+  s_62ad5d9390958d::t_a44e4312c57e7c 247-248
+src/authorship/virtual_attribution.rs
+  s_62ad5d9390958d::t_5786add2c95c9d 1505-1518,1927-1938
+  s_62ad5d9390958d::t_a22494d32dbc9c 35-127,547-556,697-706,839-848,1939,2262-2263,2265-2266,2268,2270,2275
+  s_62ad5d9390958d::t_8e198dbcf49efb 2793-2913
+src/authorship/prompt_utils.rs
+  s_62ad5d9390958d::t_6ca468c987a2ad 38-40,42-43,50-72,121,127,137,146-206
+src/transcripts/model_extraction.rs
+  s_62ad5d9390958d::t_6ca468c987a2ad 82-92,243-259
+docs/design-doc/git-ai看板方案.md
+  h_413aef030e07df 78,2404,2414-2415,2843,2849-2850,2852
+  s_62ad5d9390958d::t_fddecdd2ec29f1 77,2851
+---
+{
+  "schema_version": "authorship/3.1.0",
+  "git_ai_version": "development:2.1.3",
+  "x_user_id": "108",
+  "base_commit_sha": "be5f60e16ab674b58b1aca9e6a3c584a3ca3fc70",
+  "prompts": {
+    "s_62ad5d9390958d::t_11f39b49764c3a": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "251a8065-02b5-4f27-9cfa-eb3dd11a5bac",
+        "model": "unknown"
+      },
+      "human_author": "gaoang <gaoang@ruijie.com.cn>",
+      "messages": [],
+      "total_additions": 521,
+      "total_deletions": 313,
+      "accepted_lines": 0,
+      "overriden_lines": 0
+    },
+    "s_62ad5d9390958d::t_5786add2c95c9d": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "251a8065-02b5-4f27-9cfa-eb3dd11a5bac",
+        "model": "unknown"
+      },
+      "human_author": "gaoang <gaoang@ruijie.com.cn>",
+      "messages": [],
+      "total_additions": 521,
+      "total_deletions": 313,
+      "accepted_lines": 27,
+      "overriden_lines": 0
+    },
+    "s_62ad5d9390958d::t_6ca468c987a2ad": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "251a8065-02b5-4f27-9cfa-eb3dd11a5bac",
+        "model": "unknown"
+      },
+      "human_author": "gaoang <gaoang@ruijie.com.cn>",
+      "messages": [],
+      "total_additions": 521,
+      "total_deletions": 313,
+      "accepted_lines": 695,
+      "overriden_lines": 0
+    },
+    "s_62ad5d9390958d::t_8e198dbcf49efb": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "251a8065-02b5-4f27-9cfa-eb3dd11a5bac",
+        "model": "unknown"
+      },
+      "human_author": "gaoang <gaoang@ruijie.com.cn>",
+      "messages": [],
+      "total_additions": 521,
+      "total_deletions": 313,
+      "accepted_lines": 121,
+      "overriden_lines": 0
+    },
+    "s_62ad5d9390958d::t_a22494d32dbc9c": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "251a8065-02b5-4f27-9cfa-eb3dd11a5bac",
+        "model": "unknown"
+      },
+      "human_author": "gaoang <gaoang@ruijie.com.cn>",
+      "messages": [],
+      "total_additions": 521,
+      "total_deletions": 313,
+      "accepted_lines": 2874,
+      "overriden_lines": 0
+    },
+    "s_62ad5d9390958d::t_a44e4312c57e7c": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "251a8065-02b5-4f27-9cfa-eb3dd11a5bac",
+        "model": "unknown"
+      },
+      "human_author": "gaoang <gaoang@ruijie.com.cn>",
+      "messages": [],
+      "total_additions": 521,
+      "total_deletions": 313,
+      "accepted_lines": 292,
+      "overriden_lines": 0
+    },
+    "s_62ad5d9390958d::t_fddecdd2ec29f1": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "251a8065-02b5-4f27-9cfa-eb3dd11a5bac",
+        "model": "unknown"
+      },
+      "human_author": "gaoang <gaoang@ruijie.com.cn>",
+      "messages": [
+        {
+          "type": "user",
+          "text": "查看git-ai源码，2026-05-06 19:40:42，提交了ecp-rule、ecp-system，代码都是AI生成的，为什么判断成了人工",
+          "timestamp": "2026-05-07T01:58:17.594Z"
+        },
+        {
+          "type": "user",
+          "text": "我知道是归因错误，我问的就是为什么归因错误，看板方案中有几次实施补充，为什么没有处理掉这个问题",
+          "timestamp": "2026-05-07T02:04:31.873Z"
+        },
+        {
+          "type": "user",
+          "text": "https://github.com/git-ai-project/git-ai  这是git-ai的源码，现在目录下面的是我二开的，是不是我二开导致的问题？如果是，修复方案可不可以参考源码？",
+          "timestamp": "2026-05-07T02:21:06.444Z"
+        },
+        {
+          "type": "user",
+          "text": "\"，而是你当前二开的归因核心没有完整跟上 upstream 在 async/daemon 方向上的修复思路\"，没看懂，是我二开开发出的问题，还是之前本身就有问题，git-ai本身后来做了修复？",
+          "timestamp": "2026-05-07T02:25:55.714Z"
+        },
+        {
+          "type": "user",
+          "text": "给我具体的表",
+          "timestamp": "2026-05-07T02:27:37.836Z"
+        },
+        {
+          "type": "user",
+          "text": "上游是什么时候修复的？",
+          "timestamp": "2026-05-07T02:29:44.009Z"
+        },
+        {
+          "type": "user",
+          "text": "当前git-ai主动上传统计结果的命令是什么",
+          "timestamp": "2026-05-07T09:22:04.732Z"
+        },
+        {
+          "type": "user",
+          "text": "$env:GIT_AI_DEBUG 这个命令什么输出也没有是什么情况",
+          "timestamp": "2026-05-07T09:23:54.418Z"
+        },
+        {
+          "type": "user",
+          "text": "PS D:\\git-ai-main> Test-Path Env:GIT_AI_DEBU\r\nFalse\r\nPS D:\\git-ai-main> Get-ChildItem Env:GIT_AI_DEBUG\r\n\r\nName                           Value                                                                              \r\n----                           -----                                                                              \r\nGIT_AI_DEBUG                   1                                                                                  \r\n\r\n\r\nPS D:\\git-ai-main>  这是什么意思？",
+          "timestamp": "2026-05-07T09:27:27.958Z"
+        },
+        {
+          "type": "user",
+          "text": "PS D:\\work\\rj-performance-management> git-ai upload-ai-stats HEAD\r\n[git-ai] upload-stats: skipped 06e9079 source=manual reason=no_authorship_note\r\n[git-ai] upload-stats: completed source=manual uploaded=0 dry_run=0 skipped=1 failed=0\r\nPS D:\\work\\rj-performance-management> git-ai upload-stats --dry-run\r\n[git-ai] upload-stats: skipped 06e9079 source=manual reason=no_authorship_note\r\n[git-ai] upload-stats: completed source=manual uploaded=0 dry_run=0 skipped=1 failed=0\r\nPS D:\\work\\rj-performance-management> git-ai upload-stats  \r\n[git-ai] upload-stats: skipped 06e9079 source=manual reason=no_authorship_note\r\n[git-ai] upload-stats: completed source=manual uploaded=0 dry_run=0 skipped=1 failed=0\r\nPS D:\\RjDir\\UserData\\Downloads\\windows-x64> powershell -NoProfile -ExecutionPolicy Bypass -File .\\install.ps1\r\nDownloading git-ai (repo: rj-gaoang/git-ai, release: local)...\r\nChecksum verified for git-ai-windows-x64.exe\r\nWaiting for file to be available: C:\\Users\\admin\\.git-ai\\bin\\git-ai.exe\r\nStopping lingering git-ai processes: 15568\r\nSetting up IDE/agent hooks...\r\n\r\nCoding Agents\r\n鉁?VS Code: Hooks already up to date\r\n⠋ VS Code: git.path already configured in C:\\Users\\admin\\AppData\\Roaming\\Code\\User\\settings.json                        \r\n鉁?VS Code: git.path already configured in C:\\Users\\admin\\AppData\\Roaming\\Code\\User\\settings.json\r\n鉁?VS Code: chat hook settings already configured in C:\\Users\\admin\\AppData\\Roaming\\Code\\User\\settings.json\r\n鉁?GitHub Copilot: Hooks already up to date\r\n\r\nGit Clients\r\nSuccessfully set up IDE/agent hooks\r\ngit-ai already present in the user PATH.\r\ngit-ai already present in the system PATH.\r\nSuccessfully installed git-ai into C:\\Users\\admin\\.git-ai\\bin\r\nYou can now run 'git-ai' from your terminal\r\nGit Bash already configured (C:\\Users\\admin\\.bashrc)\r\nClose and reopen your terminal and IDE sessions to use git-ai.  在其他人电脑上为什么没反应呢？怎么回事？这安装没成功吗？安装完成后$env:GIT_AI_DEBUG 都没有输出的，别说什么默认值，默认值现在是1；log文件夹中,jsonl文件都没有生成",
+          "timestamp": "2026-05-07T09:54:08.420Z"
+        },
+        {
+          "type": "user",
+          "text": "别人电脑 2 分钟安装验收清单",
+          "timestamp": "2026-05-07T10:01:12.449Z"
+        },
+        {
+          "type": "user",
+          "text": "PS D:\\project\\rj-performance-web> Get-Command git-ai | Format-List Source\r\n\r\n\r\nSource : C:\\Users\\admin\\.git-ai\\bin\\git-ai.exe\r\n\r\n\r\n\r\nPS D:\\project\\rj-performance-web> where.exe git-ai\r\nC:\\Users\\admin\\.git-ai\\bin\\git-ai.exe\r\nPS D:\\project\\rj-performance-web> git-ai --version\r\n2.1.1\r\nPS D:\\project\\rj-performance-web> git-ai status --json\r\n{\"stats\":{\"human_additions\":0,\"unknown_additions\":0,\"mixed_additions\":0,\"ai_additions\":0,\"ai_accepted\":0,\"total_ai_additions\":0,\"total_ai_deletions\":0,\"time_waiting_for_ai\":0,\"git_diff_deleted_lines\":0,\"git_diff_added_lines\":0,\"tool_model_breakdown\":{}},\"checkpoints\":[]}\r\nPS D:\\project\\rj-performance-web> Get-ChildItem Env:GIT_AI_DEBUG\r\nGet-ChildItem : 找不到路径“GIT_AI_DEBUG”，因为该路径不存在。\r\n所在位置 行:1 字符: 1\r\n+ Get-ChildItem Env:GIT_AI_DEBUG\r\n+ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\r\n    + CategoryInfo          : ObjectNotFound: (GIT_AI_DEBUG:String) [Get-ChildItem], ItemNotFoundException\r\n    + FullyQualifiedErrorId : PathNotFound,Microsoft.PowerShell.Commands.GetChildItemCommand\r\n\r\nPS D:\\project\\rj-performance-web> Test-Path \"$env:USERPROFILE\\.git-ai\\logs\\debug.jsonl\"\r\nFalse\r\nPS D:\\project\\rj-performance-web> git rev-parse --show-toplevel\r\nD:/project/rj-performance-web\r\nPS D:\\project\\rj-performance-web> git-ai status --json\r\n{\"stats\":{\"human_additions\":0,\"unknown_additions\":0,\"mixed_additions\":0,\"ai_additions\":0,\"ai_accepted\":0,\"total_ai_additions\":0,\"total_ai_deletions\":0,\"time_waiting_for_ai\":0,\"git_diff_deleted_lines\":0,\"git_diff_added_lines\":0,\"tool_model_breakdown\":{}},\"checkpoints\":[]}\r\nPS D:\\project\\rj-performance-web> git-ai upload-stats --dry-run\r\n[git-ai] upload-stats: skipped 8b1f5f6 source=manual reason=no_authorship_note\r\n[git-ai] upload-stats: completed source=manual uploaded=0 dry_run=0 skipped=1 failed=0\r\nPS D:\\project\\rj-performance-web> Get-Content \"$env:USERPROFILE\\.git-ai\\logs\\debug.jsonl\" -Tail 20\r\n{\"commitSha\":\"8b1f********6380\",\"commitShort\":\"8b1f5f6\",\"dryRun\":true,\"event\":\"upload_stats_manual_entered\",\"ignorePatternCount\":30,\"processId\":18580,\"repo\":\"\\\\\\\\?\\\\D:\\\\project\\\\rj-performance-web\",\"schemaVersion\":1,\"source\":\"manual\",\"timestamp\":\"2026-05-07T18:12:40.514+08:00\",\"timestampMs\":1778148760514}\r\n{\"commitSha\":\"8b1f********6380\",\"commitShort\":\"8b1f5f6\",\"event\":\"upload_stats_skipped\",\"processId\":18580,\"reason\":\"manual_no_authorship_note\",\"repo\":\"\\\\\\\\?\\\\D:\\\\project\\\\rj-performance-web\",\"schemaVersion\":1,\"source\":\"manual\",\"timestamp\":\"2026-05-07T18:12:40.585+08:00\",\"timestampMs\":1778148760585}\r\nPS D:\\project\\rj-performance-web> git rev-parse HEAD\r\n8b1f********6380\r\nPS D:\\project\\rj-performance-web> git notes --ref=ai show HEAD\r\nerror: no note found for object 8b1f5f6a1d9dd88045e186bb0783293ca1786380.  这是执行结果，具体什么情况？",
+          "timestamp": "2026-05-07T10:18:37.777Z"
+        },
+        {
+          "type": "user",
+          "text": "PS D:\\project\\rj-performance-web> Get-Command git | Format-List Source\r\n>> where.exe git\r\n\r\n\r\nSource : C:\\Users\\admin\\.git-ai\\bin\\git.exe\r\n\r\n\r\n\r\nC:\\Users\\admin\\.git-ai\\bin\\git.exe\r\nC:\\Program Files\\Git\\cmd\\git.exe  ",
+          "timestamp": "2026-05-07T10:26:22.514Z"
+        },
+        {
+          "type": "user",
+          "text": "PS D:\\project\\rj-performance-web> git commit -m \"feat: 测试ai提交\"\r\n\r\n> @one/web@25.12.8 lint\r\n> oxfmt && oxlint --fix --deny-warnings\r\n\r\nFound 0 warnings and 0 errors.\r\nFinished in 9.5s on 187 files using 8 threads.\r\n✅ lint 通过\r\n[26.5.6-feat-demo-check 59f4d10] feat: 测试ai提交\r\n 1 file changed, 4 insertions(+), 4 deletions(-)\r\n[git-ai] still processing commit 59f4d100... run `git ai stats` to see stats.\r\nPS D:\\project\\rj-performance-web> git notes --ref=ai show HEAD\r\nerror: no note found for object 59f4d1009c6122293a30aa64c8b8f1dacf7e7ff5.\r\nPS D:\\project\\rj-performance-web> Get-Content \"$env:USERPROFILE\\.git-ai\\logs\\debug.jsonl\" -Tail 50\r\n{\"commitSha\":\"8b1f********6380\",\"commitShort\":\"8b1f5f6\",\"dryRun\":true,\"event\":\"upload_stats_manual_entered\",\"ignorePatternCount\":30,\"processId\":18580,\"repo\":\"\\\\\\\\?\\\\D:\\\\project\\\\rj-performance-web\",\"schemaVersion\":1,\"source\":\"manual\",\"timestamp\":\"2026-05-07T18:12:40.514+08:00\",\"timestampMs\":1778148760514}\r\n{\"commitSha\":\"8b1f********6380\",\"commitShort\":\"8b1f5f6\",\"event\":\"upload_stats_skipped\",\"processId\":18580,\"reason\":\"manual_no_authorship_note\",\"repo\":\"\\\\\\\\?\\\\D:\\\\project\\\\rj-performance-web\",\"schemaVersion\":1,\"source\":\"manual\",\"timestamp\":\"2026-05-07T18:12:40.585+08:00\",\"timestampMs\":1778148760585}\r\nPS D:\\project\\rj-performance-web>  这是执行结果",
+          "timestamp": "2026-05-07T10:32:20.863Z"
+        },
+        {
+          "type": "user",
+          "text": "bg status / bg tail 输出怎么看”",
+          "timestamp": "2026-05-07T10:39:50.320Z"
+        },
+        {
+          "type": "user",
+          "text": "最快的解决办法，是不是异步改成同步就好了？",
+          "timestamp": "2026-05-07T10:42:51.585Z"
+        },
+        {
+          "type": "user",
+          "text": "怎么将git版本更新为最新",
+          "timestamp": "2026-05-07T11:13:50.131Z"
+        },
+        {
+          "type": "user",
+          "text": "对于排查问题，我可以从用户这里收集什么信息并上传？比如git-ai版本？比如使用IDE工具？比如git的版本？",
+          "timestamp": "2026-05-08T02:18:18.698Z"
+        },
+        {
+          "type": "user",
+          "text": "**请求体（JSON 格式）：**  这里面增加参数：git-ai的cli版本号，git-ai的插件版本号，使用的IDE工具名称以及版本号，git版本",
+          "timestamp": "2026-05-08T02:22:24.090Z"
+        },
+        {
+          "type": "user",
+          "text": "1. 取消当前git-ai的merging状态，不要改feature_20260429_gaoang这个分支上的任何代码  2.现在我sync fork git-ai的mian分支，为什么提示“This branch has conflicts that must be resolved”？我应该没往我自己仓库git-ai的main分支上提交代码？",
+          "timestamp": "2026-05-08T06:16:11.973Z"
+        },
+        {
+          "type": "user",
+          "text": "你本地 main 跟踪的是 upstream/main。这是什么意思？",
+          "timestamp": "2026-05-08T06:24:36.857Z"
+        },
+        {
+          "type": "user",
+          "text": "现在我把upstream/main往我自己的开发分支feature_20260429_gaoang合并时产生了大量冲突，现在处理这些冲突，对于每一个冲突模块都说明为什么这么处理？开发分支解决了一批bug，添加了一些功能，这些要保留，如果和upstream/main有冲突，判断upstream/main是不是也在解决相同的bug，如果官方的解决有效，就保留官方的代码，先不要急着合并，先形成一个md文档，文档说明每一个冲突，以及你的建议应该怎么做？",
+          "timestamp": "2026-05-08T06:34:14.156Z"
+        },
+        {
+          "type": "user",
+          "text": "你是只读代码探索子代理。请在工作区 d:\\git-ai-main\\git-ai 和临时冲突 worktree d:\\git-ai-main\\.merge-analysis-git-ai-0920aa64 中分析 merge upstream/main into feature_20260429_gaoang 的冲突。不要写文件，不要修改任何代码。\n\n背景：feature_20260429_gaoang 有本地 bug fix/功能，upstream/main 大幅重构。冲突文件如下：\nCargo.lock, Cargo.toml, flake.nix, install.ps1, src/authorship/post_commit.rs, src/authorship/secrets.rs, 三个 snapshots, src/authorship/stats.rs, src/commands/checkpoint.rs, src/commands/checkpoint_agent/agent_presets.rs, src/commands/daemon.rs, src/commands/install_hooks.rs, src/config.rs, src/feature_flags.rs, src/git/refs.rs, tests/integration/performance.rs。\n\n请重点分析：\n1. 每个冲突文件/模块 ours(feature) 做了什么，theirs(upstream/main) 做了什么。\n2. 本地 feature 修的 bug/新增功能在 upstream/main 是否已有等价或更优实现。\n3. 推荐冲突处理策略：保留 upstream、保留 feature、手工合并并移植哪些点、或删除/重生成。\n4. 对 checkpoint.rs 和 agent_presets.rs 这种 upstream 删除但 feature 修改的冲突，请找 upstream 新位置（例如 daemon/checkpoint、checkpoint_agent/presets 等）是否已覆盖本地修复。\n\n请返回一份中文结构化摘要，按模块分组，包含明确建议和理由。不要泛泛而谈。",
+          "timestamp": "2026-05-08T06:37:40.929Z"
+        },
+        {
+          "type": "user",
+          "text": "不够详细，精确说明需要保留哪一段代码",
+          "timestamp": "2026-05-08T07:37:17.074Z"
+        },
+        {
+          "type": "user",
+          "text": "现在根据文档进行代码的merge，把代码merge到\"feature_20260429_gaoang\"分支上，我的底线：已经解决的bug绝不能复现；绝不能因为合并代码引入新的bug；绝不能影响已有的功能",
+          "timestamp": "2026-05-08T07:46:54.130Z"
+        },
+        {
+          "type": "user",
+          "text": "Continue: \"Continue to iterate?\"",
+          "timestamp": "2026-05-08T08:57:46.278Z"
+        },
+        {
+          "type": "user",
+          "text": "checkpoint.rs和agent_presets.rs 是把代码行全删了吗？为什么显示-4908 和 -4712？ ",
+          "timestamp": "2026-05-08T09:21:50.394Z"
+        },
+        {
+          "type": "user",
+          "text": "现在我看git-ai为什么还是显示merging?\r\n",
+          "timestamp": "2026-05-08T09:28:03.808Z"
+        },
+        {
+          "type": "user",
+          "text": "从当前分支上重新拉一个分支“feature_20260508_gaoang”，执行commit并把代码push到远程远程仓库，也就说当前的代码改动在feature_20260508_gaoang分支上，20260429这个分支先不要动",
+          "timestamp": "2026-05-08T09:31:48.663Z"
+        },
+        {
+          "type": "user",
+          "text": "哪个未跟踪文档文件",
+          "timestamp": "2026-05-08T09:36:33.588Z"
+        },
+        {
+          "type": "user",
+          "text": "直接排查问题吧，刚才commit的代码，AI统计结果没有上传到看板",
+          "timestamp": "2026-05-08T09:40:18.952Z"
+        },
+        {
+          "type": "user",
+          "text": "上传时加上参数：    \"clientContext\": {\r\n        \"gitAiCliVersion\": \"1.3.5\",\r\n        \"gitAiPluginVersion\": \"0.9.2\",\r\n        \"ideName\": \"VS Code\",\r\n        \"ideVersion\": \"1.100.2\",\r\n        \"gitVersion\": \"2.49.0.windows.1\"\r\n    },",
+          "timestamp": "2026-05-08T09:49:07.623Z"
+        },
+        {
+          "type": "user",
+          "text": "GIT_AI_REPORT_PLUGIN_VERSION、GIT_AI_REPORT_IDE_NAME、GIT_AI_REPORT_IDE_VERSION  怎么注入？为什么不能自动采集？2.批量上传脚本需要带同样的 clientContext",
+          "timestamp": "2026-05-08T10:05:54.271Z"
+        },
+        {
+          "type": "user",
+          "text": "git-ai的cli怎么做到自动更新呢？现在需要在commit时自动更新，如果git-ai的版本是旧的，自动拉取github仓库中构建的最新版本",
+          "timestamp": "2026-05-08T10:29:32.021Z"
+        },
+        {
+          "type": "user",
+          "text": "实现方案补充在当前的方案文档里",
+          "timestamp": "2026-05-08T10:36:10.209Z"
+        },
+        {
+          "type": "user",
+          "text": "926e8538 gaoang <gaoang@ruijie.com.cn> on 2026/5/8 at 18:28 这次commit时，为什么统计结果没有上传到看板？这次commit就是普通手动commit",
+          "timestamp": "2026-05-08T10:48:03.326Z"
+        },
+        {
+          "type": "user",
+          "text": "VS Code 当下实际使用的 Git 路径是正常的，因为后面一次commit已经可以正常上传",
+          "timestamp": "2026-05-08T11:02:01.122Z"
+        },
+        {
+          "type": "user",
+          "text": "是不是merge代码时影响到了正常逻辑？现在PS D:\\rj-op\\op-return-exchange> 最近一次提交的代码中，测试类中的代码全是AI新增夫人，但是呗判读成了人工，为什么？",
+          "timestamp": "2026-05-08T11:41:20.181Z"
+        },
+        {
+          "type": "user",
+          "text": "我知道是note 里没有任何 AI prompt 记录，问题是为什么note 里没有任何 AI prompt 记录？",
+          "timestamp": "2026-05-08T11:46:32.506Z"
+        },
+        {
+          "type": "user",
+          "text": "现在的问题就是需要排查出来为什么归因错误？你把原因找出来啊，C:\\Users\\admin\\.git-ai\\logs 结合日志去查",
+          "timestamp": "2026-05-08T12:03:50.559Z"
+        },
+        {
+          "type": "user",
+          "text": "根因是什么呢？你能不能别老是给我表面原因？为什么美金working log",
+          "timestamp": "2026-05-08T12:09:47.626Z"
+        },
+        {
+          "type": "user",
+          "text": "为什么会出现这种情况？合并代码前还没有，代码合并后为什么会产生这种情况？",
+          "timestamp": "2026-05-08T12:39:38.279Z"
+        },
+        {
+          "type": "user",
+          "text": "修复这个问题",
+          "timestamp": "2026-05-08T15:31:17.984Z"
+        },
+        {
+          "type": "user",
+          "text": "1. 现在上传的结果中模型也没了，提示词也没了？",
+          "timestamp": "2026-05-09T02:08:17.361Z"
+        },
+        {
+          "type": "user",
+          "text": "不需要修复历史数据，解决当前问题，确保之后commit的代码可以正常上传模型和提示词；同样确认下是不是这钱merge main分支把代码逻辑搞坏了",
+          "timestamp": "2026-05-09T02:23:53.896Z"
+        },
+        {
+          "type": "user",
+          "text": "直接在 PS D:\\rj-op\\op-return-exchange>  这个项目下的测试类中进行测试，并把修复方案补充在方案文档里",
+          "timestamp": "2026-05-09T02:31:12.884Z"
+        },
+        {
+          "type": "user",
+          "text": "代码合并前是可以正常上传使用的AI模型的，为什么merge之后就无法获取到了呢",
+          "timestamp": "2026-05-09T03:15:08.735Z"
+        }
+      ],
+      "total_additions": 521,
+      "total_deletions": 313,
+      "accepted_lines": 2,
+      "overriden_lines": 0
+    }
+  },
+  "humans": {
+    "h_413aef030e07df": {
+      "author": "gaoang <gaoang@ruijie.com.cn>"
+    }
+  },
+  "sessions": {
+    "s_62ad5d9390958d": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "251a8065-02b5-4f27-9cfa-eb3dd11a5bac",
+        "model": "unknown"
+      },
+      "human_author": "gaoang <gaoang@ruijie.com.cn>"
+    }
+  }
+}

@@ -1,0 +1,17 @@
+src/commands/checkpoint_agent/agent_presets.rs
+  h_c122390aeb95ca 229-277,3464-3488,3500
+docs/design-doc/git-ai看板方案.md
+  h_c122390aeb95ca 51-52,2101,2324,2617
+---
+{
+  "schema_version": "authorship/3.1.0",
+  "git_ai_version": "2.0.13",
+  "x_user_id": "108",
+  "base_commit_sha": "9edf1ab209a72f31d67f10c9b6979a1cde686920",
+  "prompts": {},
+  "humans": {
+    "h_c122390aeb95ca": {
+      "author": "shunfei"
+    }
+  }
+}

@@ -1,0 +1,20 @@
+src/commands/checkpoint_agent/presets/github_copilot/ide.rs
+  s_62ad5d9390958d::t_0a3b6f6ab7952b 177,203-213,338-347,358-359,372-477,1066-1201
+---
+{
+  "schema_version": "authorship/3.1.0",
+  "git_ai_version": "2.1.2",
+  "x_user_id": "108",
+  "base_commit_sha": "0700e15fb8c23e3a0270877044a8e6c8ba1b3141",
+  "prompts": {},
+  "sessions": {
+    "s_62ad5d9390958d": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "251a8065-02b5-4f27-9cfa-eb3dd11a5bac",
+        "model": "unknown"
+      },
+      "human_author": "gaoang <gaoang@ruijie.com.cn>"
+    }
+  }
+}

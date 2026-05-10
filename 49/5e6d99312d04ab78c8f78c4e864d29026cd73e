@@ -1,0 +1,29 @@
+Cargo.toml
+  h_c122390aeb95ca 3
+---
+{
+  "schema_version": "authorship/3.1.0",
+  "git_ai_version": "2.0.20",
+  "x_user_id": "108",
+  "base_commit_sha": "495e6d99312d04ab78c8f78c4e864d29026cd73e",
+  "prompts": {
+    "96e6006e1e5f0855": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "c6a1eca2-8f6f-460a-99cd-3c1e523c21b4",
+        "model": "copilot/gpt-5.4"
+      },
+      "human_author": "shunfei",
+      "messages": [],
+      "total_additions": 7,
+      "total_deletions": 2,
+      "accepted_lines": 0,
+      "overriden_lines": 2
+    }
+  },
+  "humans": {
+    "h_c122390aeb95ca": {
+      "author": "shunfei"
+    }
+  }
+}

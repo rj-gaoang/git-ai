@@ -1,0 +1,33 @@
+Cargo.toml
+  h_c122390aeb95ca 3
+docs/design-doc/git-ai看板方案.md
+  96e6006e1e5f0855 71-72,2385,2620-2637
+src/commands/checkpoint.rs
+  96e6006e1e5f0855 1816,1825-1841,1847,2425
+---
+{
+  "schema_version": "authorship/3.1.0",
+  "git_ai_version": "2.0.21",
+  "x_user_id": "108",
+  "base_commit_sha": "9fa8267018fff4ae46d307a339001d7d12ed644e",
+  "prompts": {
+    "96e6006e1e5f0855": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "c6a1eca2-8f6f-460a-99cd-3c1e523c21b4",
+        "model": "copilot/gpt-5.4"
+      },
+      "human_author": "shunfei",
+      "messages": [],
+      "total_additions": 42,
+      "total_deletions": 2,
+      "accepted_lines": 42,
+      "overriden_lines": 2
+    }
+  },
+  "humans": {
+    "h_c122390aeb95ca": {
+      "author": "shunfei"
+    }
+  }
+}

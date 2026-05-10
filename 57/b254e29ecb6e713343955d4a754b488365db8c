@@ -1,0 +1,39 @@
+Cargo.toml
+  h_c122390aeb95ca 3
+docs/design-doc/git-ai环境变量与配置说明.md
+  96e6006e1e5f0855 74
+src/authorship/stats.rs
+  96e6006e1e5f0855 2,53-65,580-581,598-601,604,606,610,613-614,620-622,624-630,633-634,636-638,640,642-649,651-682,700-817,1327-1353
+docs/design-doc/git-ai看板方案.md
+  96e6006e1e5f0855 59-61,65-66,2104
+src/diagnostics.rs
+  96e6006e1e5f0855 1,10,58,87-94,184-191
+src/integration/upload_stats.rs
+  96e6006e1e5f0855 18,20-22,29,824,1016-1018,1023-1033,1037-1039,1045-1046,1050-1052,1077-1085,1087-1094,1238,1510-1540
+---
+{
+  "schema_version": "authorship/3.1.0",
+  "git_ai_version": "2.0.18",
+  "x_user_id": "108",
+  "base_commit_sha": "57b254e29ecb6e713343955d4a754b488365db8c",
+  "prompts": {
+    "96e6006e1e5f0855": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "c6a1eca2-8f6f-460a-99cd-3c1e523c21b4",
+        "model": "copilot/gpt-5.4"
+      },
+      "human_author": "shunfei",
+      "messages": [],
+      "total_additions": 373,
+      "total_deletions": 142,
+      "accepted_lines": 569,
+      "overriden_lines": 0
+    }
+  },
+  "humans": {
+    "h_c122390aeb95ca": {
+      "author": "shunfei"
+    }
+  }
+}
