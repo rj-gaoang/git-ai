@@ -1,0 +1,59 @@
+.github/workflows/install-scripts-nightly.yml
+  s_1d12813bdfb252::t_2f2f1ddf424c1d 34-35,71,80
+docs/design-doc/git-ai看板方案.md
+  s_1d12813bdfb252::t_2f2f1ddf424c1d 75,2953
+README.md
+  s_1d12813bdfb252::t_2f2f1ddf424c1d 70,78,81
+---
+{
+  "schema_version": "authorship/3.1.0",
+  "git_ai_version": "2.1.18",
+  "x_user_id": "108",
+  "base_commit_sha": "6a4de995b60288bbad2f9e533041fb57069583e9",
+  "prompts": {
+    "s_1d12813bdfb252::t_2f2f1ddf424c1d": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "addeff52-ad7b-4ff7-89a2-e5738998a8e8",
+        "model": "copilot/gpt-5.4"
+      },
+      "human_author": "gaoang <gaoang@ruijie.com.cn>",
+      "messages": [
+        {
+          "type": "user",
+          "text": "PS D:\\rj-op\\op-return-exchange>  这个项目最进一次commit，为什么没有自动更新我的git-ai版本，可以根据日志排查问题C:\\Users\\admin\\.git-ai\\logs，现在最新的稳定版本是2.2.1",
+          "timestamp": "2026-05-11T12:18:38.091Z"
+        },
+        {
+          "type": "user",
+          "text": "https://github.com/rj-gaoang/git-ai/releases/tag/v2.2.1 最新的下载源就是2.2.1，这是我自己的仓库",
+          "timestamp": "2026-05-11T12:29:02.593Z"
+        },
+        {
+          "type": "user",
+          "text": "我不要手工升级，我就要能够自动升级，应该怎么改",
+          "timestamp": "2026-05-11T12:35:19.927Z"
+        },
+        {
+          "type": "user",
+          "text": "不用管已安装的用户，我的要求就是本次修改完，以后可以正常更新",
+          "timestamp": "2026-05-11T12:54:21.295Z"
+        }
+      ],
+      "total_additions": 9,
+      "total_deletions": 9,
+      "accepted_lines": 3418,
+      "overriden_lines": 0
+    }
+  },
+  "sessions": {
+    "s_1d12813bdfb252": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "addeff52-ad7b-4ff7-89a2-e5738998a8e8",
+        "model": "copilot/gpt-5.4"
+      },
+      "human_author": "gaoang <gaoang@ruijie.com.cn>"
+    }
+  }
+}
