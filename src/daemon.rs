@@ -7688,6 +7688,7 @@ impl ActorDaemonCoordinator {
                 };
                 Ok(response)
             }
+            ControlRequest::RestartAfterUpdate => Ok(ControlResponse::ok(None, None)),
             ControlRequest::Shutdown => Ok(ControlResponse::ok(None, None)),
         };
 
@@ -8037,10 +8038,16 @@ fn handle_control_connection_actor_reader<R: Read + Write>(
             continue;
         }
         let parsed = serde_json::from_str::<ControlRequest>(trimmed);
-        let mut shutdown_after_response = false;
+        let mut shutdown_after_response = None;
         let response = match parsed {
             Ok(req) => {
-                shutdown_after_response = matches!(req, ControlRequest::Shutdown);
+                shutdown_after_response = match &req {
+                    ControlRequest::Shutdown => Some(DaemonExitAction::Stop),
+                    ControlRequest::RestartAfterUpdate => {
+                        Some(DaemonExitAction::RestartAfterUpdate)
+                    }
+                    _ => None,
+                };
                 runtime_handle.block_on(async { coordinator.handle_control_request(req).await })
             }
             Err(e) => ControlResponse::err(format!("invalid control request: {}", e)),
@@ -8049,8 +8056,14 @@ fn handle_control_connection_actor_reader<R: Read + Write>(
         reader.get_mut().write_all(raw.as_bytes())?;
         reader.get_mut().write_all(b"\n")?;
         reader.get_mut().flush()?;
-        if shutdown_after_response {
-            coordinator.request_stop();
+        if let Some(action) = shutdown_after_response {
+            match action {
+                DaemonExitAction::Stop => coordinator.request_stop(),
+                DaemonExitAction::RestartAfterUpdate => {
+                    coordinator.request_restart_after_update();
+                }
+                DaemonExitAction::Restart => coordinator.request_restart(),
+            }
         }
     }
     Ok(())

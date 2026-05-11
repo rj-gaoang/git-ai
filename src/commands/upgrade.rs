@@ -555,6 +555,21 @@ fn install_invocation_mode(background: bool, auto_updates_disabled: bool) -> Ins
     }
 }
 
+#[cfg(windows)]
+fn should_request_daemon_restart_after_update(
+    action: &UpgradeAction,
+    silent_install: bool,
+) -> bool {
+    silent_install && *action == UpgradeAction::UpgradeAvailable
+}
+
+#[cfg(windows)]
+fn try_request_daemon_restart_after_update() -> Result<(), String> {
+    let daemon_config = crate::daemon::DaemonConfig::from_env_or_default_paths()
+        .map_err(|e| e.to_string())?;
+    crate::commands::daemon::request_restart_after_update(&daemon_config)
+}
+
 #[allow(dead_code)]
 fn verify_sha256(content: &[u8], expected_hash: &str) -> Result<(), String> {
     let mut hasher = Sha256::new();
@@ -1006,6 +1021,42 @@ fn run_impl_with_url(
 
     if skip_install {
         return action;
+    }
+
+    #[cfg(windows)]
+    if should_request_daemon_restart_after_update(&action, silent_install) {
+        match try_request_daemon_restart_after_update() {
+            Ok(()) => {
+                log_message(
+                    "daemon_restart_after_update_requested",
+                    "info",
+                    Some(serde_json::json!({
+                        "release_tag": release.tag,
+                        "current_version": current_version,
+                        "release_source": release_source,
+                        "release_repo": repo,
+                        "installer_url": installer_url,
+                        "channel": channel.as_str()
+                    })),
+                );
+                return action;
+            }
+            Err(error) => {
+                log_message(
+                    "daemon_restart_after_update_request_failed",
+                    "warn",
+                    Some(serde_json::json!({
+                        "error": error,
+                        "release_tag": release.tag,
+                        "current_version": current_version,
+                        "release_source": release_source,
+                        "release_repo": repo,
+                        "installer_url": installer_url,
+                        "channel": channel.as_str()
+                    })),
+                );
+            }
+        }
     }
 
     println!("Fetching installer script...");
@@ -1733,6 +1784,23 @@ mod tests {
                 silent_install: true,
             }
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_should_request_daemon_restart_after_update_only_for_background_upgrade() {
+        assert!(!should_request_daemon_restart_after_update(
+            &UpgradeAction::AlreadyLatest,
+            true,
+        ));
+        assert!(!should_request_daemon_restart_after_update(
+            &UpgradeAction::UpgradeAvailable,
+            false,
+        ));
+        assert!(should_request_daemon_restart_after_update(
+            &UpgradeAction::UpgradeAvailable,
+            true,
+        ));
     }
 
     #[test]

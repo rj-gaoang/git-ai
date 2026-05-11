@@ -824,6 +824,28 @@ pub(crate) fn stop_daemon(config: &DaemonConfig, timeout: Duration) -> Result<()
     hard_kill_daemon(config)
 }
 
+pub(crate) fn request_restart_after_update(config: &DaemonConfig) -> Result<(), String> {
+    if local_socket_connects_with_timeout(&config.control_socket_path, Duration::from_millis(100))
+        .is_err()
+    {
+        return Err("background service is not running".to_string());
+    }
+
+    let response = send_control_request(
+        &config.control_socket_path,
+        &ControlRequest::RestartAfterUpdate,
+    )
+    .map_err(|e| e.to_string())?;
+
+    if response.ok {
+        Ok(())
+    } else {
+        Err(response
+            .error
+            .unwrap_or_else(|| "daemon rejected restart-after-update request".to_string()))
+    }
+}
+
 /// Shut down the running daemon and start a fresh one. Escalates to hard kill
 /// if the soft shutdown doesn't complete within GRACEFUL_SHUTDOWN_TIMEOUT.
 pub(crate) fn restart_daemon(config: &DaemonConfig) -> Result<(), String> {
