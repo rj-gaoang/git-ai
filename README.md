@@ -67,7 +67,7 @@ fe2c4c8 (claude [session_id] 2025-12-02 19:25:13 -0500  142)             let fro
 **Mac, Linux, Windows (WSL)**
 
 ```bash
-curl -sSL https://usegitai.com/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/rj-gaoang/git-ai/main/install.sh | bash
 ```
 
 **Windows (non-WSL)**
@@ -75,10 +75,10 @@ curl -sSL https://usegitai.com/install.sh | bash
 Non-WSL Windows support is currently experimental and under active development. We would love to hear your feedback while we work to get non-WSL Windows support production-ready.
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://usegitai.com/install.ps1 | iex"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/rj-gaoang/git-ai/main/install.ps1 | iex"
 ```
 
-If you need the installer or built-in `git-ai upgrade` flow to pull binaries from a different GitHub repository, set `GIT_AI_GITHUB_REPO=<owner/repo>` before running it. `git-ai upgrade` now checks GitHub releases directly and defaults to `rj-gaoang/git-ai` latest stable release; set `GIT_AI_RELEASE_TAG=<tag-or-latest>` to pin a specific release, or `GIT_AI_INSTALLER_URL=<raw-install-script-url>` to override the installer script source while still downloading binaries from the selected release repo/tag. For local development validation, set `GIT_AI_LOCAL_BINARY` to a built executable instead.
+For this fork, the canonical installer entrypoint is the raw install script in `rj-gaoang/git-ai`, which keeps fresh installs aligned with the same repository that future auto-updates read from. If you need the installer or built-in `git-ai upgrade` flow to pull binaries from a different GitHub repository, set `GIT_AI_GITHUB_REPO=<owner/repo>` before running it. `git-ai upgrade` checks GitHub releases directly and defaults to the latest stable release from `rj-gaoang/git-ai`; set `GIT_AI_RELEASE_TAG=<tag-or-latest>` to pin a specific release, or `GIT_AI_INSTALLER_URL=<raw-install-script-url>` to override the installer script source while still downloading binaries from the selected release repo/tag. For local development validation, set `GIT_AI_LOCAL_BINARY` to a built executable instead.
 
 On Windows, both the installer and the runtime Git resolver skip any existing `git-ai` shim on `PATH` and look for a standard Git binary instead. Git for Windows still needs to be installed and reachable somewhere on `PATH`, typically via `C:\Program Files\Git\cmd`.
 
