@@ -1,0 +1,100 @@
+README.md
+  s_1d12813bdfb252::t_0779ce8f33546d 245
+tests/windows_install_script.rs
+  s_1d12813bdfb252::t_0779ce8f33546d 472-475,477,479-483
+  s_1d12813bdfb252::t_459fe82411ebd1 461-471
+  s_1d12813bdfb252::t_54eafc5a378c3f 476,478
+install.ps1
+  s_1d12813bdfb252::t_0779ce8f33546d 175
+  s_1d12813bdfb252::t_459fe82411ebd1 46
+src/commands/upgrade.rs
+  s_1d12813bdfb252::t_0779ce8f33546d 545-557,730-732,917-924,932,1031,1580,1594,1604,1617,1630,1656,1670,1680,1693,1706,1713-1737
+---
+{
+  "schema_version": "authorship/3.1.0",
+  "git_ai_version": "2.1.20",
+  "x_user_id": "108",
+  "base_commit_sha": "41881d8414e637ab7ba9dda9b0c04cf4fb7e6432",
+  "prompts": {
+    "s_1d12813bdfb252::t_0779ce8f33546d": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "addeff52-ad7b-4ff7-89a2-e5738998a8e8",
+        "model": "copilot/gpt-5.4"
+      },
+      "human_author": "gaoang <gaoang@ruijie.com.cn>",
+      "messages": [],
+      "total_additions": 89,
+      "total_deletions": 9,
+      "accepted_lines": 2360,
+      "overriden_lines": 0
+    },
+    "s_1d12813bdfb252::t_459fe82411ebd1": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "addeff52-ad7b-4ff7-89a2-e5738998a8e8",
+        "model": "copilot/gpt-5.4"
+      },
+      "human_author": "gaoang <gaoang@ruijie.com.cn>",
+      "messages": [],
+      "total_additions": 89,
+      "total_deletions": 9,
+      "accepted_lines": 1616,
+      "overriden_lines": 0
+    },
+    "s_1d12813bdfb252::t_54eafc5a378c3f": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "addeff52-ad7b-4ff7-89a2-e5738998a8e8",
+        "model": "copilot/gpt-5.4"
+      },
+      "human_author": "gaoang <gaoang@ruijie.com.cn>",
+      "messages": [
+        {
+          "type": "user",
+          "text": "PS D:\\rj-op\\op-return-exchange>  这个项目最进一次commit，为什么没有自动更新我的git-ai版本，可以根据日志排查问题C:\\Users\\admin\\.git-ai\\logs，现在最新的稳定版本是2.2.1",
+          "timestamp": "2026-05-11T12:18:38.091Z"
+        },
+        {
+          "type": "user",
+          "text": "https://github.com/rj-gaoang/git-ai/releases/tag/v2.2.1 最新的下载源就是2.2.1，这是我自己的仓库",
+          "timestamp": "2026-05-11T12:29:02.593Z"
+        },
+        {
+          "type": "user",
+          "text": "我不要手工升级，我就要能够自动升级，应该怎么改",
+          "timestamp": "2026-05-11T12:35:19.927Z"
+        },
+        {
+          "type": "user",
+          "text": "不用管已安装的用户，我的要求就是本次修改完，以后可以正常更新",
+          "timestamp": "2026-05-11T12:54:21.295Z"
+        },
+        {
+          "type": "user",
+          "text": "PS D:\\rj-op\\op-return-exchange> git-ai --version   还是2.1.20，没有更新到最新版2.2.1，而且代码已经commit，但是当前卡住了，一直显示正在commit",
+          "timestamp": "2026-05-11T13:32:37.634Z"
+        },
+        {
+          "type": "user",
+          "text": "1. 现在git-ai的自动更新为什么还会阻塞住其他进程，其他用户也可能会安装失败，不能阻塞用户的正常使用啊 ",
+          "timestamp": "2026-05-11T13:52:29.320Z"
+        }
+      ],
+      "total_additions": 89,
+      "total_deletions": 9,
+      "accepted_lines": 2,
+      "overriden_lines": 0
+    }
+  },
+  "sessions": {
+    "s_1d12813bdfb252": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "addeff52-ad7b-4ff7-89a2-e5738998a8e8",
+        "model": "copilot/gpt-5.4"
+      },
+      "human_author": "gaoang <gaoang@ruijie.com.cn>"
+    }
+  }
+}
