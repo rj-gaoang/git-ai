@@ -542,6 +542,19 @@ fn maybe_wait_before_background_upgrade() {
     );
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct InstallInvocationMode {
+    skip_install: bool,
+    silent_install: bool,
+}
+
+fn install_invocation_mode(background: bool, auto_updates_disabled: bool) -> InstallInvocationMode {
+    InstallInvocationMode {
+        skip_install: background && auto_updates_disabled,
+        silent_install: background,
+    }
+}
+
 #[allow(dead_code)]
 fn verify_sha256(content: &[u8], expected_hash: &str) -> Result<(), String> {
     let mut hasher = Sha256::new();
@@ -714,7 +727,9 @@ fn try_mock_releases(base: &str, channel: UpdateChannel) -> Option<Result<Channe
 fn run_install_script(script_content: &str, repo: &str, tag: &str, silent: bool) -> Result<(), String> {
     #[cfg(windows)]
     {
-        if let Ok(daemon_config) = crate::daemon::DaemonConfig::from_env_or_default_paths() {
+        if !silent
+            && let Ok(daemon_config) = crate::daemon::DaemonConfig::from_env_or_default_paths()
+        {
             // Best effort: stop the daemon before we hand off to the detached installer.
             // The install script also has a fallback kill path so old released binaries
             // can still recover, but stopping here makes upgrades complete sooner.
@@ -899,8 +914,14 @@ fn run_impl(force: bool, background: bool) {
 
     let config = config::Config::fresh();
     let channel = config.update_channel();
-    let skip_install = background && config.auto_updates_disabled();
-    let _ = run_impl_with_url(force, config.api_base_url(), channel, skip_install);
+    let install_mode = install_invocation_mode(background, config.auto_updates_disabled());
+    let _ = run_impl_with_url(
+        force,
+        config.api_base_url(),
+        channel,
+        install_mode.skip_install,
+        install_mode.silent_install,
+    );
 }
 
 fn run_impl_with_url(
@@ -908,6 +929,7 @@ fn run_impl_with_url(
     api_base_url: &str,
     channel: UpdateChannel,
     skip_install: bool,
+    silent_install: bool,
 ) -> UpgradeAction {
     let current_version = env!("CARGO_PKG_VERSION");
     let repo = configured_github_repo();
@@ -1006,7 +1028,7 @@ fn run_impl_with_url(
     println!("Running installation script...");
     println!();
 
-    match run_install_script(&script_content, &repo, &release.tag, false) {
+    match run_install_script(&script_content, &repo, &release.tag, silent_install) {
         Ok(()) => {
             // On Windows, we spawn the installer in the background and can't verify success
             #[cfg(not(windows))]
@@ -1555,6 +1577,7 @@ mod tests {
             )),
             UpdateChannel::Latest,
             true,
+            false,
         );
         assert_eq!(action, UpgradeAction::UpgradeAvailable);
 
@@ -1568,6 +1591,7 @@ mod tests {
             &mock_url(&same_version_payload),
             UpdateChannel::Latest,
             true,
+            false,
         );
         assert_eq!(action, UpgradeAction::AlreadyLatest);
 
@@ -1577,6 +1601,7 @@ mod tests {
             &mock_url(&same_version_payload),
             UpdateChannel::Latest,
             true,
+            false,
         );
         assert_eq!(action, UpgradeAction::ForceReinstall);
 
@@ -1589,6 +1614,7 @@ mod tests {
             )),
             UpdateChannel::Latest,
             true,
+            false,
         );
         assert_eq!(action, UpgradeAction::RunningNewerVersion);
 
@@ -1601,6 +1627,7 @@ mod tests {
             )),
             UpdateChannel::Latest,
             true,
+            false,
         );
         assert_eq!(action, UpgradeAction::ForceReinstall);
 
@@ -1626,6 +1653,7 @@ mod tests {
             )),
             UpdateChannel::EnterpriseLatest,
             true,
+            false,
         );
         assert_eq!(action, UpgradeAction::UpgradeAvailable);
 
@@ -1639,6 +1667,7 @@ mod tests {
             &mock_url(&same_version_payload),
             UpdateChannel::EnterpriseLatest,
             true,
+            false,
         );
         assert_eq!(action, UpgradeAction::AlreadyLatest);
 
@@ -1648,6 +1677,7 @@ mod tests {
             &mock_url(&same_version_payload),
             UpdateChannel::EnterpriseLatest,
             true,
+            false,
         );
         assert_eq!(action, UpgradeAction::ForceReinstall);
 
@@ -1660,6 +1690,7 @@ mod tests {
             )),
             UpdateChannel::EnterpriseLatest,
             true,
+            false,
         );
         assert_eq!(action, UpgradeAction::RunningNewerVersion);
 
@@ -1672,10 +1703,36 @@ mod tests {
             )),
             UpdateChannel::EnterpriseLatest,
             true,
+            false,
         );
         assert_eq!(action, UpgradeAction::ForceReinstall);
 
         clear_test_cache_dir();
+    }
+
+    #[test]
+    fn test_install_invocation_mode_background_runs_silently() {
+        assert_eq!(
+            install_invocation_mode(false, false),
+            InstallInvocationMode {
+                skip_install: false,
+                silent_install: false,
+            }
+        );
+        assert_eq!(
+            install_invocation_mode(true, false),
+            InstallInvocationMode {
+                skip_install: false,
+                silent_install: true,
+            }
+        );
+        assert_eq!(
+            install_invocation_mode(true, true),
+            InstallInvocationMode {
+                skip_install: true,
+                silent_install: true,
+            }
+        );
     }
 
     #[test]

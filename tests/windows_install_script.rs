@@ -458,3 +458,26 @@ fn windows_install_script_gates_daemon_restart_to_self_update() {
         "install.ps1 should funnel daemon restart attempts through the gated helper"
     );
 }
+
+#[test]
+fn windows_install_script_treats_self_update_restart_flag_as_passive_mode() {
+    let script = fs::read_to_string(install_script_path()).expect("failed to read install.ps1");
+    assert!(
+        script.contains(
+            "return $env:GIT_AI_DEFER_IF_BUSY -eq '1' -or $env:GIT_AI_RESTART_DAEMON_AFTER_INSTALL -eq '1'"
+        ),
+        "install.ps1 should defer busy-file replacement when a background self-update only sets the daemon-restart flag"
+    );
+}
+
+#[test]
+fn windows_install_script_keeps_passive_updates_from_stopping_live_processes() {
+    let script = fs::read_to_string(install_script_path()).expect("failed to read install.ps1");
+    let normalized = script.replace("\r\n", "\n");
+    assert!(
+        normalized.contains(
+            "if (-not $passiveAutoUpdate) {\n        [void](Stop-GitAiBackgroundService -GitAiExe $gitAiExe)\n        [void](Stop-GitAiManagedProcesses -InstallDir $InstallDir)\n    }"
+        ),
+        "install.ps1 should only stop the daemon and managed processes during foreground installs, not passive auto-updates"
+    );
+}

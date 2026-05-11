@@ -43,7 +43,7 @@ function Write-Warning {
 }
 
 function Test-PassiveAutoUpdateMode {
-    return $env:GIT_AI_DEFER_IF_BUSY -eq '1'
+    return $env:GIT_AI_DEFER_IF_BUSY -eq '1' -or $env:GIT_AI_RESTART_DAEMON_AFTER_INSTALL -eq '1'
 }
 
 function Normalize-PathString {
@@ -171,8 +171,8 @@ function Wait-ForFileAvailable {
         $effectiveRetryIntervalSeconds = 1
     }
 
-    [void](Stop-GitAiBackgroundService -GitAiExe $gitAiExe)
     if (-not $passiveAutoUpdate) {
+        [void](Stop-GitAiBackgroundService -GitAiExe $gitAiExe)
         [void](Stop-GitAiManagedProcesses -InstallDir $InstallDir)
     }
 
