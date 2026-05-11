@@ -1,0 +1,14 @@
+Cargo.toml
+  h_413aef030e07df 3
+---
+{
+  "schema_version": "authorship/3.1.0",
+  "git_ai_version": "2.1.12",
+  "base_commit_sha": "c3ebe65ff90e22d207d34547e5d126dad06c48a2",
+  "prompts": {},
+  "humans": {
+    "h_413aef030e07df": {
+      "author": "gaoang <gaoang@ruijie.com.cn>"
+    }
+  }
+}
