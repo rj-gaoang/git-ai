@@ -246,6 +246,8 @@ When a `git commit` succeeds, Git AI also schedules a background self-update che
 
 For GitHub Copilot in VS Code, Git AI scopes attribution to the current native hook tool call. If the hook payload omits file paths, Git AI falls back to the matching `tool_use_id` / `toolCallId` in the Copilot transcript instead of scanning the whole chat session, so unrelated edits from nearby tool calls are not mixed into the checkpoint. During post-commit refresh, Git AI also reloads prompt text and model metadata from that Copilot transcript so future uploads can include both fields. When a native hook payload includes both an event-stream `transcript_path` and a session-json `chat_session_path`, Git AI keeps both and prefers `chat_session_path` for model extraction so Copilot `inputState.selectedModel.identifier` is not overwritten by the event stream path.
 
+For native Copilot edit flows, Git AI now tags AI pre-edit snapshots explicitly and surfaces them as `AI pre-edit snapshot` in `git-ai status` instead of rendering them like a human checkpoint. The daemon also suppresses `known_human` saves whose content still matches the most recent AI output, which prevents save-only VS Code hook misfires from claiming AI-produced lines as human edits.
+
 On Windows, if you are validating a locally built binary while an older installed `~/.git-ai/bin/git-ai.exe` is still locked, rerun `install-hooks` from the binary you want Copilot to execute, or repoint `~/.copilot/hooks/git-ai.json` to that binary. Replacement daemon runtimes repoint Git trace2 pipes and background sockets, but Copilot native hooks keep invoking whichever `git-ai.exe` path is configured in that hook JSON.
 
 #### Example Note

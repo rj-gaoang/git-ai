@@ -7,6 +7,8 @@ use std::fmt;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const CHECKPOINT_API_VERSION: &str = "checkpoint/1.0.0";
+pub const CHECKPOINT_ROLE_METADATA_KEY: &str = "checkpoint_role";
+pub const CHECKPOINT_ROLE_AI_PRE_TOOL_SNAPSHOT: &str = "ai_pre_tool_snapshot";
 
 /// Represents a working log entry for a specific file
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -92,6 +94,22 @@ impl CheckpointKind {
     pub fn serde_default() -> Self {
         CheckpointKind::Human
     }
+}
+
+pub fn checkpoint_metadata_has_role(metadata: &HashMap<String, String>, role: &str) -> bool {
+    metadata
+        .get(CHECKPOINT_ROLE_METADATA_KEY)
+        .is_some_and(|value| value == role)
+}
+
+pub fn checkpoint_is_ai_pre_tool_snapshot(checkpoint: &Checkpoint) -> bool {
+    checkpoint.kind == CheckpointKind::Human
+        && checkpoint
+            .agent_metadata
+            .as_ref()
+            .is_some_and(|metadata| {
+                checkpoint_metadata_has_role(metadata, CHECKPOINT_ROLE_AI_PRE_TOOL_SNAPSHOT)
+            })
 }
 
 /// Metadata stored for KnownHuman checkpoints, identifying the IDE that fired the save event
@@ -302,6 +320,39 @@ mod tests {
         assert_eq!(meta.editor, "vscode");
         assert_eq!(meta.editor_version, "1.85.0");
         assert_eq!(meta.extension_version, "0.4.1");
+    }
+
+    #[test]
+    fn test_checkpoint_metadata_has_role_matches_expected_value() {
+        let metadata = HashMap::from([(
+            CHECKPOINT_ROLE_METADATA_KEY.to_string(),
+            CHECKPOINT_ROLE_AI_PRE_TOOL_SNAPSHOT.to_string(),
+        )]);
+
+        assert!(checkpoint_metadata_has_role(
+            &metadata,
+            CHECKPOINT_ROLE_AI_PRE_TOOL_SNAPSHOT,
+        ));
+        assert!(!checkpoint_metadata_has_role(&metadata, "something_else"));
+    }
+
+    #[test]
+    fn test_checkpoint_is_ai_pre_tool_snapshot_detects_human_checkpoint_metadata() {
+        let mut checkpoint = Checkpoint::new(
+            CheckpointKind::Human,
+            "diff".to_string(),
+            "author".to_string(),
+            vec![],
+        );
+        checkpoint.agent_metadata = Some(HashMap::from([(
+            CHECKPOINT_ROLE_METADATA_KEY.to_string(),
+            CHECKPOINT_ROLE_AI_PRE_TOOL_SNAPSHOT.to_string(),
+        )]));
+
+        assert!(checkpoint_is_ai_pre_tool_snapshot(&checkpoint));
+
+        checkpoint.kind = CheckpointKind::KnownHuman;
+        assert!(!checkpoint_is_ai_pre_tool_snapshot(&checkpoint));
     }
 
     #[test]

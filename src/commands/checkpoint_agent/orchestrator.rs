@@ -1,5 +1,8 @@
 use crate::authorship::authorship_log_serialization::generate_trace_id;
-use crate::authorship::working_log::{AgentId, CheckpointKind};
+use crate::authorship::working_log::{
+    AgentId, CheckpointKind, CHECKPOINT_ROLE_AI_PRE_TOOL_SNAPSHOT,
+    CHECKPOINT_ROLE_METADATA_KEY,
+};
 use crate::commands::checkpoint_agent::presets::{
     KnownHumanEdit, ParsedHookEvent, PostBashCall, PostFileEdit, PreBashCall, PreFileEdit,
     TranscriptSource, UntrackedEdit,
@@ -260,6 +263,12 @@ fn split_files_into_requests(
         .collect()
 }
 
+    fn mark_ai_pre_tool_snapshot(metadata: &mut HashMap<String, String>) {
+        metadata
+        .entry(CHECKPOINT_ROLE_METADATA_KEY.to_string())
+        .or_insert_with(|| CHECKPOINT_ROLE_AI_PRE_TOOL_SNAPSHOT.to_string());
+    }
+
 fn execute_pre_file_edit(e: PreFileEdit) -> Result<Vec<CheckpointRequest>, GitAiError> {
     let mut files = build_checkpoint_files(&e.file_paths)?;
     if let Some(ref dirty) = e.dirty_files {
@@ -270,6 +279,7 @@ fn execute_pre_file_edit(e: PreFileEdit) -> Result<Vec<CheckpointRequest>, GitAi
         }
     }
     let mut metadata = e.context.metadata;
+    mark_ai_pre_tool_snapshot(&mut metadata);
     if let Some(tuid) = e.tool_use_id {
         metadata.entry("tool_use_id".to_string()).or_insert(tuid);
     }
@@ -379,6 +389,7 @@ fn execute_pre_bash_call(e: PreBashCall) -> Result<Vec<CheckpointRequest>, GitAi
 
     let files = build_checkpoint_files(&dirty_paths)?;
     let mut metadata = e.context.metadata;
+    mark_ai_pre_tool_snapshot(&mut metadata);
     metadata
         .entry("tool_use_id".to_string())
         .or_insert(e.tool_use_id);
@@ -436,4 +447,23 @@ fn execute_post_bash_call(e: PostBashCall) -> Result<Vec<CheckpointRequest>, Git
         e.transcript_source,
         metadata,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mark_ai_pre_tool_snapshot_sets_metadata_once() {
+        let mut metadata = HashMap::new();
+
+        mark_ai_pre_tool_snapshot(&mut metadata);
+        mark_ai_pre_tool_snapshot(&mut metadata);
+
+        assert_eq!(
+            metadata.get(CHECKPOINT_ROLE_METADATA_KEY),
+            Some(&CHECKPOINT_ROLE_AI_PRE_TOOL_SNAPSHOT.to_string())
+        );
+        assert_eq!(metadata.len(), 1);
+    }
 }

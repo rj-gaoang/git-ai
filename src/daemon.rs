@@ -30,7 +30,9 @@ use crate::{
         restore_working_log_carryover, rewrite_authorship_after_commit_amend_with_snapshot,
         rewrite_authorship_if_needed,
     },
-    authorship::working_log::CheckpointKind,
+    authorship::working_log::{
+        CheckpointKind, CHECKPOINT_ROLE_AI_PRE_TOOL_SNAPSHOT, checkpoint_metadata_has_role,
+    },
     commands::checkpoint_agent::orchestrator::CheckpointRequest,
     commands::hooks::{push_hooks, stash_hooks},
     daemon::checkpoint::PreparedPathRole,
@@ -3954,6 +3956,10 @@ pub struct ActorDaemonCoordinator {
     /// Files with an in-flight AI edit (PreFileEdit received, PostFileEdit not yet completed).
     /// Outer key: family. Inner key: absolute file path string. Value: registration timestamp (nanos).
     pending_ai_edits_by_family: Mutex<HashMap<String, HashMap<String, u128>>>,
+    /// Last AI-produced content per file, used to suppress save-only KnownHuman
+    /// checkpoints that merely persist the most recent AI output.
+    recent_ai_edit_contents_by_family:
+        Mutex<HashMap<String, HashMap<String, RecentAiEditContent>>>,
     family_sequencers_by_family: Mutex<HashMap<String, FamilySequencerState>>,
     pending_root_slots_by_root: Mutex<HashMap<String, PendingRootSlot>>,
     recent_replay_prerequisites_by_family:
@@ -3992,6 +3998,12 @@ struct WrapperStateEntry {
     pre_repo: Option<RepoContext>,
     post_repo: Option<RepoContext>,
     received_at_ns: u128,
+}
+
+#[derive(Debug, Clone)]
+struct RecentAiEditContent {
+    content_hash: String,
+    observed_at_ns: u128,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -4047,6 +4059,7 @@ impl ActorDaemonCoordinator {
             pending_cherry_pick_sources_by_worktree: Mutex::new(HashMap::new()),
             inflight_effects_by_family: Mutex::new(HashMap::new()),
             pending_ai_edits_by_family: Mutex::new(HashMap::new()),
+            recent_ai_edit_contents_by_family: Mutex::new(HashMap::new()),
             family_sequencers_by_family: Mutex::new(HashMap::new()),
             pending_root_slots_by_root: Mutex::new(HashMap::new()),
             recent_replay_prerequisites_by_family: Mutex::new(HashMap::new()),
@@ -4240,6 +4253,20 @@ impl ActorDaemonCoordinator {
                 map.retain(|_, family_map| !family_map.is_empty());
             }
         }
+        // Clean stale recent AI content entries to bound memory usage.
+        {
+            const RECENT_AI_EDIT_CONTENT_TTL_NS: u128 = 600_000_000_000; // 10 minutes
+            let gc_now_ns = now_unix_nanos();
+            if let Ok(mut map) = self.recent_ai_edit_contents_by_family.lock() {
+                for family_map in map.values_mut() {
+                    family_map.retain(|_, recent| {
+                        gc_now_ns.saturating_sub(recent.observed_at_ns)
+                            < RECENT_AI_EDIT_CONTENT_TTL_NS
+                    });
+                }
+                map.retain(|_, family_map| !family_map.is_empty());
+            }
+        }
         // Clean wrapper_states entries older than 60s — these represent wrapper
         // pre/post states that were never consumed by a matching trace2 event.
         let stale_threshold_ns = 60_000_000_000u128; // 60 seconds in nanoseconds
@@ -4253,6 +4280,30 @@ impl ActorDaemonCoordinator {
         std::fs::canonicalize(path)
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_else(|_| path.to_string())
+    }
+
+    fn checkpoint_request_is_ai_pre_tool_snapshot(request: &CheckpointRequest) -> bool {
+        request.checkpoint_kind == CheckpointKind::Human
+            && checkpoint_metadata_has_role(
+                &request.metadata,
+                CHECKPOINT_ROLE_AI_PRE_TOOL_SNAPSHOT,
+            )
+    }
+
+    fn should_register_pending_ai_edits(request: &CheckpointRequest) -> bool {
+        request.path_role == PreparedPathRole::WillEdit
+            && (request.agent_id.is_some() || Self::checkpoint_request_is_ai_pre_tool_snapshot(request))
+    }
+
+    fn checkpoint_updates_human_worktree_watermark(request: &CheckpointRequest) -> bool {
+        request.checkpoint_kind == CheckpointKind::Human
+            && !Self::checkpoint_request_is_ai_pre_tool_snapshot(request)
+    }
+
+    fn content_sha256(content: &str) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(content.as_bytes());
+        format!("{:x}", hasher.finalize())
     }
 
     fn register_pending_ai_edits(&self, family: &str, file_paths: &[String]) {
@@ -4289,6 +4340,52 @@ impl ActorDaemonCoordinator {
                 now_ns.saturating_sub(*registered_at) < PENDING_AI_EDIT_TIMEOUT_NS
             });
         }
+        false
+    }
+
+    fn register_recent_ai_edit_contents(
+        &self,
+        family: &str,
+        files: &[crate::commands::checkpoint_agent::orchestrator::CheckpointFile],
+    ) {
+        let now_ns = now_unix_nanos();
+        if let Ok(mut map) = self.recent_ai_edit_contents_by_family.lock() {
+            let family_map = map.entry(family.to_string()).or_default();
+            for file in files {
+                let Some(content) = file.content.as_ref() else {
+                    continue;
+                };
+                family_map.insert(
+                    Self::canonicalize_path(&file.path.to_string_lossy()),
+                    RecentAiEditContent {
+                        content_hash: Self::content_sha256(content),
+                        observed_at_ns: now_ns,
+                    },
+                );
+            }
+        }
+    }
+
+    fn file_matches_recent_ai_edit_content(
+        &self,
+        family: &str,
+        file: &crate::commands::checkpoint_agent::orchestrator::CheckpointFile,
+    ) -> bool {
+        const RECENT_AI_EDIT_CONTENT_TTL_NS: u128 = 600_000_000_000; // 10 minutes
+        let Some(content) = file.content.as_ref() else {
+            return false;
+        };
+
+        let canonical = Self::canonicalize_path(&file.path.to_string_lossy());
+        let now_ns = now_unix_nanos();
+        if let Ok(map) = self.recent_ai_edit_contents_by_family.lock()
+            && let Some(family_map) = map.get(family)
+            && let Some(recent) = family_map.get(&canonical)
+        {
+            return now_ns.saturating_sub(recent.observed_at_ns) < RECENT_AI_EDIT_CONTENT_TTL_NS
+                && recent.content_hash == Self::content_sha256(content);
+        }
+
         false
     }
 
@@ -5957,13 +6054,16 @@ impl ActorDaemonCoordinator {
                     let checkpoint_path_role = request.path_role;
                     let checkpoint_has_agent = request.agent_id.is_some();
                     let checkpoint_kind_str = format!("{:?}", checkpoint_kind);
-                    let is_human_checkpoint = checkpoint_kind == CheckpointKind::Human;
+                    let is_human_checkpoint =
+                        Self::checkpoint_updates_human_worktree_watermark(&request);
+                    let is_ai_pre_tool_snapshot =
+                        Self::checkpoint_request_is_ai_pre_tool_snapshot(&request);
 
                     // Register pending AI edit state when an AI agent fires its
-                    // pre-edit snapshot. This signals that an AI edit is in-flight.
-                    // Identified by: WillEdit path_role + agent_id present (only AI
-                    // agent presets have an agent_id on their pre-edit checkpoints).
-                    if checkpoint_path_role == PreparedPathRole::WillEdit && checkpoint_has_agent {
+                    // pre-edit snapshot. This includes metadata-marked pre-tool
+                    // snapshots so native edit and bash edit flows share the same
+                    // suppression path for spurious save events.
+                    if Self::should_register_pending_ai_edits(&request) {
                         self.register_pending_ai_edits(family, &checkpoint_file_paths);
                     }
 
@@ -5975,14 +6075,29 @@ impl ActorDaemonCoordinator {
                             .filter(|f| self.file_has_pending_ai_edit(family, f))
                             .cloned()
                             .collect();
-                        if !pending_files.is_empty() {
+                        let matching_recent_ai_files: Vec<String> = request
+                            .files
+                            .iter()
+                            .filter(|file| self.file_matches_recent_ai_edit_content(family, file))
+                            .map(|file| file.path.to_string_lossy().to_string())
+                            .collect();
+                        let suppressed_files: HashSet<String> = pending_files
+                            .iter()
+                            .chain(matching_recent_ai_files.iter())
+                            .cloned()
+                            .collect();
+                        if !suppressed_files.is_empty() {
                             request.files.retain(|f| {
                                 let path_str = f.path.to_string_lossy().to_string();
-                                !pending_files.contains(&path_str)
+                                !suppressed_files.contains(&path_str)
                             });
                             tracing::debug!(
-                                "[KnownHuman] Filtered {} file(s) with pending AI edits",
-                                pending_files.len()
+                                pending_file_count = pending_files.len(),
+                                recent_ai_content_match_count = matching_recent_ai_files.len(),
+                                checkpoint_has_agent,
+                                checkpoint_path_role = ?checkpoint_path_role,
+                                is_ai_pre_tool_snapshot,
+                                "[KnownHuman] Filtered files overlapping an in-flight AI edit or matching recent AI output"
                             );
                             if request.files.is_empty() {
                                 let log_entry = TestCompletionLogEntry {
@@ -6013,6 +6128,7 @@ impl ActorDaemonCoordinator {
                         .iter()
                         .map(|f| f.path.to_string_lossy().to_string())
                         .collect();
+                    let checkpoint_files = request.files.clone();
 
                     let should_log_completion = true; // Always log for test sync
                     tracing::info!(kind = %checkpoint_kind_str, repo = %repo_wd, "checkpoint start");
@@ -6082,6 +6198,7 @@ impl ActorDaemonCoordinator {
                         if checkpoint_kind.is_ai()
                             && checkpoint_path_role == PreparedPathRole::Edited
                         {
+                            self.register_recent_ai_edit_contents(family, &checkpoint_files);
                             self.clear_pending_ai_edits(family, &checkpoint_file_paths);
                         }
                         let per_file = if !checkpoint_file_paths.is_empty() {
@@ -9258,6 +9375,72 @@ mod tests {
             normalize_commit_carryover_snapshot(Some(&carryover), Some(&committed)).unwrap();
 
         assert_eq!(normalized.get("example.txt"), carryover.get("example.txt"));
+    }
+
+    #[test]
+    fn ai_pre_tool_snapshot_requests_do_not_update_human_worktree_watermarks() {
+        use crate::authorship::working_log::{
+            CHECKPOINT_ROLE_AI_PRE_TOOL_SNAPSHOT, CHECKPOINT_ROLE_METADATA_KEY,
+        };
+
+        let mut control_request = sample_checkpoint_request();
+        let ControlRequest::CheckpointRun { request } = &mut control_request else {
+            panic!("expected checkpoint request");
+        };
+        request.metadata.insert(
+            CHECKPOINT_ROLE_METADATA_KEY.to_string(),
+            CHECKPOINT_ROLE_AI_PRE_TOOL_SNAPSHOT.to_string(),
+        );
+
+        assert!(!ActorDaemonCoordinator::checkpoint_updates_human_worktree_watermark(
+            request,
+        ));
+        assert!(ActorDaemonCoordinator::should_register_pending_ai_edits(request));
+    }
+
+    #[test]
+    fn recent_ai_edit_content_matches_only_identical_known_human_save() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        runtime.block_on(async {
+            let coordinator = ActorDaemonCoordinator::new();
+            let temp_dir = tempfile::tempdir().unwrap();
+            let file_path = temp_dir.path().join("example.txt");
+            std::fs::write(&file_path, "AI content\n").unwrap();
+
+            coordinator.register_recent_ai_edit_contents(
+                "family",
+                &[crate::commands::checkpoint_agent::orchestrator::CheckpointFile {
+                    path: file_path.clone(),
+                    content: Some("AI content\n".to_string()),
+                    repo_work_dir: temp_dir.path().to_path_buf(),
+                    base_commit:
+                        crate::commands::checkpoint_agent::orchestrator::BaseCommit::Initial,
+                }],
+            );
+
+            let same_content_file = crate::commands::checkpoint_agent::orchestrator::CheckpointFile {
+                path: file_path.clone(),
+                content: Some("AI content\n".to_string()),
+                repo_work_dir: temp_dir.path().to_path_buf(),
+                base_commit: crate::commands::checkpoint_agent::orchestrator::BaseCommit::Initial,
+            };
+            let changed_content_file = crate::commands::checkpoint_agent::orchestrator::CheckpointFile {
+                path: file_path,
+                content: Some("Human content\n".to_string()),
+                repo_work_dir: temp_dir.path().to_path_buf(),
+                base_commit: crate::commands::checkpoint_agent::orchestrator::BaseCommit::Initial,
+            };
+
+            assert!(coordinator.file_matches_recent_ai_edit_content("family", &same_content_file));
+            assert!(!coordinator.file_matches_recent_ai_edit_content(
+                "family",
+                &changed_content_file,
+            ));
+        });
     }
 
     #[test]

@@ -26,6 +26,8 @@ You can enable toast messages from the extension when it calls checkpoints to ge
 "gitai.enableCheckpointLogging": true
 ```
 
+Recent releases also suppress save-only `known_human` checkpoints when the file content still matches the most recent AI output, so native Copilot edit flows are less likely to record a plain save as a human override.
+
 ### AI tab tracking (experimental)
 
 Adds support for tracking AI tab-completion insertions
