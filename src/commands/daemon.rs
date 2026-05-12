@@ -14,10 +14,15 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 #[cfg(windows)]
+use std::time::{SystemTime, UNIX_EPOCH};
+#[cfg(windows)]
 use std::{ffi::OsStr, path::Path};
 
 #[cfg(windows)]
 const DAEMON_RUNTIME_EXE_NAME: &str = "git-ai-daemon.exe";
+
+#[cfg(windows)]
+const DAEMON_RUNTIME_EXE_PREFIX: &str = "git-ai-daemon";
 
 pub fn handle_daemon(args: &[String]) {
     if args.is_empty() || is_help(args[0].as_str()) {
@@ -458,22 +463,45 @@ fn daemon_runtime_launcher_path(runtime_dir: &Path) -> PathBuf {
 }
 
 #[cfg(windows)]
+fn daemon_runtime_unique_launcher_path(runtime_dir: &Path) -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    runtime_dir.join(format!(
+        "{}-{}-{}.exe",
+        DAEMON_RUNTIME_EXE_PREFIX,
+        nanos,
+        std::process::id()
+    ))
+}
+
+#[cfg(windows)]
 fn prepare_daemon_runtime_launcher(exe: &Path, runtime_dir: &Path) -> Result<PathBuf, String> {
-    let launcher = daemon_runtime_launcher_path(runtime_dir);
-    if launcher.exists() {
-        let _ = std::fs::remove_file(&launcher);
+    let launcher = daemon_runtime_unique_launcher_path(runtime_dir);
+    match std::fs::copy(exe, &launcher) {
+        Ok(_) => return Ok(launcher),
+        Err(copy_error) => {
+            let stable_launcher = daemon_runtime_launcher_path(runtime_dir);
+            if stable_launcher.exists() {
+                tracing::debug!(
+                    "failed to copy daemon launcher from {} to {}: {}; falling back to existing launcher {}",
+                    exe.display(),
+                    launcher.display(),
+                    copy_error,
+                    stable_launcher.display()
+                );
+                return Ok(stable_launcher);
+            }
+
+            Err(format!(
+                "failed to copy daemon launcher from {} to {}: {}",
+                exe.display(),
+                launcher.display(),
+                copy_error
+            ))
+        }
     }
-
-    std::fs::copy(exe, &launcher).map_err(|e| {
-        format!(
-            "failed to copy daemon launcher from {} to {}: {}",
-            exe.display(),
-            launcher.display(),
-            e
-        )
-    })?;
-
-    Ok(launcher)
 }
 
 #[cfg(windows)]
@@ -925,4 +953,38 @@ fn print_help() {
     eprintln!("  git-ai bg shutdown [--hard]");
     eprintln!("  git-ai bg restart [--hard]");
     eprintln!("  git-ai bg tail [-n <lines>] [--full] [-f | --follow]");
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+    use std::fs::OpenOptions;
+    use std::os::windows::fs::OpenOptionsExt;
+
+    #[test]
+    fn prepare_daemon_runtime_launcher_uses_unique_path_when_stable_launcher_is_locked() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("git-ai.exe");
+        std::fs::write(&source, b"source").unwrap();
+
+        let stable_launcher = daemon_runtime_launcher_path(temp.path());
+        std::fs::write(&stable_launcher, b"locked").unwrap();
+        let _locked = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .share_mode(0)
+            .open(&stable_launcher)
+            .unwrap();
+
+        let launcher = prepare_daemon_runtime_launcher(&source, temp.path()).unwrap();
+
+        assert_ne!(launcher, stable_launcher);
+        assert_eq!(std::fs::read(&launcher).unwrap(), b"source");
+        let name = launcher
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap();
+        assert!(name.starts_with(DAEMON_RUNTIME_EXE_PREFIX));
+        assert!(name.ends_with(".exe"));
+    }
 }
