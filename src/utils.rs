@@ -6,6 +6,8 @@ use std::process::{Command, Stdio};
 
 static IS_TERMINAL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 
+pub(crate) const GIT_AI_CANONICAL_EXE_ENV: &str = "GIT_AI_CANONICAL_EXE";
+
 /// Print a git diff in a readable format
 ///
 /// Prints the diff between two commits/trees showing which files changed and their status.
@@ -45,7 +47,24 @@ pub fn normalize_to_posix(path: &str) -> String {
     path.replace('\\', "/")
 }
 
-fn resolve_git_ai_exe_from_invocation_path(path: PathBuf) -> PathBuf {
+fn canonical_git_ai_exe_override() -> Option<PathBuf> {
+    let value = std::env::var_os(GIT_AI_CANONICAL_EXE_ENV)?;
+    if value.is_empty() {
+        return None;
+    }
+
+    let path = PathBuf::from(value);
+    Some(std::fs::canonicalize(&path).unwrap_or(path))
+}
+
+fn resolve_git_ai_exe_from_invocation_path_with_override(
+    path: PathBuf,
+    canonical_override: Option<PathBuf>,
+) -> PathBuf {
+    if let Some(override_path) = canonical_override {
+        return override_path;
+    }
+
     let canonical_path = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
 
     // Get platform-specific executable names
@@ -100,9 +119,16 @@ fn resolve_git_ai_exe_from_invocation_path(path: PathBuf) -> PathBuf {
     canonical_path
 }
 
+fn resolve_git_ai_exe_from_invocation_path(path: PathBuf) -> PathBuf {
+    resolve_git_ai_exe_from_invocation_path_with_override(path, None)
+}
+
 pub(crate) fn current_git_ai_exe() -> Result<PathBuf, GitAiError> {
     let path = std::env::current_exe()?;
-    Ok(resolve_git_ai_exe_from_invocation_path(path))
+    Ok(match canonical_git_ai_exe_override() {
+        Some(override_path) => override_path,
+        None => resolve_git_ai_exe_from_invocation_path(path),
+    })
 }
 
 fn internal_git_ai_command_with_exe(exe: PathBuf, subcommand: &str) -> Command {
@@ -429,6 +455,34 @@ mod tests {
 
         let resolved = resolve_git_ai_exe_from_invocation_path(hook);
         assert_eq!(resolved, PathBuf::from("git-ai.exe"));
+    }
+
+    #[test]
+    fn test_resolve_git_ai_exe_prefers_canonical_override() {
+        let dir = tempfile::tempdir().unwrap();
+        let canonical = dir.path().join(if cfg!(windows) {
+            "git-ai.exe"
+        } else {
+            "git-ai"
+        });
+        let runtime_dir = dir.path().join("daemon-runtime");
+        std::fs::create_dir_all(&runtime_dir).unwrap();
+        let runtime_copy = runtime_dir.join(if cfg!(windows) {
+            "git-ai-daemon.exe"
+        } else {
+            "git-ai-daemon"
+        });
+        std::fs::write(&canonical, "canonical").unwrap();
+        std::fs::write(&runtime_copy, "runtime-copy").unwrap();
+
+        let resolved = resolve_git_ai_exe_from_invocation_path_with_override(
+            runtime_copy,
+            Some(canonical.clone()),
+        );
+        assert_eq!(
+            std::fs::canonicalize(resolved).unwrap(),
+            std::fs::canonicalize(canonical).unwrap()
+        );
     }
 
     #[test]

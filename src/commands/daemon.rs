@@ -16,6 +16,9 @@ use std::time::{Duration, Instant};
 #[cfg(windows)]
 use std::{ffi::OsStr, path::Path};
 
+#[cfg(windows)]
+const DAEMON_RUNTIME_EXE_NAME: &str = "git-ai-daemon.exe";
+
 pub fn handle_daemon(args: &[String]) {
     if args.is_empty() || is_help(args[0].as_str()) {
         print_help();
@@ -450,6 +453,30 @@ fn daemon_runtime_dir(config: &DaemonConfig) -> Result<PathBuf, String> {
 }
 
 #[cfg(windows)]
+fn daemon_runtime_launcher_path(runtime_dir: &Path) -> PathBuf {
+    runtime_dir.join(DAEMON_RUNTIME_EXE_NAME)
+}
+
+#[cfg(windows)]
+fn prepare_daemon_runtime_launcher(exe: &Path, runtime_dir: &Path) -> Result<PathBuf, String> {
+    let launcher = daemon_runtime_launcher_path(runtime_dir);
+    if launcher.exists() {
+        let _ = std::fs::remove_file(&launcher);
+    }
+
+    std::fs::copy(exe, &launcher).map_err(|e| {
+        format!(
+            "failed to copy daemon launcher from {} to {}: {}",
+            exe.display(),
+            launcher.display(),
+            e
+        )
+    })?;
+
+    Ok(launcher)
+}
+
+#[cfg(windows)]
 fn powershell_single_quote_literal(value: &OsStr) -> String {
     format!("'{}'", value.to_string_lossy().replace('\'', "''"))
 }
@@ -465,9 +492,10 @@ fn spawn_daemon_run_detached(config: &DaemonConfig) -> Result<(), String> {
 
     #[cfg(windows)]
     {
+        let launcher_exe = prepare_daemon_runtime_launcher(&exe, &runtime_dir)?;
         let script = format!(
             "Start-Process -FilePath {} -ArgumentList @('bg','run') -WorkingDirectory {} -WindowStyle Hidden",
-            powershell_single_quote_literal(exe.as_os_str()),
+            powershell_single_quote_literal(launcher_exe.as_os_str()),
             powershell_single_quote_literal(Path::new(&runtime_dir).as_os_str())
         );
         let mut child = Command::new("powershell.exe");
@@ -486,6 +514,7 @@ fn spawn_daemon_run_detached(config: &DaemonConfig) -> Result<(), String> {
             child.env_remove(var);
         }
         child.env_remove("GIT_AI");
+        child.env(crate::utils::GIT_AI_CANONICAL_EXE_ENV, &exe);
 
         let preferred_flags =
             CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB;
