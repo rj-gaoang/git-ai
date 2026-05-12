@@ -460,13 +460,17 @@ fn windows_install_script_gates_daemon_restart_to_self_update() {
 }
 
 #[test]
-fn windows_install_script_treats_self_update_restart_flag_as_passive_mode() {
+fn windows_install_script_only_treats_explicit_defer_flag_as_passive_mode() {
     let script = fs::read_to_string(install_script_path()).expect("failed to read install.ps1");
     assert!(
-        script.contains(
+        script.contains("return $env:GIT_AI_DEFER_IF_BUSY -eq '1'"),
+        "install.ps1 should only enter passive busy-file deferral when the explicit defer flag is set"
+    );
+    assert!(
+        !script.contains(
             "return $env:GIT_AI_DEFER_IF_BUSY -eq '1' -or $env:GIT_AI_RESTART_DAEMON_AFTER_INSTALL -eq '1'"
         ),
-        "install.ps1 should defer busy-file replacement when a background self-update only sets the daemon-restart flag"
+        "install.ps1 should not treat the daemon-restart flag as passive mode on its own"
     );
 }
 
