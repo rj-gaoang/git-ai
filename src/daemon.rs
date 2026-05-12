@@ -4133,6 +4133,26 @@ impl ActorDaemonCoordinator {
         self.request_shutdown();
     }
 
+    fn has_pending_update_restart_blockers(&self) -> bool {
+        if self.queued_trace_payloads.load(Ordering::Acquire) > 0 {
+            return true;
+        }
+
+        let has_wrapper_state = self
+            .wrapper_states
+            .lock()
+            .map(|states| !states.is_empty())
+            .unwrap_or(true);
+        if has_wrapper_state {
+            return true;
+        }
+
+        self.inflight_effects_by_family
+            .lock()
+            .map(|effects| !effects.is_empty())
+            .unwrap_or(true)
+    }
+
     fn shutdown_action(&self) -> DaemonExitAction {
         DaemonExitAction::from_u8(self.shutdown_action.load(Ordering::SeqCst))
     }
@@ -8307,6 +8327,10 @@ fn disable_trace2_for_daemon_process() {
 /// How often the daemon wakes up to evaluate whether an update check is due.
 const DAEMON_UPDATE_CHECK_INTERVAL_SECS: u64 = 3600;
 
+/// How long to wait before re-checking whether the daemon is idle enough to
+/// restart into the self-update flow after an update has already been found.
+const DAEMON_UPDATE_BUSY_RETRY_INTERVAL_SECS: u64 = 15;
+
 /// Maximum daemon uptime before a proactive restart (24.5 hours).
 /// Deliberately offset from the 24h update-check cadence so the uptime restart
 /// never races with an update-triggered shutdown.
@@ -8318,6 +8342,13 @@ fn daemon_update_check_interval() -> u64 {
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(DAEMON_UPDATE_CHECK_INTERVAL_SECS)
+}
+
+fn daemon_update_busy_retry_interval() -> u64 {
+    std::env::var("GIT_AI_DAEMON_UPDATE_BUSY_RETRY_INTERVAL")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(DAEMON_UPDATE_BUSY_RETRY_INTERVAL_SECS)
 }
 
 /// Returns the maximum uptime in nanoseconds, respecting an env var override for testing.
@@ -8465,6 +8496,9 @@ fn daemon_update_check_loop(coordinator: Arc<ActorDaemonCoordinator>, started_at
     use crate::commands::upgrade::{DaemonUpdateCheckResult, check_for_update_available};
 
     let interval = daemon_update_check_interval().max(1);
+    let busy_retry_interval = daemon_update_busy_retry_interval().max(1);
+    let mut sleep_secs = interval;
+    let mut pending_update_ready = false;
 
     loop {
         {
@@ -8477,7 +8511,7 @@ fn daemon_update_check_loop(coordinator: Arc<ActorDaemonCoordinator>, started_at
             }
             let _ = coordinator
                 .shutdown_condvar
-                .wait_timeout(guard, std::time::Duration::from_secs(interval));
+                .wait_timeout(guard, std::time::Duration::from_secs(sleep_secs));
         }
 
         if coordinator.is_shutting_down() {
@@ -8486,16 +8520,37 @@ fn daemon_update_check_loop(coordinator: Arc<ActorDaemonCoordinator>, started_at
 
         coordinator.gc_stale_family_state();
 
-        match check_for_update_available() {
+        let update_result = if pending_update_ready {
+            Ok(DaemonUpdateCheckResult::UpdateReady)
+        } else {
+            check_for_update_available()
+        };
+
+        match update_result {
             Ok(DaemonUpdateCheckResult::UpdateReady) => {
+                pending_update_ready = true;
+                if coordinator.has_pending_update_restart_blockers() {
+                    tracing::info!(
+                        queued_trace_payloads = coordinator
+                            .queued_trace_payloads
+                            .load(Ordering::Acquire),
+                        busy_retry_secs = busy_retry_interval,
+                        "update check: newer version available but daemon is busy, retrying soon"
+                    );
+                    sleep_secs = busy_retry_interval;
+                    continue;
+                }
                 tracing::info!("update check: newer version available, requesting shutdown");
                 coordinator.request_restart_after_update();
                 return;
             }
             Ok(DaemonUpdateCheckResult::NoUpdate) => {
+                pending_update_ready = false;
+                sleep_secs = interval;
                 tracing::info!("update check: no update needed");
             }
             Err(err) => {
+                sleep_secs = interval;
                 tracing::warn!(%err, "update check failed");
             }
         }
@@ -9225,6 +9280,55 @@ mod tests {
 
             assert!(coordinator.is_shutting_down());
             assert_eq!(coordinator.shutdown_action(), DaemonExitAction::Stop);
+        });
+    }
+
+    #[test]
+    fn pending_update_restart_blockers_are_false_when_idle() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        runtime.block_on(async {
+            let coordinator = ActorDaemonCoordinator::new();
+
+            assert!(!coordinator.has_pending_update_restart_blockers());
+        });
+    }
+
+    #[test]
+    fn pending_update_restart_blockers_detect_wrapper_trace_and_effect_work() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        runtime.block_on(async {
+            let coordinator = ActorDaemonCoordinator::new();
+
+            coordinator.store_wrapper_state(
+                "invocation-1",
+                Some(crate::daemon::domain::RepoContext {
+                    head: Some("abc123".to_string()),
+                    branch: Some("main".to_string()),
+                    detached: false,
+                }),
+                None,
+            );
+            assert!(coordinator.has_pending_update_restart_blockers());
+
+            coordinator.wrapper_states.lock().unwrap().clear();
+            assert!(!coordinator.has_pending_update_restart_blockers());
+
+            coordinator.queued_trace_payloads.fetch_add(1, Ordering::Relaxed);
+            assert!(coordinator.has_pending_update_restart_blockers());
+
+            coordinator.queued_trace_payloads.store(0, Ordering::Relaxed);
+            assert!(!coordinator.has_pending_update_restart_blockers());
+
+            coordinator.begin_family_effect("family-1").unwrap();
+            assert!(coordinator.has_pending_update_restart_blockers());
         });
     }
 
