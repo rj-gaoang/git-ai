@@ -401,8 +401,8 @@ fn release_source_url(api_base_url: &str, repo: &str) -> String {
 
 fn fetch_text(url: &str, label: &str) -> Result<String, String> {
     let (_agent, request) = ApiContext::http_get(url, Some(30));
-    let response = crate::http::send(request)
-        .map_err(|e| format!("Failed to fetch {}: {}", label, e))?;
+    let response =
+        crate::http::send(request).map_err(|e| format!("Failed to fetch {}: {}", label, e))?;
 
     if response.status_code != 200 {
         return Err(format!(
@@ -432,14 +432,14 @@ fn release_from_github_release(release: &GitHubReleaseResponse) -> Result<Channe
         return Err(format!("Unable to parse semver from tag '{}'", tag));
     }
 
-    Ok(ChannelRelease {
-        tag,
-        semver,
-    })
+    Ok(ChannelRelease { tag, semver })
 }
 
 fn fetch_github_release_list(repo: &str) -> Result<Vec<GitHubReleaseResponse>, String> {
-    let url = format!("{}/repos/{}/releases?per_page=100", GITHUB_API_BASE_URL, repo);
+    let url = format!(
+        "{}/repos/{}/releases?per_page=100",
+        GITHUB_API_BASE_URL, repo
+    );
     let body = fetch_text(&url, "GitHub release list")?;
     serde_json::from_str(&body)
         .map_err(|e| format!("Failed to parse GitHub release list response: {}", e))
@@ -500,17 +500,25 @@ fn fetch_next_github_release(repo: &str) -> Result<ChannelRelease, String> {
         .or_else(|_| select_newest_github_release(&releases, false))
 }
 
+fn has_installer_url_override() -> bool {
+    std::env::var(GIT_AI_INSTALLER_URL_ENV)
+        .ok()
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false)
+}
+
+#[cfg(windows)]
+fn installer_fallback_url(repo: &str) -> Option<String> {
+    (!has_installer_url_override()).then(|| raw_main_installer_url(repo))
+}
+
+#[cfg(not(windows))]
 fn fetch_install_script(repo: &str, release_tag: &str) -> Result<String, String> {
     let url = configured_installer_url(repo, release_tag);
     match fetch_text(&url, INSTALL_SCRIPT_NAME) {
         Ok(script) => Ok(script),
         Err(primary_error) => {
-            let has_override = std::env::var(GIT_AI_INSTALLER_URL_ENV)
-                .ok()
-                .map(|value| !value.trim().is_empty())
-                .unwrap_or(false);
-
-            if has_override {
+            if has_installer_url_override() {
                 Err(primary_error)
             } else {
                 let fallback_url = raw_main_installer_url(repo);
@@ -563,9 +571,57 @@ fn should_request_daemon_restart_after_update(
 
 #[cfg(windows)]
 fn try_request_daemon_restart_after_update() -> Result<(), String> {
-    let daemon_config = crate::daemon::DaemonConfig::from_env_or_default_paths()
-        .map_err(|e| e.to_string())?;
+    let daemon_config =
+        crate::daemon::DaemonConfig::from_env_or_default_paths().map_err(|e| e.to_string())?;
     crate::commands::daemon::request_restart_after_update(&daemon_config)
+}
+
+#[cfg(windows)]
+fn powershell_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+#[cfg(windows)]
+fn windows_install_handoff_command(
+    log_path: &str,
+    installer_url: &str,
+    fallback_installer_url: Option<&str>,
+) -> String {
+    let fallback = fallback_installer_url
+        .map(powershell_single_quote)
+        .unwrap_or_else(|| "$null".to_string());
+    format!(
+        "$ErrorActionPreference = 'Stop'; \
+         try {{ [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 }} catch {{ }}; \
+         $logFile = {}; \
+         $installerUrl = {}; \
+         $fallbackInstallerUrl = {}; \
+         Start-Transcript -Path $logFile -Append -Force | Out-Null; \
+         Write-Host ('Running installer via: irm ' + $installerUrl + ' | iex'); \
+         try {{ \
+             try {{ \
+                 irm -Uri $installerUrl -ErrorAction Stop | iex; \
+             }} catch {{ \
+                 if ($null -eq $fallbackInstallerUrl) {{ throw }}; \
+                 Write-Host ('Primary installer failed; retrying fallback: ' + $fallbackInstallerUrl); \
+                 irm -Uri $fallbackInstallerUrl -ErrorAction Stop | iex; \
+             }}; \
+             Write-Host 'Install script completed'; \
+         }} catch {{ \
+             Write-Host \"Error: $_\"; \
+             Write-Host \"Stack trace: $($_.ScriptStackTrace)\"; \
+         }} finally {{ \
+             if ($env:{} -eq '1') {{ \
+                 $daemonExe = Join-Path $HOME '.git-ai\\bin\\git-ai.exe'; \
+                 if (Test-Path $daemonExe) {{ try {{ & $daemonExe bg start *> $null }} catch {{ }} }} \
+             }}; \
+             Stop-Transcript | Out-Null; \
+         }}",
+        powershell_single_quote(log_path),
+        powershell_single_quote(installer_url),
+        fallback,
+        GIT_AI_RESTART_DAEMON_AFTER_INSTALL_ENV
+    )
 }
 
 #[allow(dead_code)]
@@ -689,7 +745,9 @@ fn fetch_release_for_channel(
 
     let repo = configured_github_repo();
     match channel {
-        UpdateChannel::Latest | UpdateChannel::EnterpriseLatest => fetch_latest_github_release(&repo),
+        UpdateChannel::Latest | UpdateChannel::EnterpriseLatest => {
+            fetch_latest_github_release(&repo)
+        }
         UpdateChannel::Next | UpdateChannel::EnterpriseNext => fetch_next_github_release(&repo),
     }
 }
@@ -721,10 +779,7 @@ fn release_from_response(
         return Err("Checksum not found in response".to_string());
     }
 
-    Ok(ChannelRelease {
-        tag,
-        semver,
-    })
+    Ok(ChannelRelease { tag, semver })
 }
 
 #[cfg(test)]
@@ -737,9 +792,16 @@ fn try_mock_releases(base: &str, channel: UpdateChannel) -> Option<Result<Channe
     )
 }
 
-fn run_install_script(script_content: &str, repo: &str, tag: &str, silent: bool) -> Result<(), String> {
+fn run_install_script(
+    script_content: &str,
+    repo: &str,
+    tag: &str,
+    installer_url: &str,
+    silent: bool,
+) -> Result<(), String> {
     #[cfg(windows)]
     {
+        let _ = script_content;
         if !silent
             && let Ok(daemon_config) = crate::daemon::DaemonConfig::from_env_or_default_paths()
         {
@@ -765,37 +827,15 @@ fn run_install_script(script_content: &str, repo: &str, tag: &str, silent: bool)
         let log_file = log_dir.join(format!("upgrade-{}.log", pid));
         let log_path_str = log_file.to_string_lossy().to_string();
 
-        // Write the install script to a temp file
-        let script_path = log_dir.join(format!("install-{}.ps1", pid));
-        fs::write(&script_path, script_content)
-            .map_err(|e| format!("Failed to write install script: {}", e))?;
-        let script_path_str = script_path.to_string_lossy().to_string();
-
         // Create log file with initial message
         fs::write(&log_file, format!("Starting upgrade at PID {}\n", pid))
             .map_err(|e| format!("Failed to create log file: {}", e))?;
 
-        // PowerShell wrapper that executes the script file with logging
-        let ps_wrapper = format!(
-            "$logFile = '{}'; \
-             Start-Transcript -Path $logFile -Append -Force | Out-Null; \
-             Write-Host 'Running verified install script...'; \
-             try {{ \
-                  $ErrorActionPreference = 'Continue'; \
-                  & '{}'; \
-                  Write-Host 'Install script completed'; \
-              }} catch {{ \
-                  Write-Host \"Error: $_\"; \
-                  Write-Host \"Stack trace: $($_.ScriptStackTrace)\"; \
-              }} finally {{ \
-                  if ($env:{} -eq '1') {{ \
-                      $daemonExe = Join-Path $HOME '.git-ai\\bin\\git-ai.exe'; \
-                      if (Test-Path $daemonExe) {{ try {{ & $daemonExe bg start *> $null }} catch {{ }} }} \
-                  }}; \
-                  Stop-Transcript | Out-Null; \
-                  Remove-Item -Path '{}' -Force -ErrorAction SilentlyContinue; \
-              }}",
-            log_path_str, script_path_str, GIT_AI_RESTART_DAEMON_AFTER_INSTALL_ENV, script_path_str
+        let fallback_installer_url = installer_fallback_url(repo);
+        let ps_wrapper = windows_install_handoff_command(
+            &log_path_str,
+            installer_url,
+            fallback_installer_url.as_deref(),
         );
 
         let spawn_powershell = |exe: &str| -> std::io::Result<std::process::Child> {
@@ -843,6 +883,7 @@ fn run_install_script(script_content: &str, repo: &str, tag: &str, silent: bool)
 
     #[cfg(not(windows))]
     {
+        let _ = installer_url;
         use std::io::Write;
         use std::os::unix::fs::PermissionsExt;
 
@@ -1056,19 +1097,27 @@ fn run_impl_with_url(
         }
     }
 
-    println!("Fetching installer script...");
+    #[cfg(windows)]
+    let script_content = {
+        println!("Preparing Windows installer handoff from {}", installer_url);
+        String::new()
+    };
 
-    let script_content = match fetch_install_script(&repo, &release.tag) {
-        Ok(content) => {
-            #[cfg(windows)]
-            println!("\x1b[1;32m✓\x1b[0m install.ps1 fetched from {}", installer_url);
-            #[cfg(not(windows))]
-            println!("\x1b[1;32m✓\x1b[0m install.sh fetched from {}", installer_url);
-            content
-        }
-        Err(err) => {
-            eprintln!("Failed to fetch install script: {}", err);
-            std::process::exit(1);
+    #[cfg(not(windows))]
+    let script_content = {
+        println!("Fetching installer script...");
+        match fetch_install_script(&repo, &release.tag) {
+            Ok(content) => {
+                println!(
+                    "\x1b[1;32m✓\x1b[0m install.sh fetched from {}",
+                    installer_url
+                );
+                content
+            }
+            Err(err) => {
+                eprintln!("Failed to fetch install script: {}", err);
+                std::process::exit(1);
+            }
         }
     };
 
@@ -1076,7 +1125,13 @@ fn run_impl_with_url(
     println!("Running installation script...");
     println!();
 
-    match run_install_script(&script_content, &repo, &release.tag, silent_install) {
+    match run_install_script(
+        &script_content,
+        &repo,
+        &release.tag,
+        &installer_url,
+        silent_install,
+    ) {
         Ok(()) => {
             // On Windows, we spawn the installer in the background and can't verify success
             #[cfg(not(windows))]
@@ -1281,8 +1336,13 @@ pub fn check_and_install_update_if_available() -> Result<DaemonUpdateCheckResult
         })),
     );
 
+    #[cfg(windows)]
+    let script_content = String::new();
+
+    #[cfg(not(windows))]
     let script_content = fetch_install_script(&repo, &release.tag)?;
-    run_install_script(&script_content, &repo, &release.tag, true)?;
+
+    run_install_script(&script_content, &repo, &release.tag, &installer_url, true)?;
 
     // Clear the cached update now that we've installed it.
     persist_update_state(channel, None);
@@ -1573,14 +1633,15 @@ mod tests {
             configured_installer_url(DEFAULT_GITHUB_RELEASE_REPO, "v2.1.13"),
             format!(
                 "https://github.com/{}/releases/download/{}/{}",
-                DEFAULT_GITHUB_RELEASE_REPO,
-                "v2.1.13",
-                INSTALL_SCRIPT_NAME
+                DEFAULT_GITHUB_RELEASE_REPO, "v2.1.13", INSTALL_SCRIPT_NAME
             )
         );
 
         unsafe {
-            std::env::set_var(GIT_AI_INSTALLER_URL_ENV, "https://example.com/install-script");
+            std::env::set_var(
+                GIT_AI_INSTALLER_URL_ENV,
+                "https://example.com/install-script",
+            );
         }
 
         assert_eq!(
@@ -1599,9 +1660,7 @@ mod tests {
             raw_main_installer_url(DEFAULT_GITHUB_RELEASE_REPO),
             format!(
                 "{}/{}/main/{}",
-                RAW_GITHUB_CONTENT_BASE_URL,
-                DEFAULT_GITHUB_RELEASE_REPO,
-                INSTALL_SCRIPT_NAME
+                RAW_GITHUB_CONTENT_BASE_URL, DEFAULT_GITHUB_RELEASE_REPO, INSTALL_SCRIPT_NAME
             )
         );
     }
@@ -1798,6 +1857,22 @@ mod tests {
             &UpgradeAction::UpgradeAvailable,
             true,
         ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_windows_install_handoff_uses_irm_iex_without_temp_script() {
+        let command = windows_install_handoff_command(
+            r"C:\Users\me\.git-ai\upgrade-logs\upgrade-42.log",
+            "https://github.com/rj-gaoang/git-ai/releases/download/v1.2.3/install.ps1",
+            Some("https://raw.githubusercontent.com/rj-gaoang/git-ai/main/install.ps1"),
+        );
+
+        assert!(command.contains("irm -Uri $installerUrl -ErrorAction Stop | iex"));
+        assert!(command.contains("Primary installer failed; retrying fallback"));
+        assert!(command.contains("GIT_AI_RESTART_DAEMON_AFTER_INSTALL"));
+        assert!(!command.contains("install-42.ps1"));
+        assert!(!command.contains("Remove-Item -Path"));
     }
 
     #[test]

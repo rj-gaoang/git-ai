@@ -477,12 +477,64 @@ fn daemon_runtime_unique_launcher_path(runtime_dir: &Path) -> PathBuf {
 }
 
 #[cfg(windows)]
+fn is_daemon_runtime_unique_launcher(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|value| value.to_str())
+        .is_some_and(|name| {
+            name.starts_with(&format!("{}-", DAEMON_RUNTIME_EXE_PREFIX)) && name.ends_with(".exe")
+        })
+}
+
+#[cfg(windows)]
+fn same_windows_path(left: &Path, right: &Path) -> bool {
+    let normalize = |path: &Path| {
+        std::fs::canonicalize(path)
+            .unwrap_or_else(|_| path.to_path_buf())
+            .to_string_lossy()
+            .trim_end_matches(['\\', '/'])
+            .to_lowercase()
+    };
+    normalize(left) == normalize(right)
+}
+
+#[cfg(windows)]
+fn prune_daemon_runtime_launchers(runtime_dir: &Path, keep: Option<&Path>) -> usize {
+    let Ok(entries) = std::fs::read_dir(runtime_dir) else {
+        return 0;
+    };
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if keep.is_some_and(|keep| same_windows_path(&path, keep)) {
+            continue;
+        }
+        if !is_daemon_runtime_unique_launcher(&path) {
+            continue;
+        }
+        if std::fs::remove_file(&path).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
+}
+
+#[cfg(windows)]
 fn prepare_daemon_runtime_launcher(exe: &Path, runtime_dir: &Path) -> Result<PathBuf, String> {
+    let stable_launcher = daemon_runtime_launcher_path(runtime_dir);
+    let _ = prune_daemon_runtime_launchers(runtime_dir, None);
+
+    if std::fs::copy(exe, &stable_launcher).is_ok() {
+        let _ = prune_daemon_runtime_launchers(runtime_dir, Some(&stable_launcher));
+        return Ok(stable_launcher);
+    }
+
     let launcher = daemon_runtime_unique_launcher_path(runtime_dir);
     match std::fs::copy(exe, &launcher) {
-        Ok(_) => return Ok(launcher),
+        Ok(_) => {
+            let _ = prune_daemon_runtime_launchers(runtime_dir, Some(&launcher));
+            Ok(launcher)
+        }
         Err(copy_error) => {
-            let stable_launcher = daemon_runtime_launcher_path(runtime_dir);
             if stable_launcher.exists() {
                 tracing::debug!(
                     "failed to copy daemon launcher from {} to {}: {}; falling back to existing launcher {}",
@@ -986,5 +1038,46 @@ mod tests {
             .unwrap();
         assert!(name.starts_with(DAEMON_RUNTIME_EXE_PREFIX));
         assert!(name.ends_with(".exe"));
+    }
+
+    #[test]
+    fn prepare_daemon_runtime_launcher_reuses_stable_path_and_prunes_unique_launchers() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("git-ai.exe");
+        std::fs::write(&source, b"source").unwrap();
+
+        let old_unique = temp.path().join(format!(
+            "{}-old-{}.exe",
+            DAEMON_RUNTIME_EXE_PREFIX,
+            std::process::id()
+        ));
+        std::fs::write(&old_unique, b"old").unwrap();
+
+        let launcher = prepare_daemon_runtime_launcher(&source, temp.path()).unwrap();
+
+        assert_eq!(launcher, daemon_runtime_launcher_path(temp.path()));
+        assert_eq!(std::fs::read(&launcher).unwrap(), b"source");
+        assert!(!old_unique.exists());
+    }
+
+    #[test]
+    fn prune_daemon_runtime_launchers_keeps_selected_unique_launcher() {
+        let temp = tempfile::tempdir().unwrap();
+        let keep = temp.path().join(format!(
+            "{}-keep-{}.exe",
+            DAEMON_RUNTIME_EXE_PREFIX,
+            std::process::id()
+        ));
+        let stale = temp.path().join(format!(
+            "{}-stale-{}.exe",
+            DAEMON_RUNTIME_EXE_PREFIX,
+            std::process::id()
+        ));
+        std::fs::write(&keep, b"keep").unwrap();
+        std::fs::write(&stale, b"stale").unwrap();
+
+        assert_eq!(prune_daemon_runtime_launchers(temp.path(), Some(&keep)), 1);
+        assert!(keep.exists());
+        assert!(!stale.exists());
     }
 }

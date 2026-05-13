@@ -31,7 +31,7 @@ use crate::{
         rewrite_authorship_if_needed,
     },
     authorship::working_log::{
-        CheckpointKind, CHECKPOINT_ROLE_AI_PRE_TOOL_SNAPSHOT, checkpoint_metadata_has_role,
+        CHECKPOINT_ROLE_AI_PRE_TOOL_SNAPSHOT, CheckpointKind, checkpoint_metadata_has_role,
     },
     commands::checkpoint_agent::orchestrator::CheckpointRequest,
     commands::hooks::{push_hooks, stash_hooks},
@@ -225,7 +225,15 @@ impl DaemonConfig {
             GitAiError::Generic("Unable to determine ~/.git-ai/internal path".to_string())
         })?;
         let default_config = Self::from_internal_dir(internal_dir.clone());
-        if let Some(active_config) = Self::active_runtime_config(&internal_dir) {
+        let active_config = Self::active_runtime_config(&internal_dir);
+        #[cfg(windows)]
+        Self::prune_stale_replacement_runtimes(
+            &internal_dir,
+            active_config
+                .as_ref()
+                .map(|config| config.internal_dir.as_path()),
+        );
+        if let Some(active_config) = active_config {
             return Ok(active_config);
         }
         Ok(default_config)
@@ -271,6 +279,43 @@ impl DaemonConfig {
         Some(Self::from_internal_dir(meta.internal_dir))
     }
 
+    #[cfg(windows)]
+    fn same_cleanup_path(left: &Path, right: &Path) -> bool {
+        let normalize = |path: &Path| {
+            fs::canonicalize(path)
+                .unwrap_or_else(|_| path.to_path_buf())
+                .to_string_lossy()
+                .trim_end_matches(['\\', '/'])
+                .to_lowercase()
+        };
+        normalize(left) == normalize(right)
+    }
+
+    #[cfg(windows)]
+    fn prune_stale_replacement_runtimes(
+        default_internal_dir: &Path,
+        keep_internal_dir: Option<&Path>,
+    ) -> usize {
+        let runtimes_dir = default_internal_dir.join("daemon-runtimes");
+        let Ok(entries) = fs::read_dir(&runtimes_dir) else {
+            return 0;
+        };
+        let mut removed = 0;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !entry.file_type().is_ok_and(|file_type| file_type.is_dir()) {
+                continue;
+            }
+            if keep_internal_dir.is_some_and(|keep| Self::same_cleanup_path(&path, keep)) {
+                continue;
+            }
+            if fs::remove_dir_all(&path).is_ok() {
+                removed += 1;
+            }
+        }
+        removed
+    }
+
     pub fn activate_replacement_runtime(reason: &str) -> Result<Self, GitAiError> {
         let default_internal_dir = config::internal_dir_path().ok_or_else(|| {
             GitAiError::Generic("Unable to determine ~/.git-ai/internal path".to_string())
@@ -292,6 +337,11 @@ impl DaemonConfig {
             fs::create_dir_all(parent)?;
         }
         fs::write(meta_path, serde_json::to_string_pretty(&meta)?)?;
+        #[cfg(windows)]
+        Self::prune_stale_replacement_runtimes(
+            &default_internal_dir,
+            Some(&replacement.internal_dir),
+        );
         Ok(replacement)
     }
 
@@ -3958,8 +4008,7 @@ pub struct ActorDaemonCoordinator {
     pending_ai_edits_by_family: Mutex<HashMap<String, HashMap<String, u128>>>,
     /// Last AI-produced content per file, used to suppress save-only KnownHuman
     /// checkpoints that merely persist the most recent AI output.
-    recent_ai_edit_contents_by_family:
-        Mutex<HashMap<String, HashMap<String, RecentAiEditContent>>>,
+    recent_ai_edit_contents_by_family: Mutex<HashMap<String, HashMap<String, RecentAiEditContent>>>,
     family_sequencers_by_family: Mutex<HashMap<String, FamilySequencerState>>,
     pending_root_slots_by_root: Mutex<HashMap<String, PendingRootSlot>>,
     recent_replay_prerequisites_by_family:
@@ -4284,15 +4333,13 @@ impl ActorDaemonCoordinator {
 
     fn checkpoint_request_is_ai_pre_tool_snapshot(request: &CheckpointRequest) -> bool {
         request.checkpoint_kind == CheckpointKind::Human
-            && checkpoint_metadata_has_role(
-                &request.metadata,
-                CHECKPOINT_ROLE_AI_PRE_TOOL_SNAPSHOT,
-            )
+            && checkpoint_metadata_has_role(&request.metadata, CHECKPOINT_ROLE_AI_PRE_TOOL_SNAPSHOT)
     }
 
     fn should_register_pending_ai_edits(request: &CheckpointRequest) -> bool {
         request.path_role == PreparedPathRole::WillEdit
-            && (request.agent_id.is_some() || Self::checkpoint_request_is_ai_pre_tool_snapshot(request))
+            && (request.agent_id.is_some()
+                || Self::checkpoint_request_is_ai_pre_tool_snapshot(request))
     }
 
     fn checkpoint_updates_human_worktree_watermark(request: &CheckpointRequest) -> bool {
@@ -8648,9 +8695,8 @@ fn daemon_update_check_loop(coordinator: Arc<ActorDaemonCoordinator>, started_at
                 pending_update_ready = true;
                 if coordinator.has_pending_update_restart_blockers() {
                     tracing::info!(
-                        queued_trace_payloads = coordinator
-                            .queued_trace_payloads
-                            .load(Ordering::Acquire),
+                        queued_trace_payloads =
+                            coordinator.queued_trace_payloads.load(Ordering::Acquire),
                         busy_retry_secs = busy_retry_interval,
                         "update check: newer version available but daemon is busy, retrying soon"
                     );
@@ -9252,6 +9298,24 @@ mod tests {
         }
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn prune_stale_replacement_runtimes_keeps_active_runtime() {
+        let temp = tempfile::tempdir().unwrap();
+        let internal_dir = temp.path().join(".git-ai").join("internal");
+        let runtimes_dir = internal_dir.join("daemon-runtimes");
+        let active = runtimes_dir.join("active");
+        let stale = runtimes_dir.join("stale");
+        fs::create_dir_all(active.join("daemon")).unwrap();
+        fs::create_dir_all(stale.join("daemon")).unwrap();
+
+        let removed = DaemonConfig::prune_stale_replacement_runtimes(&internal_dir, Some(&active));
+
+        assert_eq!(removed, 1);
+        assert!(active.exists());
+        assert!(!stale.exists());
+    }
+
     #[test]
     fn checkpoint_requests_use_long_timeout_in_ci_or_test_env() {
         assert_eq!(
@@ -9392,10 +9456,10 @@ mod tests {
             CHECKPOINT_ROLE_AI_PRE_TOOL_SNAPSHOT.to_string(),
         );
 
-        assert!(!ActorDaemonCoordinator::checkpoint_updates_human_worktree_watermark(
-            request,
+        assert!(!ActorDaemonCoordinator::checkpoint_updates_human_worktree_watermark(request,));
+        assert!(ActorDaemonCoordinator::should_register_pending_ai_edits(
+            request
         ));
-        assert!(ActorDaemonCoordinator::should_register_pending_ai_edits(request));
     }
 
     #[test]
@@ -9413,33 +9477,38 @@ mod tests {
 
             coordinator.register_recent_ai_edit_contents(
                 "family",
-                &[crate::commands::checkpoint_agent::orchestrator::CheckpointFile {
+                &[
+                    crate::commands::checkpoint_agent::orchestrator::CheckpointFile {
+                        path: file_path.clone(),
+                        content: Some("AI content\n".to_string()),
+                        repo_work_dir: temp_dir.path().to_path_buf(),
+                        base_commit:
+                            crate::commands::checkpoint_agent::orchestrator::BaseCommit::Initial,
+                    },
+                ],
+            );
+
+            let same_content_file =
+                crate::commands::checkpoint_agent::orchestrator::CheckpointFile {
                     path: file_path.clone(),
                     content: Some("AI content\n".to_string()),
                     repo_work_dir: temp_dir.path().to_path_buf(),
                     base_commit:
                         crate::commands::checkpoint_agent::orchestrator::BaseCommit::Initial,
-                }],
-            );
-
-            let same_content_file = crate::commands::checkpoint_agent::orchestrator::CheckpointFile {
-                path: file_path.clone(),
-                content: Some("AI content\n".to_string()),
-                repo_work_dir: temp_dir.path().to_path_buf(),
-                base_commit: crate::commands::checkpoint_agent::orchestrator::BaseCommit::Initial,
-            };
-            let changed_content_file = crate::commands::checkpoint_agent::orchestrator::CheckpointFile {
-                path: file_path,
-                content: Some("Human content\n".to_string()),
-                repo_work_dir: temp_dir.path().to_path_buf(),
-                base_commit: crate::commands::checkpoint_agent::orchestrator::BaseCommit::Initial,
-            };
+                };
+            let changed_content_file =
+                crate::commands::checkpoint_agent::orchestrator::CheckpointFile {
+                    path: file_path,
+                    content: Some("Human content\n".to_string()),
+                    repo_work_dir: temp_dir.path().to_path_buf(),
+                    base_commit:
+                        crate::commands::checkpoint_agent::orchestrator::BaseCommit::Initial,
+                };
 
             assert!(coordinator.file_matches_recent_ai_edit_content("family", &same_content_file));
-            assert!(!coordinator.file_matches_recent_ai_edit_content(
-                "family",
-                &changed_content_file,
-            ));
+            assert!(
+                !coordinator.file_matches_recent_ai_edit_content("family", &changed_content_file,)
+            );
         });
     }
 
@@ -9504,10 +9573,14 @@ mod tests {
             coordinator.wrapper_states.lock().unwrap().clear();
             assert!(!coordinator.has_pending_update_restart_blockers());
 
-            coordinator.queued_trace_payloads.fetch_add(1, Ordering::Relaxed);
+            coordinator
+                .queued_trace_payloads
+                .fetch_add(1, Ordering::Relaxed);
             assert!(coordinator.has_pending_update_restart_blockers());
 
-            coordinator.queued_trace_payloads.store(0, Ordering::Relaxed);
+            coordinator
+                .queued_trace_payloads
+                .store(0, Ordering::Relaxed);
             assert!(!coordinator.has_pending_update_restart_blockers());
 
             coordinator.begin_family_effect("family-1").unwrap();
