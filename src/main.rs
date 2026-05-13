@@ -11,6 +11,17 @@ struct Cli {
     args: Vec<String>,
 }
 
+fn is_git_ai_cli_binary_name(binary_name: &str) -> bool {
+    if binary_name.eq_ignore_ascii_case("git-ai") || binary_name.eq_ignore_ascii_case("git-ai.exe") {
+        return true;
+    }
+
+    let stem = binary_name
+        .strip_suffix(".exe")
+        .unwrap_or(binary_name);
+    stem.eq_ignore_ascii_case("git-ai-daemon") || stem.starts_with("git-ai-daemon-")
+}
+
 fn main() {
     // Get the binary name that was called
     let binary_name = std::env::args_os()
@@ -44,10 +55,27 @@ fn main() {
         }
     }
 
-    if binary_name == "git-ai" || binary_name == "git-ai.exe" {
+    if is_git_ai_cli_binary_name(&binary_name) {
         commands::git_ai_handlers::handle_git_ai(&cli.args);
         std::process::exit(0);
     }
 
     commands::git_handlers::handle_git(&cli.args);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_git_ai_cli_binary_name;
+
+    #[test]
+    fn recognizes_git_ai_cli_binary_names() {
+        assert!(is_git_ai_cli_binary_name("git-ai"));
+        assert!(is_git_ai_cli_binary_name("git-ai.exe"));
+        assert!(is_git_ai_cli_binary_name("git-ai-daemon.exe"));
+        assert!(is_git_ai_cli_binary_name(
+            "git-ai-daemon-1778661624140634200-28892.exe"
+        ));
+        assert!(!is_git_ai_cli_binary_name("git"));
+        assert!(!is_git_ai_cli_binary_name("git.exe"));
+    }
 }
