@@ -248,7 +248,7 @@ For GitHub Copilot in VS Code, Git AI scopes attribution to the current native h
 
 For native Copilot edit flows, Git AI now tags AI pre-edit snapshots explicitly and surfaces them as `AI pre-edit snapshot` in `git-ai status` instead of rendering them like a human checkpoint. The daemon also suppresses `known_human` saves whose content still matches the most recent AI output, which prevents save-only VS Code hook misfires from claiming AI-produced lines as human edits.
 
-On Windows, if you are validating a locally built binary while an older installed `~/.git-ai/bin/git-ai.exe` is still locked, rerun `install-hooks` from the binary you want Copilot to execute, or repoint `~/.copilot/hooks/git-ai.json` to that binary. Replacement daemon runtimes repoint Git trace2 pipes and background sockets, but Copilot native hooks keep invoking whichever `git-ai.exe` path is configured in that hook JSON.
+On Windows, if you are validating a locally built binary while an older installed `~/.git-ai/bin/git-ai.exe` is still locked, rerun `install-hooks` from the binary you want Copilot to execute, or repoint `~/.copilot/hooks/git-ai.json` to that binary. Replacement daemon runtimes repoint Git trace2 pipes and background sockets, and `git-ai bg restart --hard` now refreshes the global Git `trace2.eventTarget` to the active daemon runtime as part of that recovery. Copilot native hooks still keep invoking whichever `git-ai.exe` path is configured in that hook JSON.
 
 #### Example Note
 `refs/notes/ai/commit_sha`

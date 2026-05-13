@@ -80,7 +80,9 @@ fn handle_start(args: &[String]) -> Result<(), String> {
     if has_flag(args, "--mode") {
         return Err("--mode is no longer supported; daemon always runs in write mode".to_string());
     }
-    ensure_daemon_running_attached(daemon_startup_timeout()).map(|_| ())
+    let config = ensure_daemon_running_attached(daemon_startup_timeout())?;
+    refresh_async_mode_trace2_target(&config);
+    Ok(())
 }
 
 fn daemon_startup_timeout() -> Duration {
@@ -186,6 +188,21 @@ fn ensure_daemon_running_attached(timeout: Duration) -> Result<DaemonConfig, Str
 
 fn daemon_config_from_env_or_default_paths() -> Result<DaemonConfig, String> {
     DaemonConfig::from_env_or_default_paths().map_err(|e| e.to_string())
+}
+
+fn refresh_async_mode_trace2_target(config: &DaemonConfig) {
+    if !crate::config::Config::fresh().feature_flags().async_mode {
+        return;
+    }
+
+    if let Err(error) =
+        crate::commands::install_hooks::configure_async_mode_daemon_trace2_for_config(config)
+    {
+        eprintln!(
+            "[git-ai] warning: failed to align git trace2 target with active daemon runtime: {}",
+            error
+        );
+    }
 }
 
 fn handle_run(args: &[String]) -> Result<(), String> {
@@ -814,7 +831,9 @@ fn handle_restart(args: &[String]) -> Result<(), String> {
                     "[git-ai] warning: hard restart could not kill existing daemon: {}; starting replacement runtime",
                     error
                 );
-                return ensure_daemon_running(daemon_startup_timeout()).map(|_| ());
+                let config = ensure_daemon_running(daemon_startup_timeout())?;
+                refresh_async_mode_trace2_target(&config);
+                return Ok(());
             }
         } else {
             // Attempt soft shutdown; escalate to hard kill on timeout.
@@ -827,7 +846,9 @@ fn handle_restart(args: &[String]) -> Result<(), String> {
     }
 
     // Start a fresh daemon.
-    ensure_daemon_running_attached(daemon_startup_timeout()).map(|_| ())
+    let config = ensure_daemon_running_attached(daemon_startup_timeout())?;
+    refresh_async_mode_trace2_target(&config);
+    Ok(())
 }
 
 fn soft_shutdown_daemon(config: &DaemonConfig) -> Result<(), String> {
@@ -965,7 +986,9 @@ pub(crate) fn restart_daemon(config: &DaemonConfig) -> Result<(), String> {
             error
         );
     }
-    ensure_daemon_running(Duration::from_secs(5)).map(|_| ())
+    let config = ensure_daemon_running(Duration::from_secs(5))?;
+    refresh_async_mode_trace2_target(&config);
+    Ok(())
 }
 
 fn parse_repo_arg(args: &[String]) -> Option<String> {
