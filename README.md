@@ -67,7 +67,7 @@ fe2c4c8 (claude [session_id] 2025-12-02 19:25:13 -0500  142)             let fro
 **Mac, Linux, Windows (WSL)**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/rj-gaoang/git-ai/main/install.sh | bash
+curl -sSL https://usegitai.com/install.sh | bash
 ```
 
 **Windows (non-WSL)**
@@ -75,10 +75,10 @@ curl -fsSL https://raw.githubusercontent.com/rj-gaoang/git-ai/main/install.sh | 
 Non-WSL Windows support is currently experimental and under active development. We would love to hear your feedback while we work to get non-WSL Windows support production-ready.
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/rj-gaoang/git-ai/main/install.ps1 | iex"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://usegitai.com/install.ps1 | iex"
 ```
 
-For this fork, the canonical installer entrypoint is the raw install script in `rj-gaoang/git-ai`, which keeps fresh installs aligned with the same repository that future auto-updates read from. If you need the installer or built-in `git-ai upgrade` flow to pull binaries from a different GitHub repository, set `GIT_AI_GITHUB_REPO=<owner/repo>` before running it. `git-ai upgrade` checks GitHub releases directly and defaults to the latest stable release from `rj-gaoang/git-ai`; set `GIT_AI_RELEASE_TAG=<tag-or-latest>` to pin a specific release, or `GIT_AI_INSTALLER_URL=<raw-install-script-url>` to override the installer script source while still downloading binaries from the selected release repo/tag. For local development validation, set `GIT_AI_LOCAL_BINARY` to a built executable instead.
+If you need the installer or built-in `git-ai upgrade` flow to pull binaries from a different GitHub repository, set `GIT_AI_GITHUB_REPO=<owner/repo>` before running it. `git-ai upgrade` now checks GitHub releases directly and defaults to `rj-gaoang/git-ai` latest stable release; set `GIT_AI_RELEASE_TAG=<tag-or-latest>` to pin a specific release, or `GIT_AI_INSTALLER_URL=<raw-install-script-url>` to override the installer script source while still downloading binaries from the selected release repo/tag. For local development validation, set `GIT_AI_LOCAL_BINARY` to a built executable instead.
 
 On Windows, both the installer and the runtime Git resolver skip any existing `git-ai` shim on `PATH` and look for a standard Git binary instead. Git for Windows still needs to be installed and reachable somewhere on `PATH`, typically via `C:\Program Files\Git\cmd`.
 
@@ -242,13 +242,11 @@ Agents make fewer mistakes and produce more maintainable code when they understa
 3. **Post Commit** a Git Note with AI-attributions in it is attached to the commit
 4. **On `merge --squash`, `rebase`, `cherry-pick`, `stash`, `pop`, `commit --amend`, etc** AI-attributions are automatically moved 
 
-When a `git commit` succeeds, Git AI also schedules a background self-update check. If auto-updates are enabled and the running CLI is behind the selected release channel, Git AI fetches the latest verified release from GitHub in the background instead of blocking the commit. On Windows, that background path first asks the daemon to restart into its self-update flow, then runs the detached installer silently. The daemon now waits for active wrapper, trace-ingest, and post-commit side-effect work to go idle before taking that restart, so the commit that discovered a new release can still finish attribution and upload work before self-update continues. Detached Windows daemons are launched from unique per-start runtime copies of `git-ai.exe`, which keeps long-lived background processes from permanently locking the shared install binary or a reused runtime launcher during future daemon restarts and auto-updates. The installer still follows the same aggressive replacement path as a manual install: it may stop the daemon and force-terminate lingering `git-ai` processes so the binary can be replaced immediately instead of deferring while `git-ai.exe` is still busy.
+When a `git commit` succeeds, Git AI also schedules a background self-update check. If auto-updates are enabled and the running CLI is behind the selected release channel, Git AI fetches the latest verified release from GitHub in the background instead of blocking the commit.
 
 For GitHub Copilot in VS Code, Git AI scopes attribution to the current native hook tool call. If the hook payload omits file paths, Git AI falls back to the matching `tool_use_id` / `toolCallId` in the Copilot transcript instead of scanning the whole chat session, so unrelated edits from nearby tool calls are not mixed into the checkpoint. During post-commit refresh, Git AI also reloads prompt text and model metadata from that Copilot transcript so future uploads can include both fields. When a native hook payload includes both an event-stream `transcript_path` and a session-json `chat_session_path`, Git AI keeps both and prefers `chat_session_path` for model extraction so Copilot `inputState.selectedModel.identifier` is not overwritten by the event stream path.
 
-For native Copilot edit flows, Git AI now tags AI pre-edit snapshots explicitly and surfaces them as `AI pre-edit snapshot` in `git-ai status` instead of rendering them like a human checkpoint. The daemon also suppresses `known_human` saves whose content still matches the most recent AI output, which prevents save-only VS Code hook misfires from claiming AI-produced lines as human edits.
-
-On Windows, if you are validating a locally built binary while an older installed `~/.git-ai/bin/git-ai.exe` is still locked, rerun `install-hooks` from the binary you want Copilot to execute, or repoint `~/.copilot/hooks/git-ai.json` to that binary. Replacement daemon runtimes repoint Git trace2 pipes and background sockets, and `git-ai bg restart --hard` now refreshes the global Git `trace2.eventTarget` to the active daemon runtime as part of that recovery. Copilot native hooks still keep invoking whichever `git-ai.exe` path is configured in that hook JSON.
+On Windows, if you are validating a locally built binary while an older installed `~/.git-ai/bin/git-ai.exe` is still locked, rerun `install-hooks` from the binary you want Copilot to execute, or repoint `~/.copilot/hooks/git-ai.json` to that binary. Replacement daemon runtimes repoint Git trace2 pipes and background sockets, but Copilot native hooks keep invoking whichever `git-ai.exe` path is configured in that hook JSON.
 
 #### Example Note
 `refs/notes/ai/commit_sha`

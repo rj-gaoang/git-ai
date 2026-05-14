@@ -14,15 +14,7 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 #[cfg(windows)]
-use std::time::{SystemTime, UNIX_EPOCH};
-#[cfg(windows)]
 use std::{ffi::OsStr, path::Path};
-
-#[cfg(windows)]
-const DAEMON_RUNTIME_EXE_NAME: &str = "git-ai-daemon.exe";
-
-#[cfg(windows)]
-const DAEMON_RUNTIME_EXE_PREFIX: &str = "git-ai-daemon";
 
 pub fn handle_daemon(args: &[String]) {
     if args.is_empty() || is_help(args[0].as_str()) {
@@ -80,9 +72,7 @@ fn handle_start(args: &[String]) -> Result<(), String> {
     if has_flag(args, "--mode") {
         return Err("--mode is no longer supported; daemon always runs in write mode".to_string());
     }
-    let config = ensure_daemon_running_attached(daemon_startup_timeout())?;
-    refresh_async_mode_trace2_target(&config);
-    Ok(())
+    ensure_daemon_running_attached(daemon_startup_timeout()).map(|_| ())
 }
 
 fn daemon_startup_timeout() -> Duration {
@@ -188,21 +178,6 @@ fn ensure_daemon_running_attached(timeout: Duration) -> Result<DaemonConfig, Str
 
 fn daemon_config_from_env_or_default_paths() -> Result<DaemonConfig, String> {
     DaemonConfig::from_env_or_default_paths().map_err(|e| e.to_string())
-}
-
-fn refresh_async_mode_trace2_target(config: &DaemonConfig) {
-    if !crate::config::Config::fresh().feature_flags().async_mode {
-        return;
-    }
-
-    if let Err(error) =
-        crate::commands::install_hooks::configure_async_mode_daemon_trace2_for_config(config)
-    {
-        eprintln!(
-            "[git-ai] warning: failed to align git trace2 target with active daemon runtime: {}",
-            error
-        );
-    }
 }
 
 fn handle_run(args: &[String]) -> Result<(), String> {
@@ -475,105 +450,6 @@ fn daemon_runtime_dir(config: &DaemonConfig) -> Result<PathBuf, String> {
 }
 
 #[cfg(windows)]
-fn daemon_runtime_launcher_path(runtime_dir: &Path) -> PathBuf {
-    runtime_dir.join(DAEMON_RUNTIME_EXE_NAME)
-}
-
-#[cfg(windows)]
-fn daemon_runtime_unique_launcher_path(runtime_dir: &Path) -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    runtime_dir.join(format!(
-        "{}-{}-{}.exe",
-        DAEMON_RUNTIME_EXE_PREFIX,
-        nanos,
-        std::process::id()
-    ))
-}
-
-#[cfg(windows)]
-fn is_daemon_runtime_unique_launcher(path: &Path) -> bool {
-    path.file_name()
-        .and_then(|value| value.to_str())
-        .is_some_and(|name| {
-            name.starts_with(&format!("{}-", DAEMON_RUNTIME_EXE_PREFIX)) && name.ends_with(".exe")
-        })
-}
-
-#[cfg(windows)]
-fn same_windows_path(left: &Path, right: &Path) -> bool {
-    let normalize = |path: &Path| {
-        std::fs::canonicalize(path)
-            .unwrap_or_else(|_| path.to_path_buf())
-            .to_string_lossy()
-            .trim_end_matches(['\\', '/'])
-            .to_lowercase()
-    };
-    normalize(left) == normalize(right)
-}
-
-#[cfg(windows)]
-fn prune_daemon_runtime_launchers(runtime_dir: &Path, keep: Option<&Path>) -> usize {
-    let Ok(entries) = std::fs::read_dir(runtime_dir) else {
-        return 0;
-    };
-    let mut removed = 0;
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if keep.is_some_and(|keep| same_windows_path(&path, keep)) {
-            continue;
-        }
-        if !is_daemon_runtime_unique_launcher(&path) {
-            continue;
-        }
-        if std::fs::remove_file(&path).is_ok() {
-            removed += 1;
-        }
-    }
-    removed
-}
-
-#[cfg(windows)]
-fn prepare_daemon_runtime_launcher(exe: &Path, runtime_dir: &Path) -> Result<PathBuf, String> {
-    let stable_launcher = daemon_runtime_launcher_path(runtime_dir);
-    let _ = prune_daemon_runtime_launchers(runtime_dir, None);
-
-    if std::fs::copy(exe, &stable_launcher).is_ok() {
-        let _ = prune_daemon_runtime_launchers(runtime_dir, Some(&stable_launcher));
-        return Ok(stable_launcher);
-    }
-
-    let launcher = daemon_runtime_unique_launcher_path(runtime_dir);
-    match std::fs::copy(exe, &launcher) {
-        Ok(_) => {
-            let _ = prune_daemon_runtime_launchers(runtime_dir, Some(&launcher));
-            Ok(launcher)
-        }
-        Err(copy_error) => {
-            if stable_launcher.exists() {
-                tracing::debug!(
-                    "failed to copy daemon launcher from {} to {}: {}; falling back to existing launcher {}",
-                    exe.display(),
-                    launcher.display(),
-                    copy_error,
-                    stable_launcher.display()
-                );
-                return Ok(stable_launcher);
-            }
-
-            Err(format!(
-                "failed to copy daemon launcher from {} to {}: {}",
-                exe.display(),
-                launcher.display(),
-                copy_error
-            ))
-        }
-    }
-}
-
-#[cfg(windows)]
 fn powershell_single_quote_literal(value: &OsStr) -> String {
     format!("'{}'", value.to_string_lossy().replace('\'', "''"))
 }
@@ -589,10 +465,9 @@ fn spawn_daemon_run_detached(config: &DaemonConfig) -> Result<(), String> {
 
     #[cfg(windows)]
     {
-        let launcher_exe = prepare_daemon_runtime_launcher(&exe, &runtime_dir)?;
         let script = format!(
             "Start-Process -FilePath {} -ArgumentList @('bg','run') -WorkingDirectory {} -WindowStyle Hidden",
-            powershell_single_quote_literal(launcher_exe.as_os_str()),
+            powershell_single_quote_literal(exe.as_os_str()),
             powershell_single_quote_literal(Path::new(&runtime_dir).as_os_str())
         );
         let mut child = Command::new("powershell.exe");
@@ -611,7 +486,6 @@ fn spawn_daemon_run_detached(config: &DaemonConfig) -> Result<(), String> {
             child.env_remove(var);
         }
         child.env_remove("GIT_AI");
-        child.env(crate::utils::GIT_AI_CANONICAL_EXE_ENV, &exe);
 
         let preferred_flags =
             CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB;
@@ -831,9 +705,7 @@ fn handle_restart(args: &[String]) -> Result<(), String> {
                     "[git-ai] warning: hard restart could not kill existing daemon: {}; starting replacement runtime",
                     error
                 );
-                let config = ensure_daemon_running(daemon_startup_timeout())?;
-                refresh_async_mode_trace2_target(&config);
-                return Ok(());
+                return ensure_daemon_running(daemon_startup_timeout()).map(|_| ());
             }
         } else {
             // Attempt soft shutdown; escalate to hard kill on timeout.
@@ -846,9 +718,7 @@ fn handle_restart(args: &[String]) -> Result<(), String> {
     }
 
     // Start a fresh daemon.
-    let config = ensure_daemon_running_attached(daemon_startup_timeout())?;
-    refresh_async_mode_trace2_target(&config);
-    Ok(())
+    ensure_daemon_running_attached(daemon_startup_timeout()).map(|_| ())
 }
 
 fn soft_shutdown_daemon(config: &DaemonConfig) -> Result<(), String> {
@@ -954,28 +824,6 @@ pub(crate) fn stop_daemon(config: &DaemonConfig, timeout: Duration) -> Result<()
     hard_kill_daemon(config)
 }
 
-pub(crate) fn request_restart_after_update(config: &DaemonConfig) -> Result<(), String> {
-    if local_socket_connects_with_timeout(&config.control_socket_path, Duration::from_millis(100))
-        .is_err()
-    {
-        return Err("background service is not running".to_string());
-    }
-
-    let response = send_control_request(
-        &config.control_socket_path,
-        &ControlRequest::RestartAfterUpdate,
-    )
-    .map_err(|e| e.to_string())?;
-
-    if response.ok {
-        Ok(())
-    } else {
-        Err(response
-            .error
-            .unwrap_or_else(|| "daemon rejected restart-after-update request".to_string()))
-    }
-}
-
 /// Shut down the running daemon and start a fresh one. Escalates to hard kill
 /// if the soft shutdown doesn't complete within GRACEFUL_SHUTDOWN_TIMEOUT.
 pub(crate) fn restart_daemon(config: &DaemonConfig) -> Result<(), String> {
@@ -986,9 +834,7 @@ pub(crate) fn restart_daemon(config: &DaemonConfig) -> Result<(), String> {
             error
         );
     }
-    let config = ensure_daemon_running(Duration::from_secs(5))?;
-    refresh_async_mode_trace2_target(&config);
-    Ok(())
+    ensure_daemon_running(Duration::from_secs(5)).map(|_| ())
 }
 
 fn parse_repo_arg(args: &[String]) -> Option<String> {
@@ -1028,79 +874,4 @@ fn print_help() {
     eprintln!("  git-ai bg shutdown [--hard]");
     eprintln!("  git-ai bg restart [--hard]");
     eprintln!("  git-ai bg tail [-n <lines>] [--full] [-f | --follow]");
-}
-
-#[cfg(all(test, windows))]
-mod tests {
-    use super::*;
-    use std::fs::OpenOptions;
-    use std::os::windows::fs::OpenOptionsExt;
-
-    #[test]
-    fn prepare_daemon_runtime_launcher_uses_unique_path_when_stable_launcher_is_locked() {
-        let temp = tempfile::tempdir().unwrap();
-        let source = temp.path().join("git-ai.exe");
-        std::fs::write(&source, b"source").unwrap();
-
-        let stable_launcher = daemon_runtime_launcher_path(temp.path());
-        std::fs::write(&stable_launcher, b"locked").unwrap();
-        let _locked = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .share_mode(0)
-            .open(&stable_launcher)
-            .unwrap();
-
-        let launcher = prepare_daemon_runtime_launcher(&source, temp.path()).unwrap();
-
-        assert_ne!(launcher, stable_launcher);
-        assert_eq!(std::fs::read(&launcher).unwrap(), b"source");
-        let name = launcher
-            .file_name()
-            .and_then(|value| value.to_str())
-            .unwrap();
-        assert!(name.starts_with(DAEMON_RUNTIME_EXE_PREFIX));
-        assert!(name.ends_with(".exe"));
-    }
-
-    #[test]
-    fn prepare_daemon_runtime_launcher_reuses_stable_path_and_prunes_unique_launchers() {
-        let temp = tempfile::tempdir().unwrap();
-        let source = temp.path().join("git-ai.exe");
-        std::fs::write(&source, b"source").unwrap();
-
-        let old_unique = temp.path().join(format!(
-            "{}-old-{}.exe",
-            DAEMON_RUNTIME_EXE_PREFIX,
-            std::process::id()
-        ));
-        std::fs::write(&old_unique, b"old").unwrap();
-
-        let launcher = prepare_daemon_runtime_launcher(&source, temp.path()).unwrap();
-
-        assert_eq!(launcher, daemon_runtime_launcher_path(temp.path()));
-        assert_eq!(std::fs::read(&launcher).unwrap(), b"source");
-        assert!(!old_unique.exists());
-    }
-
-    #[test]
-    fn prune_daemon_runtime_launchers_keeps_selected_unique_launcher() {
-        let temp = tempfile::tempdir().unwrap();
-        let keep = temp.path().join(format!(
-            "{}-keep-{}.exe",
-            DAEMON_RUNTIME_EXE_PREFIX,
-            std::process::id()
-        ));
-        let stale = temp.path().join(format!(
-            "{}-stale-{}.exe",
-            DAEMON_RUNTIME_EXE_PREFIX,
-            std::process::id()
-        ));
-        std::fs::write(&keep, b"keep").unwrap();
-        std::fs::write(&stale, b"stale").unwrap();
-
-        assert_eq!(prune_daemon_runtime_launchers(temp.path(), Some(&keep)), 1);
-        assert!(keep.exists());
-        assert!(!stale.exists());
-    }
 }

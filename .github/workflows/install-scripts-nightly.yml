@@ -31,8 +31,8 @@ jobs:
           chmod +x "$BIN_DIR/claude"
           echo "$BIN_DIR" >> "$GITHUB_PATH"
 
-      - name: Run install.sh from repository raw main
-        run: curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/install.sh | bash
+      - name: Run install.sh from usegitai.com
+        run: curl -fsSL https://usegitai.com/install.sh | bash
 
       - name: Verify shell configs and Claude hooks
         run: |
@@ -68,7 +68,7 @@ jobs:
           "@echo 2.0.0 (Claude Code)" | Out-File -FilePath $claudeCmd -Encoding ASCII -Force
           Add-Content -Path $env:GITHUB_PATH -Value $binDir
 
-      - name: Run install.ps1 from repository raw main
+      - name: Run install.ps1 from usegitai.com
         shell: pwsh
         env:
           HOME: ${{ env.TEST_HOME }}
@@ -77,7 +77,7 @@ jobs:
           HOMEPATH: ${{ env.TEST_HOME_PATH }}
         run: |
           Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process -Force
-          Invoke-WebRequest -UseBasicParsing https://raw.githubusercontent.com/${{ github.repository }}/main/install.ps1 | Invoke-Expression
+          Invoke-WebRequest -UseBasicParsing https://usegitai.com/install.ps1 | Invoke-Expression
 
       - name: Verify Claude hooks
         shell: pwsh

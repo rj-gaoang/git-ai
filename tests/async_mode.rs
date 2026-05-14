@@ -12,9 +12,7 @@ use repos::test_file::ExpectedLineExt;
 use repos::test_repo::{
     DaemonTestScope, GitTestMode, TestRepo, get_binary_path, real_git_executable,
 };
-use serial_test::serial;
 use serde_json::Value;
-use std::ffi::OsString;
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
@@ -38,22 +36,6 @@ fn read_global_git_config(repo: &TestRepo, key: &str) -> Option<String> {
     } else {
         None
     }
-}
-
-fn write_global_git_config(repo: &TestRepo, key: &str, value: &str) {
-    let mut command = Command::new(real_git_executable());
-    command.args(["config", "--global", key, value]);
-    command.current_dir(repo.path());
-    configure_test_home_env(&mut command, repo);
-    let output = command.output().expect("failed to write global git config");
-
-    assert!(
-        output.status.success(),
-        "writing global git config {} failed: stdout={} stderr={}",
-        key,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
 }
 
 fn daemon_trace_socket_path(repo: &TestRepo) -> PathBuf {
@@ -126,7 +108,6 @@ fn git_ai_with_daemon_env(repo: &TestRepo, args: &[&str]) -> Result<String, Stri
         ("GIT_AI_DAEMON_HOME", daemon_home.as_str()),
         ("GIT_AI_DAEMON_CONTROL_SOCKET", control_socket.as_str()),
         ("GIT_AI_DAEMON_TRACE_SOCKET", trace_socket.as_str()),
-        ("GIT_AI_ASYNC_MODE", "true"),
     ];
     repo.git_ai_with_env(args, &envs)
 }
@@ -191,83 +172,6 @@ fn daemon_command_output(repo: &TestRepo, args: &[&str], cwd: &Path) -> Output {
     command
         .output()
         .expect("failed to invoke git-ai daemon command")
-}
-
-fn daemon_command_output_with_home_only_and_env(
-    repo: &TestRepo,
-    args: &[&str],
-    cwd: &Path,
-    envs: &[(&str, &str)],
-) -> Output {
-    let mut command = Command::new(get_binary_path());
-    command.args(args).current_dir(cwd);
-    configure_test_home_env(&mut command, repo);
-    for (key, value) in envs {
-        command.env(key, value);
-    }
-    command
-        .output()
-        .expect("failed to invoke git-ai daemon command with HOME-only config")
-}
-
-struct ScopedEnvVar {
-    key: &'static str,
-    previous: Option<OsString>,
-}
-
-impl ScopedEnvVar {
-    fn set(key: &'static str, value: impl Into<OsString>) -> Self {
-        let previous = std::env::var_os(key);
-        unsafe {
-            std::env::set_var(key, value.into());
-        }
-        Self { key, previous }
-    }
-}
-
-impl Drop for ScopedEnvVar {
-    fn drop(&mut self) {
-        unsafe {
-            if let Some(previous) = self.previous.as_ref() {
-                std::env::set_var(self.key, previous);
-            } else {
-                std::env::remove_var(self.key);
-            }
-        }
-    }
-}
-
-fn with_test_home_env<T>(repo: &TestRepo, f: impl FnOnce() -> T) -> T {
-    let _home = ScopedEnvVar::set("HOME", repo.test_home_path().as_os_str().to_os_string());
-    let _git_config = ScopedEnvVar::set(
-        "GIT_CONFIG_GLOBAL",
-        repo.test_home_path().join(".gitconfig").into_os_string(),
-    );
-    let _xdg = ScopedEnvVar::set(
-        "XDG_CONFIG_HOME",
-        repo.test_home_path().join(".config").into_os_string(),
-    );
-    #[cfg(windows)]
-    let _userprofile =
-        ScopedEnvVar::set("USERPROFILE", repo.test_home_path().as_os_str().to_os_string());
-    #[cfg(windows)]
-    let _appdata = ScopedEnvVar::set(
-        "APPDATA",
-        repo.test_home_path()
-            .join("AppData")
-            .join("Roaming")
-            .into_os_string(),
-    );
-    #[cfg(windows)]
-    let _localappdata = ScopedEnvVar::set(
-        "LOCALAPPDATA",
-        repo.test_home_path()
-            .join("AppData")
-            .join("Local")
-            .into_os_string(),
-    );
-
-    f()
 }
 
 fn daemon_status_response(home_repo: &TestRepo, target_repo: &TestRepo) -> Value {
@@ -416,49 +320,6 @@ fn install_hooks_async_mode_trace2_target_routes_real_git_trace_to_daemon() {
 
     wait_for_daemon_latest_seq(&repo, 1);
     shutdown_daemon(&repo);
-}
-
-#[test]
-#[serial]
-fn daemon_restart_hard_refreshes_trace2_target_for_active_runtime() {
-    let repo =
-        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::NoDaemon);
-    write_daemon_config(&repo);
-
-    let default_target = DaemonConfig::trace2_event_target_for_path(&daemon_trace_socket_path(&repo));
-    write_global_git_config(&repo, "trace2.eventTarget", &default_target);
-    write_global_git_config(&repo, "trace2.eventNesting", "10");
-
-    let replacement = with_test_home_env(&repo, || {
-        DaemonConfig::activate_replacement_runtime("test hard restart trace2 refresh")
-            .expect("should activate replacement runtime")
-    });
-    let replacement_target = replacement.trace2_event_target();
-    assert_ne!(replacement_target, default_target);
-
-    let output = daemon_command_output_with_home_only_and_env(
-        &repo,
-        &["bg", "restart", "--hard"],
-        repo.path(),
-        &[("GIT_AI_ASYNC_MODE", "true")],
-    );
-    assert!(
-        output.status.success(),
-        "restart --hard should succeed: stdout={} stderr={}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let target = read_global_git_config(&repo, "trace2.eventTarget");
-    let nesting = read_global_git_config(&repo, "trace2.eventNesting");
-    assert_eq!(target.as_deref(), Some(replacement_target.as_str()));
-    assert_eq!(nesting.as_deref(), Some("10"));
-
-    let active_config = with_test_home_env(&repo, || {
-        DaemonConfig::from_default_paths().expect("should resolve active daemon runtime")
-    });
-    let shutdown = send_control_request(&active_config.control_socket_path, &ControlRequest::Shutdown);
-    assert!(shutdown.is_ok(), "shutdown should succeed for restarted daemon");
 }
 
 #[test]

@@ -3,7 +3,7 @@ use crate::authorship::ignore::{
 };
 use crate::authorship::stats::{CommitStats, stats_from_authorship_log, write_stats_to_terminal};
 use crate::authorship::virtual_attribution::VirtualAttributions;
-use crate::authorship::working_log::{CheckpointKind, checkpoint_is_ai_pre_tool_snapshot};
+use crate::authorship::working_log::CheckpointKind;
 use crate::error::GitAiError;
 use crate::git::find_repository;
 use crate::git::repo_storage::InitialAttributions;
@@ -95,18 +95,13 @@ fn run_status(json: bool) -> Result<(), GitAiError> {
             checkpoint.line_stats.deletions,
         );
 
-        let is_ai_pre_tool_snapshot = checkpoint_is_ai_pre_tool_snapshot(checkpoint);
-        let tool_model = if is_ai_pre_tool_snapshot {
-            "AI pre-edit snapshot".to_string()
-        } else {
-            checkpoint
-                .agent_id
-                .as_ref()
-                .map(|a| format!("{} {}", capitalize(&a.tool), &a.model))
-                .unwrap_or_else(|| default_user_name.clone())
-        };
+        let tool_model = checkpoint
+            .agent_id
+            .as_ref()
+            .map(|a| format!("{} {}", capitalize(&a.tool), &a.model))
+            .unwrap_or_else(|| default_user_name.clone());
 
-        let is_human = checkpoint.kind == CheckpointKind::Human && !is_ai_pre_tool_snapshot;
+        let is_human = checkpoint.kind == CheckpointKind::Human;
         checkpoint_infos.push(CheckpointInfo {
             time_ago: format_time_ago(checkpoint.timestamp),
             additions,

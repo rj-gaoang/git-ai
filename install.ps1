@@ -171,8 +171,8 @@ function Wait-ForFileAvailable {
         $effectiveRetryIntervalSeconds = 1
     }
 
+    [void](Stop-GitAiBackgroundService -GitAiExe $gitAiExe)
     if (-not $passiveAutoUpdate) {
-        [void](Stop-GitAiBackgroundService -GitAiExe $gitAiExe)
         [void](Stop-GitAiManagedProcesses -InstallDir $InstallDir)
     }
 

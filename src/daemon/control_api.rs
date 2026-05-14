@@ -53,26 +53,8 @@ pub enum ControlRequest {
         session_id: String,
         tool_use_id: String,
     },
-    #[serde(rename = "restart_after_update")]
-    RestartAfterUpdate,
     #[serde(rename = "shutdown")]
     Shutdown,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::ControlRequest;
-
-    #[test]
-    fn restart_after_update_request_round_trips() {
-        let raw = serde_json::to_string(&ControlRequest::RestartAfterUpdate)
-            .expect("serialize restart_after_update request");
-        assert_eq!(raw, r#"{"method":"restart_after_update"}"#);
-
-        let parsed: ControlRequest =
-            serde_json::from_str(&raw).expect("deserialize restart_after_update request");
-        assert!(matches!(parsed, ControlRequest::RestartAfterUpdate));
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

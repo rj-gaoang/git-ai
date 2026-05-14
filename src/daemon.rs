@@ -30,9 +30,7 @@ use crate::{
         restore_working_log_carryover, rewrite_authorship_after_commit_amend_with_snapshot,
         rewrite_authorship_if_needed,
     },
-    authorship::working_log::{
-        CHECKPOINT_ROLE_AI_PRE_TOOL_SNAPSHOT, CheckpointKind, checkpoint_metadata_has_role,
-    },
+    authorship::working_log::CheckpointKind,
     commands::checkpoint_agent::orchestrator::CheckpointRequest,
     commands::hooks::{push_hooks, stash_hooks},
     daemon::checkpoint::PreparedPathRole,
@@ -225,15 +223,7 @@ impl DaemonConfig {
             GitAiError::Generic("Unable to determine ~/.git-ai/internal path".to_string())
         })?;
         let default_config = Self::from_internal_dir(internal_dir.clone());
-        let active_config = Self::active_runtime_config(&internal_dir);
-        #[cfg(windows)]
-        Self::prune_stale_replacement_runtimes(
-            &internal_dir,
-            active_config
-                .as_ref()
-                .map(|config| config.internal_dir.as_path()),
-        );
-        if let Some(active_config) = active_config {
+        if let Some(active_config) = Self::active_runtime_config(&internal_dir) {
             return Ok(active_config);
         }
         Ok(default_config)
@@ -279,43 +269,6 @@ impl DaemonConfig {
         Some(Self::from_internal_dir(meta.internal_dir))
     }
 
-    #[cfg(windows)]
-    fn same_cleanup_path(left: &Path, right: &Path) -> bool {
-        let normalize = |path: &Path| {
-            fs::canonicalize(path)
-                .unwrap_or_else(|_| path.to_path_buf())
-                .to_string_lossy()
-                .trim_end_matches(['\\', '/'])
-                .to_lowercase()
-        };
-        normalize(left) == normalize(right)
-    }
-
-    #[cfg(windows)]
-    fn prune_stale_replacement_runtimes(
-        default_internal_dir: &Path,
-        keep_internal_dir: Option<&Path>,
-    ) -> usize {
-        let runtimes_dir = default_internal_dir.join("daemon-runtimes");
-        let Ok(entries) = fs::read_dir(&runtimes_dir) else {
-            return 0;
-        };
-        let mut removed = 0;
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if !entry.file_type().is_ok_and(|file_type| file_type.is_dir()) {
-                continue;
-            }
-            if keep_internal_dir.is_some_and(|keep| Self::same_cleanup_path(&path, keep)) {
-                continue;
-            }
-            if fs::remove_dir_all(&path).is_ok() {
-                removed += 1;
-            }
-        }
-        removed
-    }
-
     pub fn activate_replacement_runtime(reason: &str) -> Result<Self, GitAiError> {
         let default_internal_dir = config::internal_dir_path().ok_or_else(|| {
             GitAiError::Generic("Unable to determine ~/.git-ai/internal path".to_string())
@@ -337,11 +290,6 @@ impl DaemonConfig {
             fs::create_dir_all(parent)?;
         }
         fs::write(meta_path, serde_json::to_string_pretty(&meta)?)?;
-        #[cfg(windows)]
-        Self::prune_stale_replacement_runtimes(
-            &default_internal_dir,
-            Some(&replacement.internal_dir),
-        );
         Ok(replacement)
     }
 
@@ -4006,9 +3954,6 @@ pub struct ActorDaemonCoordinator {
     /// Files with an in-flight AI edit (PreFileEdit received, PostFileEdit not yet completed).
     /// Outer key: family. Inner key: absolute file path string. Value: registration timestamp (nanos).
     pending_ai_edits_by_family: Mutex<HashMap<String, HashMap<String, u128>>>,
-    /// Last AI-produced content per file, used to suppress save-only KnownHuman
-    /// checkpoints that merely persist the most recent AI output.
-    recent_ai_edit_contents_by_family: Mutex<HashMap<String, HashMap<String, RecentAiEditContent>>>,
     family_sequencers_by_family: Mutex<HashMap<String, FamilySequencerState>>,
     pending_root_slots_by_root: Mutex<HashMap<String, PendingRootSlot>>,
     recent_replay_prerequisites_by_family:
@@ -4047,12 +3992,6 @@ struct WrapperStateEntry {
     pre_repo: Option<RepoContext>,
     post_repo: Option<RepoContext>,
     received_at_ns: u128,
-}
-
-#[derive(Debug, Clone)]
-struct RecentAiEditContent {
-    content_hash: String,
-    observed_at_ns: u128,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -4108,7 +4047,6 @@ impl ActorDaemonCoordinator {
             pending_cherry_pick_sources_by_worktree: Mutex::new(HashMap::new()),
             inflight_effects_by_family: Mutex::new(HashMap::new()),
             pending_ai_edits_by_family: Mutex::new(HashMap::new()),
-            recent_ai_edit_contents_by_family: Mutex::new(HashMap::new()),
             family_sequencers_by_family: Mutex::new(HashMap::new()),
             pending_root_slots_by_root: Mutex::new(HashMap::new()),
             recent_replay_prerequisites_by_family: Mutex::new(HashMap::new()),
@@ -4193,26 +4131,6 @@ impl ActorDaemonCoordinator {
             Ordering::SeqCst,
         );
         self.request_shutdown();
-    }
-
-    fn has_pending_update_restart_blockers(&self) -> bool {
-        if self.queued_trace_payloads.load(Ordering::Acquire) > 0 {
-            return true;
-        }
-
-        let has_wrapper_state = self
-            .wrapper_states
-            .lock()
-            .map(|states| !states.is_empty())
-            .unwrap_or(true);
-        if has_wrapper_state {
-            return true;
-        }
-
-        self.inflight_effects_by_family
-            .lock()
-            .map(|effects| !effects.is_empty())
-            .unwrap_or(true)
     }
 
     fn shutdown_action(&self) -> DaemonExitAction {
@@ -4302,20 +4220,6 @@ impl ActorDaemonCoordinator {
                 map.retain(|_, family_map| !family_map.is_empty());
             }
         }
-        // Clean stale recent AI content entries to bound memory usage.
-        {
-            const RECENT_AI_EDIT_CONTENT_TTL_NS: u128 = 600_000_000_000; // 10 minutes
-            let gc_now_ns = now_unix_nanos();
-            if let Ok(mut map) = self.recent_ai_edit_contents_by_family.lock() {
-                for family_map in map.values_mut() {
-                    family_map.retain(|_, recent| {
-                        gc_now_ns.saturating_sub(recent.observed_at_ns)
-                            < RECENT_AI_EDIT_CONTENT_TTL_NS
-                    });
-                }
-                map.retain(|_, family_map| !family_map.is_empty());
-            }
-        }
         // Clean wrapper_states entries older than 60s — these represent wrapper
         // pre/post states that were never consumed by a matching trace2 event.
         let stale_threshold_ns = 60_000_000_000u128; // 60 seconds in nanoseconds
@@ -4329,28 +4233,6 @@ impl ActorDaemonCoordinator {
         std::fs::canonicalize(path)
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_else(|_| path.to_string())
-    }
-
-    fn checkpoint_request_is_ai_pre_tool_snapshot(request: &CheckpointRequest) -> bool {
-        request.checkpoint_kind == CheckpointKind::Human
-            && checkpoint_metadata_has_role(&request.metadata, CHECKPOINT_ROLE_AI_PRE_TOOL_SNAPSHOT)
-    }
-
-    fn should_register_pending_ai_edits(request: &CheckpointRequest) -> bool {
-        request.path_role == PreparedPathRole::WillEdit
-            && (request.agent_id.is_some()
-                || Self::checkpoint_request_is_ai_pre_tool_snapshot(request))
-    }
-
-    fn checkpoint_updates_human_worktree_watermark(request: &CheckpointRequest) -> bool {
-        request.checkpoint_kind == CheckpointKind::Human
-            && !Self::checkpoint_request_is_ai_pre_tool_snapshot(request)
-    }
-
-    fn content_sha256(content: &str) -> String {
-        let mut hasher = Sha256::new();
-        hasher.update(content.as_bytes());
-        format!("{:x}", hasher.finalize())
     }
 
     fn register_pending_ai_edits(&self, family: &str, file_paths: &[String]) {
@@ -4387,52 +4269,6 @@ impl ActorDaemonCoordinator {
                 now_ns.saturating_sub(*registered_at) < PENDING_AI_EDIT_TIMEOUT_NS
             });
         }
-        false
-    }
-
-    fn register_recent_ai_edit_contents(
-        &self,
-        family: &str,
-        files: &[crate::commands::checkpoint_agent::orchestrator::CheckpointFile],
-    ) {
-        let now_ns = now_unix_nanos();
-        if let Ok(mut map) = self.recent_ai_edit_contents_by_family.lock() {
-            let family_map = map.entry(family.to_string()).or_default();
-            for file in files {
-                let Some(content) = file.content.as_ref() else {
-                    continue;
-                };
-                family_map.insert(
-                    Self::canonicalize_path(&file.path.to_string_lossy()),
-                    RecentAiEditContent {
-                        content_hash: Self::content_sha256(content),
-                        observed_at_ns: now_ns,
-                    },
-                );
-            }
-        }
-    }
-
-    fn file_matches_recent_ai_edit_content(
-        &self,
-        family: &str,
-        file: &crate::commands::checkpoint_agent::orchestrator::CheckpointFile,
-    ) -> bool {
-        const RECENT_AI_EDIT_CONTENT_TTL_NS: u128 = 600_000_000_000; // 10 minutes
-        let Some(content) = file.content.as_ref() else {
-            return false;
-        };
-
-        let canonical = Self::canonicalize_path(&file.path.to_string_lossy());
-        let now_ns = now_unix_nanos();
-        if let Ok(map) = self.recent_ai_edit_contents_by_family.lock()
-            && let Some(family_map) = map.get(family)
-            && let Some(recent) = family_map.get(&canonical)
-        {
-            return now_ns.saturating_sub(recent.observed_at_ns) < RECENT_AI_EDIT_CONTENT_TTL_NS
-                && recent.content_hash == Self::content_sha256(content);
-        }
-
         false
     }
 
@@ -6101,16 +5937,13 @@ impl ActorDaemonCoordinator {
                     let checkpoint_path_role = request.path_role;
                     let checkpoint_has_agent = request.agent_id.is_some();
                     let checkpoint_kind_str = format!("{:?}", checkpoint_kind);
-                    let is_human_checkpoint =
-                        Self::checkpoint_updates_human_worktree_watermark(&request);
-                    let is_ai_pre_tool_snapshot =
-                        Self::checkpoint_request_is_ai_pre_tool_snapshot(&request);
+                    let is_human_checkpoint = checkpoint_kind == CheckpointKind::Human;
 
                     // Register pending AI edit state when an AI agent fires its
-                    // pre-edit snapshot. This includes metadata-marked pre-tool
-                    // snapshots so native edit and bash edit flows share the same
-                    // suppression path for spurious save events.
-                    if Self::should_register_pending_ai_edits(&request) {
+                    // pre-edit snapshot. This signals that an AI edit is in-flight.
+                    // Identified by: WillEdit path_role + agent_id present (only AI
+                    // agent presets have an agent_id on their pre-edit checkpoints).
+                    if checkpoint_path_role == PreparedPathRole::WillEdit && checkpoint_has_agent {
                         self.register_pending_ai_edits(family, &checkpoint_file_paths);
                     }
 
@@ -6122,29 +5955,14 @@ impl ActorDaemonCoordinator {
                             .filter(|f| self.file_has_pending_ai_edit(family, f))
                             .cloned()
                             .collect();
-                        let matching_recent_ai_files: Vec<String> = request
-                            .files
-                            .iter()
-                            .filter(|file| self.file_matches_recent_ai_edit_content(family, file))
-                            .map(|file| file.path.to_string_lossy().to_string())
-                            .collect();
-                        let suppressed_files: HashSet<String> = pending_files
-                            .iter()
-                            .chain(matching_recent_ai_files.iter())
-                            .cloned()
-                            .collect();
-                        if !suppressed_files.is_empty() {
+                        if !pending_files.is_empty() {
                             request.files.retain(|f| {
                                 let path_str = f.path.to_string_lossy().to_string();
-                                !suppressed_files.contains(&path_str)
+                                !pending_files.contains(&path_str)
                             });
                             tracing::debug!(
-                                pending_file_count = pending_files.len(),
-                                recent_ai_content_match_count = matching_recent_ai_files.len(),
-                                checkpoint_has_agent,
-                                checkpoint_path_role = ?checkpoint_path_role,
-                                is_ai_pre_tool_snapshot,
-                                "[KnownHuman] Filtered files overlapping an in-flight AI edit or matching recent AI output"
+                                "[KnownHuman] Filtered {} file(s) with pending AI edits",
+                                pending_files.len()
                             );
                             if request.files.is_empty() {
                                 let log_entry = TestCompletionLogEntry {
@@ -6175,7 +5993,6 @@ impl ActorDaemonCoordinator {
                         .iter()
                         .map(|f| f.path.to_string_lossy().to_string())
                         .collect();
-                    let checkpoint_files = request.files.clone();
 
                     let should_log_completion = true; // Always log for test sync
                     tracing::info!(kind = %checkpoint_kind_str, repo = %repo_wd, "checkpoint start");
@@ -6245,7 +6062,6 @@ impl ActorDaemonCoordinator {
                         if checkpoint_kind.is_ai()
                             && checkpoint_path_role == PreparedPathRole::Edited
                         {
-                            self.register_recent_ai_edit_contents(family, &checkpoint_files);
                             self.clear_pending_ai_edits(family, &checkpoint_file_paths);
                         }
                         let per_file = if !checkpoint_file_paths.is_empty() {
@@ -7872,7 +7688,6 @@ impl ActorDaemonCoordinator {
                 };
                 Ok(response)
             }
-            ControlRequest::RestartAfterUpdate => Ok(ControlResponse::ok(None, None)),
             ControlRequest::Shutdown => Ok(ControlResponse::ok(None, None)),
         };
 
@@ -8222,16 +8037,10 @@ fn handle_control_connection_actor_reader<R: Read + Write>(
             continue;
         }
         let parsed = serde_json::from_str::<ControlRequest>(trimmed);
-        let mut shutdown_after_response = None;
+        let mut shutdown_after_response = false;
         let response = match parsed {
             Ok(req) => {
-                shutdown_after_response = match &req {
-                    ControlRequest::Shutdown => Some(DaemonExitAction::Stop),
-                    ControlRequest::RestartAfterUpdate => {
-                        Some(DaemonExitAction::RestartAfterUpdate)
-                    }
-                    _ => None,
-                };
+                shutdown_after_response = matches!(req, ControlRequest::Shutdown);
                 runtime_handle.block_on(async { coordinator.handle_control_request(req).await })
             }
             Err(e) => ControlResponse::err(format!("invalid control request: {}", e)),
@@ -8240,14 +8049,8 @@ fn handle_control_connection_actor_reader<R: Read + Write>(
         reader.get_mut().write_all(raw.as_bytes())?;
         reader.get_mut().write_all(b"\n")?;
         reader.get_mut().flush()?;
-        if let Some(action) = shutdown_after_response {
-            match action {
-                DaemonExitAction::Stop => coordinator.request_stop(),
-                DaemonExitAction::RestartAfterUpdate => {
-                    coordinator.request_restart_after_update();
-                }
-                DaemonExitAction::Restart => coordinator.request_restart(),
-            }
+        if shutdown_after_response {
+            coordinator.request_stop();
         }
     }
     Ok(())
@@ -8491,10 +8294,6 @@ fn disable_trace2_for_daemon_process() {
 /// How often the daemon wakes up to evaluate whether an update check is due.
 const DAEMON_UPDATE_CHECK_INTERVAL_SECS: u64 = 3600;
 
-/// How long to wait before re-checking whether the daemon is idle enough to
-/// restart into the self-update flow after an update has already been found.
-const DAEMON_UPDATE_BUSY_RETRY_INTERVAL_SECS: u64 = 15;
-
 /// Maximum daemon uptime before a proactive restart (24.5 hours).
 /// Deliberately offset from the 24h update-check cadence so the uptime restart
 /// never races with an update-triggered shutdown.
@@ -8506,13 +8305,6 @@ fn daemon_update_check_interval() -> u64 {
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(DAEMON_UPDATE_CHECK_INTERVAL_SECS)
-}
-
-fn daemon_update_busy_retry_interval() -> u64 {
-    std::env::var("GIT_AI_DAEMON_UPDATE_BUSY_RETRY_INTERVAL")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(DAEMON_UPDATE_BUSY_RETRY_INTERVAL_SECS)
 }
 
 /// Returns the maximum uptime in nanoseconds, respecting an env var override for testing.
@@ -8660,9 +8452,6 @@ fn daemon_update_check_loop(coordinator: Arc<ActorDaemonCoordinator>, started_at
     use crate::commands::upgrade::{DaemonUpdateCheckResult, check_for_update_available};
 
     let interval = daemon_update_check_interval().max(1);
-    let busy_retry_interval = daemon_update_busy_retry_interval().max(1);
-    let mut sleep_secs = interval;
-    let mut pending_update_ready = false;
 
     loop {
         {
@@ -8675,7 +8464,7 @@ fn daemon_update_check_loop(coordinator: Arc<ActorDaemonCoordinator>, started_at
             }
             let _ = coordinator
                 .shutdown_condvar
-                .wait_timeout(guard, std::time::Duration::from_secs(sleep_secs));
+                .wait_timeout(guard, std::time::Duration::from_secs(interval));
         }
 
         if coordinator.is_shutting_down() {
@@ -8684,36 +8473,16 @@ fn daemon_update_check_loop(coordinator: Arc<ActorDaemonCoordinator>, started_at
 
         coordinator.gc_stale_family_state();
 
-        let update_result = if pending_update_ready {
-            Ok(DaemonUpdateCheckResult::UpdateReady)
-        } else {
-            check_for_update_available()
-        };
-
-        match update_result {
+        match check_for_update_available() {
             Ok(DaemonUpdateCheckResult::UpdateReady) => {
-                pending_update_ready = true;
-                if coordinator.has_pending_update_restart_blockers() {
-                    tracing::info!(
-                        queued_trace_payloads =
-                            coordinator.queued_trace_payloads.load(Ordering::Acquire),
-                        busy_retry_secs = busy_retry_interval,
-                        "update check: newer version available but daemon is busy, retrying soon"
-                    );
-                    sleep_secs = busy_retry_interval;
-                    continue;
-                }
                 tracing::info!("update check: newer version available, requesting shutdown");
                 coordinator.request_restart_after_update();
                 return;
             }
             Ok(DaemonUpdateCheckResult::NoUpdate) => {
-                pending_update_ready = false;
-                sleep_secs = interval;
                 tracing::info!("update check: no update needed");
             }
             Err(err) => {
-                sleep_secs = interval;
                 tracing::warn!(%err, "update check failed");
             }
         }
@@ -9298,24 +9067,6 @@ mod tests {
         }
     }
 
-    #[cfg(windows)]
-    #[test]
-    fn prune_stale_replacement_runtimes_keeps_active_runtime() {
-        let temp = tempfile::tempdir().unwrap();
-        let internal_dir = temp.path().join(".git-ai").join("internal");
-        let runtimes_dir = internal_dir.join("daemon-runtimes");
-        let active = runtimes_dir.join("active");
-        let stale = runtimes_dir.join("stale");
-        fs::create_dir_all(active.join("daemon")).unwrap();
-        fs::create_dir_all(stale.join("daemon")).unwrap();
-
-        let removed = DaemonConfig::prune_stale_replacement_runtimes(&internal_dir, Some(&active));
-
-        assert_eq!(removed, 1);
-        assert!(active.exists());
-        assert!(!stale.exists());
-    }
-
     #[test]
     fn checkpoint_requests_use_long_timeout_in_ci_or_test_env() {
         assert_eq!(
@@ -9442,77 +9193,6 @@ mod tests {
     }
 
     #[test]
-    fn ai_pre_tool_snapshot_requests_do_not_update_human_worktree_watermarks() {
-        use crate::authorship::working_log::{
-            CHECKPOINT_ROLE_AI_PRE_TOOL_SNAPSHOT, CHECKPOINT_ROLE_METADATA_KEY,
-        };
-
-        let mut control_request = sample_checkpoint_request();
-        let ControlRequest::CheckpointRun { request } = &mut control_request else {
-            panic!("expected checkpoint request");
-        };
-        request.metadata.insert(
-            CHECKPOINT_ROLE_METADATA_KEY.to_string(),
-            CHECKPOINT_ROLE_AI_PRE_TOOL_SNAPSHOT.to_string(),
-        );
-
-        assert!(!ActorDaemonCoordinator::checkpoint_updates_human_worktree_watermark(request,));
-        assert!(ActorDaemonCoordinator::should_register_pending_ai_edits(
-            request
-        ));
-    }
-
-    #[test]
-    fn recent_ai_edit_content_matches_only_identical_known_human_save() {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-
-        runtime.block_on(async {
-            let coordinator = ActorDaemonCoordinator::new();
-            let temp_dir = tempfile::tempdir().unwrap();
-            let file_path = temp_dir.path().join("example.txt");
-            std::fs::write(&file_path, "AI content\n").unwrap();
-
-            coordinator.register_recent_ai_edit_contents(
-                "family",
-                &[
-                    crate::commands::checkpoint_agent::orchestrator::CheckpointFile {
-                        path: file_path.clone(),
-                        content: Some("AI content\n".to_string()),
-                        repo_work_dir: temp_dir.path().to_path_buf(),
-                        base_commit:
-                            crate::commands::checkpoint_agent::orchestrator::BaseCommit::Initial,
-                    },
-                ],
-            );
-
-            let same_content_file =
-                crate::commands::checkpoint_agent::orchestrator::CheckpointFile {
-                    path: file_path.clone(),
-                    content: Some("AI content\n".to_string()),
-                    repo_work_dir: temp_dir.path().to_path_buf(),
-                    base_commit:
-                        crate::commands::checkpoint_agent::orchestrator::BaseCommit::Initial,
-                };
-            let changed_content_file =
-                crate::commands::checkpoint_agent::orchestrator::CheckpointFile {
-                    path: file_path,
-                    content: Some("Human content\n".to_string()),
-                    repo_work_dir: temp_dir.path().to_path_buf(),
-                    base_commit:
-                        crate::commands::checkpoint_agent::orchestrator::BaseCommit::Initial,
-                };
-
-            assert!(coordinator.file_matches_recent_ai_edit_content("family", &same_content_file));
-            assert!(
-                !coordinator.file_matches_recent_ai_edit_content("family", &changed_content_file,)
-            );
-        });
-    }
-
-    #[test]
     fn explicit_stop_overrides_prior_restart_intent() {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -9532,59 +9212,6 @@ mod tests {
 
             assert!(coordinator.is_shutting_down());
             assert_eq!(coordinator.shutdown_action(), DaemonExitAction::Stop);
-        });
-    }
-
-    #[test]
-    fn pending_update_restart_blockers_are_false_when_idle() {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-
-        runtime.block_on(async {
-            let coordinator = ActorDaemonCoordinator::new();
-
-            assert!(!coordinator.has_pending_update_restart_blockers());
-        });
-    }
-
-    #[test]
-    fn pending_update_restart_blockers_detect_wrapper_trace_and_effect_work() {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-
-        runtime.block_on(async {
-            let coordinator = ActorDaemonCoordinator::new();
-
-            coordinator.store_wrapper_state(
-                "invocation-1",
-                Some(crate::daemon::domain::RepoContext {
-                    head: Some("abc123".to_string()),
-                    branch: Some("main".to_string()),
-                    detached: false,
-                }),
-                None,
-            );
-            assert!(coordinator.has_pending_update_restart_blockers());
-
-            coordinator.wrapper_states.lock().unwrap().clear();
-            assert!(!coordinator.has_pending_update_restart_blockers());
-
-            coordinator
-                .queued_trace_payloads
-                .fetch_add(1, Ordering::Relaxed);
-            assert!(coordinator.has_pending_update_restart_blockers());
-
-            coordinator
-                .queued_trace_payloads
-                .store(0, Ordering::Relaxed);
-            assert!(!coordinator.has_pending_update_restart_blockers());
-
-            coordinator.begin_family_effect("family-1").unwrap();
-            assert!(coordinator.has_pending_update_restart_blockers());
         });
     }
 

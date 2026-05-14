@@ -7,10 +7,8 @@ use crate::authorship::authorship_log_serialization::generate_short_hash;
 use crate::authorship::imara_diff_utils::{
     LineChangeTag, compute_line_changes, normalize_line_endings,
 };
-use crate::authorship::working_log::{
-    Checkpoint, CheckpointKind, WorkingLogEntry, CHECKPOINT_ROLE_AI_PRE_TOOL_SNAPSHOT,
-    checkpoint_metadata_has_role,
-};
+use crate::authorship::working_log::CheckpointKind;
+use crate::authorship::working_log::{Checkpoint, WorkingLogEntry};
 use crate::commands::checkpoint_agent::orchestrator::CheckpointRequest;
 use crate::error::GitAiError;
 use crate::git::repo_storage::PersistedWorkingLog;
@@ -306,13 +304,6 @@ fn execute_resolved_checkpoint(
             } else {
                 Some(checkpoint_request.metadata.clone())
             };
-        } else if kind == CheckpointKind::Human
-            && checkpoint_metadata_has_role(
-                &checkpoint_request.metadata,
-                CHECKPOINT_ROLE_AI_PRE_TOOL_SNAPSHOT,
-            )
-        {
-            checkpoint.agent_metadata = Some(checkpoint_request.metadata.clone());
         } else if kind == CheckpointKind::KnownHuman && !checkpoint_request.metadata.is_empty() {
             let editor = checkpoint_request
                 .metadata
