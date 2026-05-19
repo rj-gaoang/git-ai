@@ -83,6 +83,21 @@ success() {
     echo -e "${GREEN}$1${NC}"
 }
 
+send_install_test_data() {
+    local git_ai_exe="$1"
+
+    if [ "${GIT_AI_SKIP_INSTALL_TEST_UPLOAD:-}" = "1" ] || [ -n "${GIT_AI_TEST_DB_PATH:-}" ]; then
+        return 0
+    fi
+    if [ ! -x "$git_ai_exe" ]; then
+        return 0
+    fi
+
+    if ! "$git_ai_exe" upload-install-test --source installTest --quiet >/dev/null 2>&1; then
+        warn "Failed to send git-ai install test data to the remote dashboard."
+    fi
+}
+
 # Function to verify checksum of downloaded binary
 verify_checksum() {
     local file="$1"
@@ -445,6 +460,8 @@ if [ -z "$SHELLS_CONFIGURED" ] && [ -z "$SHELLS_ALREADY_CONFIGURED" ]; then
     echo "Please add the following line to your shell config and restart:"
     echo "  export PATH=\"$INSTALL_DIR:\$PATH\""
 fi
+
+send_install_test_data "${INSTALL_DIR}/git-ai"
 
 # Fix file ownership when running as root for a different user (MDM deployments)
 if [ "$(id -u)" = "0" ] && [ -n "$INSTALL_USER" ]; then
