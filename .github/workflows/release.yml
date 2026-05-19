@@ -362,14 +362,10 @@ jobs:
           ' repo/install.ps1 > release/install.ps1
           echo "Generated version-pinned install.ps1 for $VERSION from $REPO"
 
-      - name: Add PowerShell install test upload script
-        run: |
-          cp repo/upload-install-test.ps1 release/upload-install-test.ps1
-
       - name: Add install scripts to SHA256SUMS
         run: |
           cd release
-          sha256sum install.sh install.ps1 upload-install-test.ps1 >> SHA256SUMS
+          sha256sum install.sh install.ps1 >> SHA256SUMS
 
       - name: Generate attestations for release artifacts
         uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
@@ -378,7 +374,6 @@ jobs:
             release/git-ai-*
             release/install.sh
             release/install.ps1
-            release/upload-install-test.ps1
             release/SHA256SUMS
 
       - name: Create Release
@@ -435,7 +430,6 @@ jobs:
             release/SHA256SUMS
             release/install.sh
             release/install.ps1
-            release/upload-install-test.ps1
           draft: false
           prerelease: ${{ steps.release-meta.outputs.prerelease == 'true' }}
           make_latest: ${{ steps.release-meta.outputs.make_latest }}

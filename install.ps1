@@ -613,88 +613,6 @@ function Try-DownloadFromGitHubApiAsset {
     return $null
 }
 
-function Get-InstallTestUploadScriptUrl {
-    if (-not [string]::IsNullOrWhiteSpace($env:GIT_AI_INSTALL_TEST_SCRIPT_URL)) {
-        return $env:GIT_AI_INSTALL_TEST_SCRIPT_URL.Trim()
-    }
-
-    if (-not [string]::IsNullOrWhiteSpace($env:GIT_AI_INSTALLER_URL)) {
-        $installerUrl = $env:GIT_AI_INSTALLER_URL.Trim()
-        if ($installerUrl -match 'install\.ps1(\?.*)?$') {
-            return ($installerUrl -replace 'install\.ps1(\?.*)?$', 'upload-install-test.ps1')
-        }
-    }
-
-    if ($releaseTag -eq 'local') {
-        return $null
-    }
-
-    if ($releaseTag -eq 'latest') {
-        return "https://github.com/$Repo/releases/latest/download/upload-install-test.ps1"
-    }
-
-    return "https://github.com/$Repo/releases/download/$releaseTag/upload-install-test.ps1"
-}
-
-function Invoke-InstallTestUpload {
-    param(
-        [Parameter(Mandatory = $true)][string]$GitAiExe,
-        [Parameter(Mandatory = $false)][string]$GitPath
-    )
-
-    if ($env:GIT_AI_SKIP_INSTALL_TEST_UPLOAD -eq '1' -or -not [string]::IsNullOrWhiteSpace($env:GIT_AI_TEST_DB_PATH)) {
-        return
-    }
-    if (-not (Test-Path -LiteralPath $GitAiExe)) {
-        return
-    }
-
-    $scriptPath = $null
-    if (-not [string]::IsNullOrWhiteSpace($env:GIT_AI_INSTALL_TEST_SCRIPT_PATH) -and (Test-Path -LiteralPath $env:GIT_AI_INSTALL_TEST_SCRIPT_PATH)) {
-        $scriptPath = (Resolve-Path -LiteralPath $env:GIT_AI_INSTALL_TEST_SCRIPT_PATH).Path
-    } else {
-        $scriptRootValue = Get-Variable -Name PSScriptRoot -ValueOnly -ErrorAction SilentlyContinue
-        if (-not [string]::IsNullOrWhiteSpace($scriptRootValue)) {
-            $localScript = Join-Path $scriptRootValue 'upload-install-test.ps1'
-            if (Test-Path -LiteralPath $localScript) {
-                $scriptPath = $localScript
-            }
-        }
-    }
-
-    $downloadedScript = $null
-    try {
-        if (-not $scriptPath) {
-            $scriptUrl = Get-InstallTestUploadScriptUrl
-            if ([string]::IsNullOrWhiteSpace($scriptUrl)) {
-                return
-            }
-
-            $downloadedScript = Join-Path ([System.IO.Path]::GetTempPath()) ("git-ai-upload-install-test.$PID.ps1")
-            $oldProgressPreference = $ProgressPreference
-            $ProgressPreference = 'SilentlyContinue'
-            try {
-                Invoke-WebRequest -Uri $scriptUrl -OutFile $downloadedScript -UseBasicParsing -ErrorAction Stop
-            } finally {
-                $ProgressPreference = $oldProgressPreference
-            }
-            $scriptPath = $downloadedScript
-        }
-
-        $scriptArgs = @('-GitAiExe', $GitAiExe, '-Source', 'installTest', '-Quiet')
-        if (-not [string]::IsNullOrWhiteSpace($GitPath)) {
-            $scriptArgs += @('-GitPath', $GitPath)
-        }
-        & $scriptPath @scriptArgs
-    } catch {
-        Write-Warning 'Warning: Failed to send git-ai install test data to the remote dashboard.'
-    } finally {
-        if ($downloadedScript) {
-            Remove-Item -Force -ErrorAction SilentlyContinue $downloadedScript
-        }
-    }
-}
-
 # Track which download URL succeeded for checksum verification
 $downloadedBinaryName = $null
 if (-not [string]::IsNullOrWhiteSpace($env:GIT_AI_LOCAL_BINARY)) {
@@ -924,8 +842,6 @@ if ($uploadActivityLock) {
     $uploadActivityLock.Dispose()
     $uploadActivityLock = $null
 }
-
-Invoke-InstallTestUpload -GitAiExe $finalExe -GitPath $stdGitPath
 
 Write-Host 'Close and reopen your terminal and IDE sessions to use git-ai.' -ForegroundColor Yellow
 
