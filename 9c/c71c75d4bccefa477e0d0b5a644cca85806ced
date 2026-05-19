@@ -1,0 +1,69 @@
+upload-install-test.ps1
+  s_61f80d25b5397b::t_e846740901b007 160-161
+  s_61f80d25b5397b::t_4cc59c0faf53f2 158-159,162-372,413-414,493,522-523,527,571-573
+---
+{
+  "schema_version": "authorship/3.1.0",
+  "git_ai_version": "2.2.21",
+  "x_user_id": "108",
+  "base_commit_sha": "9cc71c75d4bccefa477e0d0b5a644cca85806ced",
+  "prompts": {
+    "s_61f80d25b5397b::t_4cc59c0faf53f2": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "1d2b3762-d077-4641-bcee-fc53a3ebb897",
+        "model": "copilot/gpt-5.5"
+      },
+      "human_author": "gaoang <gaoang@ruijie.com.cn>",
+      "messages": [],
+      "total_additions": 226,
+      "total_deletions": 8,
+      "accepted_lines": 594,
+      "overriden_lines": 0
+    },
+    "s_61f80d25b5397b::t_e846740901b007": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "1d2b3762-d077-4641-bcee-fc53a3ebb897",
+        "model": "copilot/gpt-5.5"
+      },
+      "human_author": "gaoang <gaoang@ruijie.com.cn>",
+      "messages": [
+        {
+          "type": "user",
+          "text": "git-ai 新增一个ps脚本，安装成功后往远程看板发送一条测试数据证明安装成功，发送的数据中需要包括git-ai 的版本信息",
+          "timestamp": "2026-05-19T05:59:49.547Z"
+        },
+        {
+          "type": "user",
+          "text": "安装了2.2.21，但是安装完成后没有往远程看板推送一条确认安装成功的数据",
+          "timestamp": "2026-05-19T09:32:32.291Z"
+        },
+        {
+          "type": "user",
+          "text": "$commitItem = [ordered]@{\r\n        commitSha = $CommitSha\r\n        commitMessage = ('git-ai install success test ({0})' -f $Version)\r\n        author = 'git-ai installer'\r\n        timestamp = $nowText\r\n        hasAuthorshipNote = $false\r\n        stats = $stats\r\n        prompts = [object[]]@($prompt)\r\n    }，author = 'git-ai installer'，author 不要写死，从MCP中获取用户信息",
+          "timestamp": "2026-05-19T10:08:19.775Z"
+        }
+      ],
+      "total_additions": 226,
+      "total_deletions": 8,
+      "accepted_lines": 2,
+      "overriden_lines": 0
+    }
+  },
+  "humans": {
+    "h_413aef030e07df": {
+      "author": "gaoang <gaoang@ruijie.com.cn>"
+    }
+  },
+  "sessions": {
+    "s_61f80d25b5397b": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "1d2b3762-d077-4641-bcee-fc53a3ebb897",
+        "model": "copilot/gpt-5.5"
+      },
+      "human_author": "gaoang <gaoang@ruijie.com.cn>"
+    }
+  }
+}
