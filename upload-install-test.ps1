@@ -155,221 +155,6 @@ function Resolve-UploadUrl {
     return $DefaultUploadUrl
 }
 
-function Add-UniqueCandidatePath {
-    param(
-        [Parameter(Mandatory = $false)][System.Collections.ArrayList]$Paths,
-        [Parameter(Mandatory = $false)][hashtable]$Seen,
-        [Parameter(Mandatory = $false)][string]$Path
-    )
-
-    if ([string]::IsNullOrWhiteSpace($Path)) {
-        return
-    }
-
-    $trimmedPath = $Path.Trim()
-    try {
-        $normalizedPath = [System.IO.Path]::GetFullPath($trimmedPath)
-    } catch {
-        $normalizedPath = $trimmedPath
-    }
-
-    $pathKey = $normalizedPath.TrimEnd('\').ToLowerInvariant()
-    if (-not $Seen.ContainsKey($pathKey)) {
-        [void]$Paths.Add($normalizedPath)
-        $Seen[$pathKey] = $true
-    }
-}
-
-function Get-ExactPropertyValue {
-    param(
-        [Parameter(Mandatory = $false)][AllowNull()]$Object,
-        [Parameter(Mandatory = $true)][string]$Name
-    )
-
-    if ($null -eq $Object) {
-        return $null
-    }
-
-    if ($Object -is [System.Collections.IDictionary]) {
-        return $Object[$Name]
-    }
-
-    $property = $Object.PSObject.Properties[$Name]
-    if ($null -eq $property) {
-        return $null
-    }
-
-    return $property.Value
-}
-
-function Get-NestedPropertyValue {
-    param(
-        [Parameter(Mandatory = $false)][AllowNull()]$Object,
-        [Parameter(Mandatory = $true)][string[]]$PropertyNames
-    )
-
-    $current = $Object
-    foreach ($propertyName in $PropertyNames) {
-        $current = Get-ExactPropertyValue -Object $current -Name $propertyName
-        if ($null -eq $current) {
-            return $null
-        }
-    }
-
-    return $current
-}
-
-function Convert-ToNonEmptyString {
-    param([Parameter(Mandatory = $false)][AllowNull()]$Value)
-
-    if ($null -eq $Value) {
-        return $null
-    }
-
-    if ($Value -is [string]) {
-        $trimmed = $Value.Trim()
-        if ($trimmed.Length -eq 0) {
-            return $null
-        }
-        return $trimmed
-    }
-
-    if ($Value -is [ValueType]) {
-        return ([string]$Value)
-    }
-
-    return $null
-}
-
-function Get-McpServerUserId {
-    param([Parameter(Mandatory = $false)][AllowNull()]$Server)
-
-    $requestInitHeaderUserId = Convert-ToNonEmptyString (Get-NestedPropertyValue -Object $Server -PropertyNames @('requestInit', 'headers', 'X-USER-ID'))
-    if ($requestInitHeaderUserId) {
-        return $requestInitHeaderUserId
-    }
-
-    return Convert-ToNonEmptyString (Get-NestedPropertyValue -Object $Server -PropertyNames @('headers', 'X-USER-ID'))
-}
-
-function Get-McpServerScore {
-    param(
-        [Parameter(Mandatory = $true)][string]$ServerName,
-        [Parameter(Mandatory = $false)][AllowNull()]$Server
-    )
-
-    $score = 0
-    if ($ServerName -in @('codereview-mcp', 'codereview-mcp-server')) {
-        $score += 100
-    }
-
-    $url = Convert-ToNonEmptyString (Get-ExactPropertyValue -Object $Server -Name 'url')
-    if ($url) {
-        if ($url.Contains('mcppage.ruijie.com.cn:9810/mcp')) {
-            $score += 50
-        }
-        if ($url.Contains('localhost:9810/mcp')) {
-            $score += 25
-        }
-    }
-
-    if (Get-McpServerUserId -Server $Server) {
-        $score += 10
-    }
-
-    return $score
-}
-
-function Read-McpUserIdFromFile {
-    param([Parameter(Mandatory = $true)][string]$Path)
-
-    if (-not (Test-Path -LiteralPath $Path)) {
-        return $null
-    }
-
-    try {
-        $raw = [System.IO.File]::ReadAllText($Path)
-    } catch {
-        return $null
-    }
-
-    try {
-        $root = $raw.TrimStart([char]0xFEFF) | ConvertFrom-Json
-    } catch {
-        return $null
-    }
-
-    $servers = Get-ExactPropertyValue -Object $root -Name 'servers'
-    if ($null -eq $servers) {
-        return $null
-    }
-
-    $candidates = @()
-    foreach ($serverProperty in $servers.PSObject.Properties) {
-        $candidates += [pscustomobject]@{
-            Name = $serverProperty.Name
-            Server = $serverProperty.Value
-            Score = Get-McpServerScore -ServerName $serverProperty.Name -Server $serverProperty.Value
-        }
-    }
-
-    foreach ($candidate in ($candidates | Sort-Object @{ Expression = 'Score'; Descending = $true }, @{ Expression = 'Name'; Descending = $false })) {
-        $userId = Get-McpServerUserId -Server $candidate.Server
-        if ($userId) {
-            return $userId
-        }
-    }
-
-    return $null
-}
-
-function Get-McpCandidatePaths {
-    $paths = New-Object System.Collections.ArrayList
-    $seen = @{}
-
-    Add-UniqueCandidatePath -Paths $paths -Seen $seen -Path $env:GIT_AI_VSCODE_MCP_CONFIG_PATH
-    Add-UniqueCandidatePath -Paths $paths -Seen $seen -Path $env:GIT_AI_IDEA_MCP_CONFIG_PATH
-
-    try {
-        $currentLocation = (Get-Location).Path
-    } catch {
-        $currentLocation = $null
-    }
-    if (-not [string]::IsNullOrWhiteSpace($currentLocation)) {
-        Add-UniqueCandidatePath -Paths $paths -Seen $seen -Path (Join-Path $currentLocation '.vscode\mcp.json')
-    }
-
-    if (-not [string]::IsNullOrWhiteSpace($env:APPDATA)) {
-        Add-UniqueCandidatePath -Paths $paths -Seen $seen -Path (Join-Path $env:APPDATA 'Code\User\mcp.json')
-        Add-UniqueCandidatePath -Paths $paths -Seen $seen -Path (Join-Path $env:APPDATA 'Code - Insiders\User\mcp.json')
-        Add-UniqueCandidatePath -Paths $paths -Seen $seen -Path (Join-Path $env:APPDATA 'github-copilot\intellij\mcp.json')
-    }
-
-    if (-not [string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
-        Add-UniqueCandidatePath -Paths $paths -Seen $seen -Path (Join-Path $env:LOCALAPPDATA 'github-copilot\intellij\mcp.json')
-    }
-
-    return [string[]]$paths
-}
-
-function Resolve-RemoteUserId {
-    param([Parameter(Mandatory = $false)][string]$ExplicitUserId)
-
-    $resolvedUserId = Get-FirstNonEmptyValue -Values @($ExplicitUserId, $env:GIT_AI_REPORT_REMOTE_USER_ID)
-    if ($resolvedUserId) {
-        return $resolvedUserId
-    }
-
-    foreach ($candidatePath in (Get-McpCandidatePaths)) {
-        $resolvedUserId = Read-McpUserIdFromFile -Path $candidatePath
-        if ($resolvedUserId) {
-            return $resolvedUserId
-        }
-    }
-
-    return $null
-}
-
 function Normalize-IdeName {
     param([Parameter(Mandatory = $false)][string]$Name)
 
@@ -410,8 +195,7 @@ function New-InstallTestPayload {
     param(
         [Parameter(Mandatory = $true)][string]$Version,
         [Parameter(Mandatory = $false)][string]$GitVersion,
-        [Parameter(Mandatory = $true)][string]$CommitSha,
-        [Parameter(Mandatory = $false)][string]$ResolvedAuthor
+        [Parameter(Mandatory = $true)][string]$CommitSha
     )
 
     $nowText = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
@@ -490,7 +274,7 @@ function New-InstallTestPayload {
     $commitItem = [ordered]@{
         commitSha = $CommitSha
         commitMessage = ('git-ai install success test ({0})' -f $Version)
-        author = (Get-FirstNonEmptyValue -Values @($ResolvedAuthor, 'git-ai installer'))
+        author = 'git-ai installer'
         timestamp = $nowText
         hasAuthorshipNote = $false
         stats = $stats
@@ -519,12 +303,11 @@ function Send-InstallTestPayload {
     param(
         [Parameter(Mandatory = $true)][string]$Url,
         [Parameter(Mandatory = $true)][object]$Payload,
-        [Parameter(Mandatory = $true)][string]$Version,
-        [Parameter(Mandatory = $false)][string]$ResolvedUserId
+        [Parameter(Mandatory = $true)][string]$Version
     )
 
     $resolvedApiKey = Get-FirstNonEmptyValue -Values @($ApiKey, $env:GIT_AI_REPORT_REMOTE_API_KEY)
-    $resolvedUserId = Get-FirstNonEmptyValue -Values @($ResolvedUserId, $UserId, $env:GIT_AI_REPORT_REMOTE_USER_ID)
+    $resolvedUserId = Get-FirstNonEmptyValue -Values @($UserId, $env:GIT_AI_REPORT_REMOTE_USER_ID)
 
     $headers = @{}
     if ($resolvedApiKey) {
@@ -568,9 +351,8 @@ try {
     $gitVersion = Get-GitVersion -PreferredGitPath $GitPath
     $commitSha = New-SyntheticCommitSha -Version $version
     $url = Resolve-UploadUrl -PreferredUrl $RemoteUrl
-    $resolvedUserId = Resolve-RemoteUserId -ExplicitUserId $UserId
-    $payload = New-InstallTestPayload -Version $version -GitVersion $gitVersion -CommitSha $commitSha -ResolvedAuthor $resolvedUserId
-    $result = Send-InstallTestPayload -Url $url -Payload $payload -Version $version -ResolvedUserId $resolvedUserId
+    $payload = New-InstallTestPayload -Version $version -GitVersion $gitVersion -CommitSha $commitSha
+    $result = Send-InstallTestPayload -Url $url -Payload $payload -Version $version
 
     if ($DryRun) {
         Write-InstallTestInfo ('Generated git-ai install test data ({0}) for dry-run.' -f $version)
