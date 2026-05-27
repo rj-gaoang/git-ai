@@ -311,6 +311,87 @@ try {
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 } catch { }
 
+function Join-UrlPath {
+    param(
+        [Parameter(Mandatory = $true)][string]$BaseUrl,
+        [Parameter(Mandatory = $true)][string]$RelativePath
+    )
+
+    return ('{0}/{1}' -f $BaseUrl.TrimEnd('/'), $RelativePath.TrimStart('/'))
+}
+
+function Get-InstallerBaseUrl {
+    param(
+        [Parameter(Mandatory = $false)][string]$InstallerUrl
+    )
+
+    if ([string]::IsNullOrWhiteSpace($InstallerUrl)) {
+        return $null
+    }
+
+    try {
+        $uri = [System.Uri]$InstallerUrl.Trim()
+        if (-not $uri.IsAbsoluteUri) {
+            return $null
+        }
+
+        $host = $uri.Host.ToLowerInvariant()
+        if ($host -eq 'api.github.com' -or $host -match '(^|\.)(github\.com|githubusercontent\.com)$') {
+            return $null
+        }
+
+        $builder = New-Object System.UriBuilder($uri)
+        $path = $builder.Path
+        if ([string]::IsNullOrWhiteSpace($path)) {
+            return $null
+        }
+
+        $trimmedPath = $path.TrimEnd('/')
+        $lastSlash = $trimmedPath.LastIndexOf('/')
+        if ($lastSlash -lt 0) {
+            return $null
+        }
+
+        $builder.Path = if ($lastSlash -eq 0) {
+            '/'
+        } else {
+            $trimmedPath.Substring(0, $lastSlash)
+        }
+        $builder.Query = ''
+        $builder.Fragment = ''
+        return $builder.Uri.AbsoluteUri.TrimEnd('/')
+    } catch {
+        return $null
+    }
+}
+
+function Get-BinaryMirrorConfig {
+    $explicitBaseUrl = $null
+    foreach ($candidate in @($env:GIT_AI_BINARY_BASE_URL, $env:RUIJIE_AI_GIT_AI_BASE_URL)) {
+        if (-not [string]::IsNullOrWhiteSpace($candidate)) {
+            $explicitBaseUrl = $candidate.Trim().TrimEnd('/')
+            break
+        }
+    }
+
+    if ($explicitBaseUrl) {
+        return [PSCustomObject]@{
+            BaseUrl = $explicitBaseUrl
+            IsSelfHosted = $true
+        }
+    }
+
+    $derivedBaseUrl = Get-InstallerBaseUrl -InstallerUrl $env:GIT_AI_INSTALLER_URL
+    if (-not $derivedBaseUrl) {
+        return $null
+    }
+
+    return [PSCustomObject]@{
+        BaseUrl = $derivedBaseUrl
+        IsSelfHosted = $true
+    }
+}
+
 function Get-Architecture {
     try {
         $arch = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture
@@ -504,6 +585,11 @@ $os = 'windows'
 
 # Determine binary name and download URLs
 $binaryName = "git-ai-$os-$arch"
+$binaryMirrorConfig = Get-BinaryMirrorConfig
+$binaryBaseUrl = if ($binaryMirrorConfig) { $binaryMirrorConfig.BaseUrl } else { $null }
+$binaryMirrorIsSelfHosted = $binaryMirrorConfig -and $binaryMirrorConfig.IsSelfHosted
+$mirrorDownloadUrlExe = if ($binaryBaseUrl) { Join-UrlPath -BaseUrl $binaryBaseUrl -RelativePath "$binaryName.exe" } else { $null }
+$mirrorDownloadUrlNoExt = if ($binaryBaseUrl) { Join-UrlPath -BaseUrl $binaryBaseUrl -RelativePath $binaryName } else { $null }
 
 # Determine release tag
 # Priority: 1. Local binary override, 2. Pinned version (for release builds), 3. Environment variable, 4. "latest"
@@ -530,7 +616,11 @@ if (-not [string]::IsNullOrWhiteSpace($env:GIT_AI_LOCAL_BINARY)) {
 $installDir = Join-Path $HOME ".git-ai\bin"
 New-Item -ItemType Directory -Force -Path $installDir | Out-Null
 
-Write-Host ("Downloading git-ai (repo: {0}, release: {1})..." -f $Repo, $releaseTag)
+if ($binaryBaseUrl) {
+    Write-Host ("Downloading git-ai (base: {0}, release: {1})..." -f $binaryBaseUrl, $releaseTag)
+} else {
+    Write-Host ("Downloading git-ai (repo: {0}, release: {1})..." -f $Repo, $releaseTag)
+}
 $tmpFile = Join-Path $installDir "git-ai.tmp.$PID.exe"
 
 function Try-Download {
@@ -622,15 +712,24 @@ if (-not [string]::IsNullOrWhiteSpace($env:GIT_AI_LOCAL_BINARY)) {
     }
     Copy-Item -Force -Path $env:GIT_AI_LOCAL_BINARY -Destination $tmpFile
     $downloadedBinaryName = "$binaryName.exe"
-} elseif (Try-Download -Url $downloadUrlExe) {
-    $downloadedBinaryName = "$binaryName.exe"
-} elseif (Try-Download -Url $downloadUrlNoExt) {
-    $downloadedBinaryName = $binaryName
 } else {
-    $downloadedBinaryName = Try-DownloadFromGitHubApiAsset -Repository $Repo -ReleaseTag $releaseTag -CandidateAssetNames @(
-        "$binaryName.exe",
-        $binaryName
-    )
+    if ($mirrorDownloadUrlExe -and (Try-Download -Url $mirrorDownloadUrlExe)) {
+        $downloadedBinaryName = "$binaryName.exe"
+    } elseif ($mirrorDownloadUrlNoExt -and (Try-Download -Url $mirrorDownloadUrlNoExt)) {
+        $downloadedBinaryName = $binaryName
+    } elseif ($binaryMirrorIsSelfHosted) {
+        Remove-Item -Force -ErrorAction SilentlyContinue $tmpFile
+        Write-ErrorAndExit ("Failed to download binary from {0}" -f $binaryBaseUrl)
+    } elseif (Try-Download -Url $downloadUrlExe) {
+        $downloadedBinaryName = "$binaryName.exe"
+    } elseif (Try-Download -Url $downloadUrlNoExt) {
+        $downloadedBinaryName = $binaryName
+    } else {
+        $downloadedBinaryName = Try-DownloadFromGitHubApiAsset -Repository $Repo -ReleaseTag $releaseTag -CandidateAssetNames @(
+            "$binaryName.exe",
+            $binaryName
+        )
+    }
 }
 
 if (-not $downloadedBinaryName) {
