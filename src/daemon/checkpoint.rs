@@ -580,7 +580,9 @@ fn select_previous_state_for_ai_checkpoint(
     }
 
     for state in file_history.iter().rev().skip(1) {
-        let state_content = working_log.get_file_version(&state.blob_sha).unwrap_or_default();
+        let state_content = working_log
+            .get_file_version(&state.blob_sha)
+            .unwrap_or_default();
         if !content_eq_normalized(current_content, &state_content) {
             return Some((state_content, state.attributions.clone()));
         }

@@ -137,6 +137,13 @@ git ai stats <start_sha>..<end_sha> --json
 
 Calculates % AI-code, AI-lines generated vs committed, accepted rates, human overrides broken down by tool and model. Learn more: [Stats command reference docs](https://usegitai.com/docs/cli/reference#stats). 
 
+`git-ai upload-stats` uploads local authorship notes and commit stats to the configured dashboard endpoint. Upload state is tracked per repository in `.git/ai/upload_stats_status.json`: each note is marked `not_uploaded`, `succeeded`, or `failed`. When a commit upload runs, git-ai sends the current commit together with a bounded retry batch of locally failed or not-yet-uploaded notes, then updates the local status after the server response. Newly discovered historical notes are registered as `not_uploaded` first and retried gradually on later uploads, so a first run in an old repository does not try to rebuild every historical payload at once. If a note changes after a successful upload, it is treated as `not_uploaded` again so the updated note is sent on the next upload. The retry batch defaults to 25 notes and can be adjusted with `GIT_AI_UPLOAD_BACKLOG_LIMIT`.
+
+```bash
+git-ai upload-stats --dry-run
+git-ai upload-stats HEAD~3 HEAD
+```
+
 
 <details>
 <summary>Example JSON output</summary>

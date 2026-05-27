@@ -10,8 +10,9 @@ pub fn extract_model(
     session_id: Option<&str>,
 ) -> Result<Option<String>, TranscriptError> {
     match format {
-        TranscriptFormat::ClaudeJsonl
-        | TranscriptFormat::GeminiJsonl => extract_model_from_jsonl_tail(path),
+        TranscriptFormat::ClaudeJsonl | TranscriptFormat::GeminiJsonl => {
+            extract_model_from_jsonl_tail(path)
+        }
         TranscriptFormat::CopilotEventStreamJsonl => {
             extract_model_from_copilot_event_stream_jsonl(path)
         }
@@ -45,7 +46,9 @@ fn extract_model_from_jsonl_tail(path: &Path) -> Result<Option<String>, Transcri
     extract_model_from_jsonl_tail_with(path, extract_generic_model_candidate)
 }
 
-fn extract_model_from_copilot_event_stream_jsonl(path: &Path) -> Result<Option<String>, TranscriptError> {
+fn extract_model_from_copilot_event_stream_jsonl(
+    path: &Path,
+) -> Result<Option<String>, TranscriptError> {
     let tail_model = extract_model_from_jsonl_tail_with(path, extract_copilot_model_candidate)?;
     if tail_model.is_some() {
         return Ok(tail_model);
@@ -205,9 +208,7 @@ fn extract_copilot_model_hint(value: &serde_json::Value) -> Option<String> {
             None
         }
         serde_json::Value::Array(items) => items.iter().find_map(extract_copilot_model_hint),
-        serde_json::Value::String(text) => text
-            .starts_with("copilot/")
-            .then(|| text.to_string()),
+        serde_json::Value::String(text) => text.starts_with("copilot/").then(|| text.to_string()),
         _ => None,
     }
 }
@@ -372,8 +373,8 @@ mod tests {
         .unwrap();
         file.flush().unwrap();
 
-        let result = extract_model(file.path(), TranscriptFormat::CopilotEventStreamJsonl, None)
-            .unwrap();
+        let result =
+            extract_model(file.path(), TranscriptFormat::CopilotEventStreamJsonl, None).unwrap();
         assert_eq!(result, Some("copilot/gpt-5.4".to_string()));
     }
 
@@ -389,8 +390,8 @@ mod tests {
         .unwrap();
         file.flush().unwrap();
 
-        let result = extract_model(file.path(), TranscriptFormat::CopilotEventStreamJsonl, None)
-            .unwrap();
+        let result =
+            extract_model(file.path(), TranscriptFormat::CopilotEventStreamJsonl, None).unwrap();
         assert_eq!(result, Some("copilot/gpt-5.4".to_string()));
     }
 
@@ -416,8 +417,8 @@ mod tests {
 
         file.flush().unwrap();
 
-        let result = extract_model(file.path(), TranscriptFormat::CopilotEventStreamJsonl, None)
-            .unwrap();
+        let result =
+            extract_model(file.path(), TranscriptFormat::CopilotEventStreamJsonl, None).unwrap();
         assert_eq!(result, Some("copilot/gpt-5.4-mini".to_string()));
     }
 
@@ -433,8 +434,8 @@ mod tests {
         .unwrap();
         file.flush().unwrap();
 
-        let result = extract_model(file.path(), TranscriptFormat::CopilotSessionJson, None)
-            .unwrap();
+        let result =
+            extract_model(file.path(), TranscriptFormat::CopilotSessionJson, None).unwrap();
         assert_eq!(result, Some("copilot/gpt-5.4".to_string()));
     }
 

@@ -62,7 +62,9 @@ fn candidate_transcript_paths<'a>(
     let mut paths = Vec::new();
 
     let mut push_path = |path: Option<&'a String>| {
-        if let Some(path) = path.map(String::as_str).filter(|path| !path.trim().is_empty())
+        if let Some(path) = path
+            .map(String::as_str)
+            .filter(|path| !path.trim().is_empty())
             && !paths.contains(&path)
         {
             paths.push(path);
@@ -202,7 +204,9 @@ mod tests {
 
         assert_eq!(messages.len(), 2);
         assert!(matches!(&messages[0], Message::User { text, .. } if text == "write tests"));
-        assert!(matches!(&messages[1], Message::Assistant { text, .. } if text == "I will update the test file."));
+        assert!(
+            matches!(&messages[1], Message::Assistant { text, .. } if text == "I will update the test file.")
+        );
     }
 
     #[test]
@@ -225,7 +229,8 @@ mod tests {
             file.path().to_string_lossy().to_string(),
         )]);
 
-        let result = update_prompt_from_tool("github-copilot", "session-1", Some(&metadata), "unknown");
+        let result =
+            update_prompt_from_tool("github-copilot", "session-1", Some(&metadata), "unknown");
 
         match result {
             PromptUpdateResult::Updated(transcript, model) => {
@@ -271,7 +276,8 @@ mod tests {
             ),
         ]);
 
-        let result = update_prompt_from_tool("github-copilot", "session-1", Some(&metadata), "unknown");
+        let result =
+            update_prompt_from_tool("github-copilot", "session-1", Some(&metadata), "unknown");
 
         match result {
             PromptUpdateResult::Updated(transcript, model) => {

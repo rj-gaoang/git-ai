@@ -104,7 +104,8 @@ fn record_checkpoint_agent_metadata(
             );
         initial_only_prompt_ids.remove(&prompt_id);
 
-        *session_additions.entry(session_id.clone()).or_insert(0) += checkpoint.line_stats.additions;
+        *session_additions.entry(session_id.clone()).or_insert(0) +=
+            checkpoint.line_stats.additions;
         *session_deletions.entry(session_id).or_insert(0) += checkpoint.line_stats.deletions;
     } else {
         let prompt_id = crate::authorship::authorship_log_serialization::generate_short_hash(
@@ -2264,14 +2265,17 @@ impl VirtualAttributions {
             for prompt_record in commits.values_mut() {
                 prompt_record.total_additions = *session_additions.get(metrics_key).unwrap_or(&0);
                 prompt_record.total_deletions = *session_deletions.get(metrics_key).unwrap_or(&0);
-                prompt_record.accepted_lines =
-                    *session_accepted_lines.get(prompt_id).or_else(|| session_accepted_lines.get(metrics_key)).unwrap_or(&0);
-                prompt_record.overriden_lines =
-                    *session_overridden_lines.get(prompt_id).or_else(|| session_overridden_lines.get(metrics_key)).unwrap_or(&0);
+                prompt_record.accepted_lines = *session_accepted_lines
+                    .get(prompt_id)
+                    .or_else(|| session_accepted_lines.get(metrics_key))
+                    .unwrap_or(&0);
+                prompt_record.overriden_lines = *session_overridden_lines
+                    .get(prompt_id)
+                    .or_else(|| session_overridden_lines.get(metrics_key))
+                    .unwrap_or(&0);
             }
         }
     }
-
 
     /// Filter prompts and attributions to only include those from specific commits
     /// This is useful for range analysis where we only want to count AI contributions
@@ -2853,7 +2857,10 @@ mod tests {
             prompts[&prompt_id].values().next().unwrap().agent_id.model,
             "copilot/gpt-5.4"
         );
-        assert_eq!(prompts[&prompt_id].values().next().unwrap().messages.len(), 1);
+        assert_eq!(
+            prompts[&prompt_id].values().next().unwrap().messages.len(),
+            1
+        );
     }
 
     #[test]

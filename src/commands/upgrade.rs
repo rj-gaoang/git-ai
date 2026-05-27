@@ -403,8 +403,8 @@ fn release_source_url(api_base_url: &str, repo: &str) -> String {
 
 fn fetch_text(url: &str, label: &str) -> Result<String, String> {
     let (_agent, request) = ApiContext::http_get(url, Some(30));
-    let response = crate::http::send(request)
-        .map_err(|e| format!("Failed to fetch {}: {}", label, e))?;
+    let response =
+        crate::http::send(request).map_err(|e| format!("Failed to fetch {}: {}", label, e))?;
 
     if response.status_code != 200 {
         return Err(format!(
@@ -434,14 +434,14 @@ fn release_from_github_release(release: &GitHubReleaseResponse) -> Result<Channe
         return Err(format!("Unable to parse semver from tag '{}'", tag));
     }
 
-    Ok(ChannelRelease {
-        tag,
-        semver,
-    })
+    Ok(ChannelRelease { tag, semver })
 }
 
 fn fetch_github_release_list(repo: &str) -> Result<Vec<GitHubReleaseResponse>, String> {
-    let url = format!("{}/repos/{}/releases?per_page=100", GITHUB_API_BASE_URL, repo);
+    let url = format!(
+        "{}/repos/{}/releases?per_page=100",
+        GITHUB_API_BASE_URL, repo
+    );
     let body = fetch_text(&url, "GitHub release list")?;
     serde_json::from_str(&body)
         .map_err(|e| format!("Failed to parse GitHub release list response: {}", e))
@@ -663,7 +663,9 @@ fn fetch_release_for_channel(
 
     let repo = configured_github_repo();
     match channel {
-        UpdateChannel::Latest | UpdateChannel::EnterpriseLatest => fetch_latest_github_release(&repo),
+        UpdateChannel::Latest | UpdateChannel::EnterpriseLatest => {
+            fetch_latest_github_release(&repo)
+        }
         UpdateChannel::Next | UpdateChannel::EnterpriseNext => fetch_next_github_release(&repo),
     }
 }
@@ -695,10 +697,7 @@ fn release_from_response(
         return Err("Checksum not found in response".to_string());
     }
 
-    Ok(ChannelRelease {
-        tag,
-        semver,
-    })
+    Ok(ChannelRelease { tag, semver })
 }
 
 #[cfg(test)]
@@ -711,7 +710,12 @@ fn try_mock_releases(base: &str, channel: UpdateChannel) -> Option<Result<Channe
     )
 }
 
-fn run_install_script(script_content: &str, repo: &str, tag: &str, silent: bool) -> Result<(), String> {
+fn run_install_script(
+    script_content: &str,
+    repo: &str,
+    tag: &str,
+    silent: bool,
+) -> Result<(), String> {
     #[cfg(windows)]
     {
         if let Ok(daemon_config) = crate::daemon::DaemonConfig::from_env_or_default_paths() {
@@ -991,9 +995,15 @@ fn run_impl_with_url(
     let script_content = match fetch_install_script(&repo, &release.tag) {
         Ok(content) => {
             #[cfg(windows)]
-            println!("\x1b[1;32m✓\x1b[0m install.ps1 fetched from {}", installer_url);
+            println!(
+                "\x1b[1;32m✓\x1b[0m install.ps1 fetched from {}",
+                installer_url
+            );
             #[cfg(not(windows))]
-            println!("\x1b[1;32m✓\x1b[0m install.sh fetched from {}", installer_url);
+            println!(
+                "\x1b[1;32m✓\x1b[0m install.sh fetched from {}",
+                installer_url
+            );
             content
         }
         Err(err) => {
@@ -1503,14 +1513,15 @@ mod tests {
             configured_installer_url(DEFAULT_GITHUB_RELEASE_REPO, "v2.1.13"),
             format!(
                 "https://github.com/{}/releases/download/{}/{}",
-                DEFAULT_GITHUB_RELEASE_REPO,
-                "v2.1.13",
-                INSTALL_SCRIPT_NAME
+                DEFAULT_GITHUB_RELEASE_REPO, "v2.1.13", INSTALL_SCRIPT_NAME
             )
         );
 
         unsafe {
-            std::env::set_var(GIT_AI_INSTALLER_URL_ENV, "https://example.com/install-script");
+            std::env::set_var(
+                GIT_AI_INSTALLER_URL_ENV,
+                "https://example.com/install-script",
+            );
         }
 
         assert_eq!(
@@ -1529,9 +1540,7 @@ mod tests {
             raw_main_installer_url(DEFAULT_GITHUB_RELEASE_REPO),
             format!(
                 "{}/{}/main/{}",
-                RAW_GITHUB_CONTENT_BASE_URL,
-                DEFAULT_GITHUB_RELEASE_REPO,
-                INSTALL_SCRIPT_NAME
+                RAW_GITHUB_CONTENT_BASE_URL, DEFAULT_GITHUB_RELEASE_REPO, INSTALL_SCRIPT_NAME
             )
         );
     }

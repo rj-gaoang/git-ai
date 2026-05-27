@@ -28,15 +28,17 @@ use crate::authorship::stats::{
     CommitStats, accepted_lines_from_attestations_by_file, stats_for_commit_stats,
 };
 use crate::authorship::transcript::Message;
-use crate::git::refs::get_authorship;
-use crate::git::repository::Repository;
+use crate::git::refs::{get_authorship, note_blob_oids_for_commits};
+use crate::git::repository::{Repository, exec_git};
 use crate::http;
 use crate::integration::ide_mcp::resolve_x_user_id;
 use crate::utils::LockFile;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const DEFAULT_UPLOAD_URL: &str =
     "https://service-gw.ruijie.com.cn/api/ai-cr-manage-service/api/public/upload/ai-stats";
@@ -47,6 +49,10 @@ const UPLOAD_ACTIVITY_LOCK_FILE: &str = "upload_activity.lock";
 const UPLOAD_ACTIVITY_LOCK_WAIT_SECS_AUTO: u64 = 5;
 const UPLOAD_ACTIVITY_LOCK_WAIT_SECS_MANUAL: u64 = 30;
 const UPLOAD_ACTIVITY_LOCK_RETRY_MILLIS: u64 = 250;
+const UPLOAD_STATUS_FILE: &str = "upload_stats_status.json";
+const UPLOAD_STATUS_SCHEMA_VERSION: u32 = 1;
+const MAX_STATUS_ERROR_CHARS: usize = 500;
+const DEFAULT_UPLOAD_BACKLOG_LIMIT: usize = 25;
 
 fn upload_activity_lock_path_from_internal_dir(internal_dir: &Path) -> PathBuf {
     internal_dir.join(UPLOAD_ACTIVITY_LOCK_FILE)
@@ -109,7 +115,10 @@ fn acquire_upload_activity_lock(debug_context: &UploadDebugContext) -> Result<Lo
         max_wait,
         Duration::from_millis(UPLOAD_ACTIVITY_LOCK_RETRY_MILLIS),
     );
-    let waited_ms = wait_started_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+    let waited_ms = wait_started_at
+        .elapsed()
+        .as_millis()
+        .min(u128::from(u64::MAX)) as u64;
 
     match lock {
         Some(lock) => {
@@ -188,6 +197,231 @@ struct UploadDebugContext {
     mode: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum NoteUploadStatus {
+    NotUploaded,
+    Succeeded,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UploadNoteRecord {
+    upload_status: NoteUploadStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    note_blob_oid: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    first_seen_at_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_attempt_at_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_success_at_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_failure_at_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_status_code: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_error: Option<String>,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    upload_attempts: u32,
+}
+
+impl UploadNoteRecord {
+    fn new_not_uploaded(note_blob_oid: Option<String>, now_ms: u64) -> Self {
+        Self {
+            upload_status: NoteUploadStatus::NotUploaded,
+            note_blob_oid,
+            first_seen_at_ms: Some(now_ms),
+            last_attempt_at_ms: None,
+            last_success_at_ms: None,
+            last_failure_at_ms: None,
+            last_status_code: None,
+            last_error: None,
+            upload_attempts: 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UploadStatusIndex {
+    #[serde(default = "upload_status_schema_version")]
+    schema_version: u32,
+    #[serde(default)]
+    notes: BTreeMap<String, UploadNoteRecord>,
+}
+
+impl Default for UploadStatusIndex {
+    fn default() -> Self {
+        Self {
+            schema_version: UPLOAD_STATUS_SCHEMA_VERSION,
+            notes: BTreeMap::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct UploadCandidateSeed {
+    commit_sha: String,
+    authorship_log: Option<AuthorshipLog>,
+    stats: Option<CommitStats>,
+}
+
+#[derive(Debug, Clone)]
+struct PreparedUploadBatch {
+    payload: Value,
+    commit_shas: Vec<String>,
+    payload_summary: Value,
+}
+
+fn upload_status_schema_version() -> u32 {
+    UPLOAD_STATUS_SCHEMA_VERSION
+}
+
+fn is_zero(value: &u32) -> bool {
+    *value == 0
+}
+
+fn now_epoch_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or(Duration::ZERO)
+        .as_millis()
+        .min(u128::from(u64::MAX)) as u64
+}
+
+fn upload_status_path(repo: &Repository) -> PathBuf {
+    repo.storage.ai_dir.join(UPLOAD_STATUS_FILE)
+}
+
+fn load_upload_status_index(repo: &Repository) -> UploadStatusIndex {
+    let path = upload_status_path(repo);
+    let Ok(content) = fs::read_to_string(&path) else {
+        return UploadStatusIndex::default();
+    };
+
+    match serde_json::from_str::<UploadStatusIndex>(&content) {
+        Ok(mut index) => {
+            index.schema_version = UPLOAD_STATUS_SCHEMA_VERSION;
+            index
+        }
+        Err(error) => {
+            crate::diagnostics::append_debug_event(
+                "upload_stats_status_load_failed",
+                json!({
+                    "repo": repo.canonical_workdir().to_string_lossy().to_string(),
+                    "path": path.display().to_string(),
+                    "error": error.to_string(),
+                }),
+            );
+            UploadStatusIndex::default()
+        }
+    }
+}
+
+fn save_upload_status_index(repo: &Repository, index: &UploadStatusIndex) -> Result<(), String> {
+    let path = upload_status_path(repo);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    let content = serde_json::to_string_pretty(index).map_err(|error| error.to_string())?;
+    fs::write(&path, content).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn truncate_status_error(error: &str) -> String {
+    error.chars().take(MAX_STATUS_ERROR_CHARS).collect()
+}
+
+fn ensure_note_status_record<'a>(
+    index: &'a mut UploadStatusIndex,
+    commit_sha: &str,
+    note_blob_oid: Option<String>,
+    now_ms: u64,
+) -> &'a mut UploadNoteRecord {
+    let record = index
+        .notes
+        .entry(commit_sha.to_string())
+        .or_insert_with(|| UploadNoteRecord::new_not_uploaded(note_blob_oid.clone(), now_ms));
+
+    if record.first_seen_at_ms.is_none() {
+        record.first_seen_at_ms = Some(now_ms);
+    }
+
+    if let Some(note_blob_oid) = note_blob_oid
+        && record.note_blob_oid.as_deref() != Some(note_blob_oid.as_str())
+    {
+        record.note_blob_oid = Some(note_blob_oid);
+        record.upload_status = NoteUploadStatus::NotUploaded;
+        record.last_status_code = None;
+        record.last_error = None;
+    }
+
+    record
+}
+
+fn mark_upload_attempt_started(index: &mut UploadStatusIndex, commit_shas: &[String], now_ms: u64) {
+    for commit_sha in commit_shas {
+        let record = ensure_note_status_record(index, commit_sha, None, now_ms);
+        record.last_attempt_at_ms = Some(now_ms);
+        record.upload_attempts = record.upload_attempts.saturating_add(1);
+    }
+}
+
+fn mark_upload_succeeded(
+    index: &mut UploadStatusIndex,
+    commit_shas: &[String],
+    status_code: u16,
+    now_ms: u64,
+) {
+    for commit_sha in commit_shas {
+        let record = ensure_note_status_record(index, commit_sha, None, now_ms);
+        record.upload_status = NoteUploadStatus::Succeeded;
+        record.last_success_at_ms = Some(now_ms);
+        record.last_status_code = Some(status_code);
+        record.last_error = None;
+    }
+}
+
+fn mark_upload_failed(
+    index: &mut UploadStatusIndex,
+    commit_shas: &[String],
+    error: &str,
+    now_ms: u64,
+) {
+    let error = truncate_status_error(error);
+    for commit_sha in commit_shas {
+        let record = ensure_note_status_record(index, commit_sha, None, now_ms);
+        record.upload_status = NoteUploadStatus::Failed;
+        record.last_failure_at_ms = Some(now_ms);
+        record.last_status_code = None;
+        record.last_error = Some(error.clone());
+    }
+}
+
+fn mark_note_not_uploaded_best_effort(repo: &Repository, commit_sha: &str, reason: &str) {
+    let now_ms = now_epoch_ms();
+    let mut index = load_upload_status_index(repo);
+    let note_blob_oid = note_blob_oid_for_commit(repo, commit_sha);
+    ensure_note_status_record(&mut index, commit_sha, note_blob_oid, now_ms);
+
+    if let Err(error) = save_upload_status_index(repo, &index) {
+        crate::diagnostics::append_debug_event(
+            "upload_stats_status_save_failed",
+            json!({
+                "commitSha": commit_sha,
+                "commitShort": short_sha(commit_sha),
+                "source": "auto",
+                "mode": "not_uploaded_marker",
+                "reason": reason,
+                "repo": repo.canonical_workdir().to_string_lossy().to_string(),
+                "error": error,
+            }),
+        );
+    }
+}
+
 impl ManualUploadOutcome {
     pub fn commit_sha(&self) -> &str {
         match self {
@@ -196,6 +430,272 @@ impl ManualUploadOutcome {
             | Self::Skipped { commit_sha, .. } => commit_sha,
         }
     }
+}
+
+fn list_local_authorship_notes(repo: &Repository) -> Result<BTreeMap<String, String>, String> {
+    let mut args = repo.global_args_for_exec();
+    args.push("notes".to_string());
+    args.push("--ref=ai".to_string());
+    args.push("list".to_string());
+
+    let output = match exec_git(&args) {
+        Ok(output) => output,
+        Err(crate::error::GitAiError::GitCliError { code: Some(1), .. }) => {
+            return Ok(BTreeMap::new());
+        }
+        Err(error) => return Err(error.to_string()),
+    };
+
+    let stdout = String::from_utf8(output.stdout).map_err(|error| error.to_string())?;
+    let mut notes = BTreeMap::new();
+    for line in stdout.lines() {
+        let mut parts = line.split_whitespace();
+        let Some(note_blob_oid) = parts.next() else {
+            continue;
+        };
+        let Some(commit_sha) = parts.next() else {
+            continue;
+        };
+        notes.insert(commit_sha.to_string(), note_blob_oid.to_string());
+    }
+
+    Ok(notes)
+}
+
+fn list_head_reachable_commits(repo: &Repository) -> Result<BTreeSet<String>, String> {
+    let mut args = repo.global_args_for_exec();
+    args.push("rev-list".to_string());
+    args.push("HEAD".to_string());
+
+    let output = exec_git(&args).map_err(|error| error.to_string())?;
+    let stdout = String::from_utf8(output.stdout).map_err(|error| error.to_string())?;
+
+    Ok(stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(ToString::to_string)
+        .collect())
+}
+
+fn note_blob_oid_for_commit(repo: &Repository, commit_sha: &str) -> Option<String> {
+    note_blob_oids_for_commits(repo, &[commit_sha.to_string()])
+        .ok()
+        .and_then(|mut notes| notes.remove(commit_sha))
+}
+
+fn sync_reachable_note_statuses(
+    repo: &Repository,
+    index: &mut UploadStatusIndex,
+    explicit_commits: &[String],
+    now_ms: u64,
+) -> BTreeMap<String, String> {
+    let all_notes = match list_local_authorship_notes(repo) {
+        Ok(notes) => notes,
+        Err(error) => {
+            crate::diagnostics::append_debug_event(
+                "upload_stats_status_note_list_failed",
+                json!({
+                    "repo": repo.canonical_workdir().to_string_lossy().to_string(),
+                    "error": error,
+                }),
+            );
+            BTreeMap::new()
+        }
+    };
+
+    let reachable_commits = match list_head_reachable_commits(repo) {
+        Ok(commits) => commits,
+        Err(error) => {
+            crate::diagnostics::append_debug_event(
+                "upload_stats_status_rev_list_failed",
+                json!({
+                    "repo": repo.canonical_workdir().to_string_lossy().to_string(),
+                    "error": error,
+                }),
+            );
+            BTreeSet::new()
+        }
+    };
+
+    let explicit_set = explicit_commits.iter().cloned().collect::<BTreeSet<_>>();
+    let mut eligible_notes = BTreeMap::new();
+    for (commit_sha, note_blob_oid) in all_notes {
+        if reachable_commits.contains(&commit_sha) || explicit_set.contains(&commit_sha) {
+            ensure_note_status_record(index, &commit_sha, Some(note_blob_oid.clone()), now_ms);
+            eligible_notes.insert(commit_sha, note_blob_oid);
+        }
+    }
+
+    for commit_sha in explicit_commits {
+        if !eligible_notes.contains_key(commit_sha)
+            && let Some(note_blob_oid) = note_blob_oid_for_commit(repo, commit_sha)
+        {
+            ensure_note_status_record(index, commit_sha, Some(note_blob_oid.clone()), now_ms);
+            eligible_notes.insert(commit_sha.clone(), note_blob_oid);
+        }
+    }
+
+    eligible_notes
+}
+
+fn ordered_upload_candidates(
+    index: &UploadStatusIndex,
+    eligible_notes: &BTreeMap<String, String>,
+    previously_tracked: &HashSet<String>,
+    seeds: &[UploadCandidateSeed],
+    backlog_limit: usize,
+) -> Vec<String> {
+    let mut ordered = Vec::new();
+    let mut seen = HashSet::new();
+
+    for seed in seeds {
+        if eligible_notes.contains_key(&seed.commit_sha) && seen.insert(seed.commit_sha.clone()) {
+            ordered.push(seed.commit_sha.clone());
+        }
+    }
+
+    let mut backlog_count = 0usize;
+    for status in [NoteUploadStatus::Failed, NoteUploadStatus::NotUploaded] {
+        for (commit_sha, record) in &index.notes {
+            if backlog_count >= backlog_limit {
+                return ordered;
+            }
+            if record.upload_status == status
+                && previously_tracked.contains(commit_sha)
+                && eligible_notes.contains_key(commit_sha)
+                && seen.insert(commit_sha.clone())
+            {
+                ordered.push(commit_sha.clone());
+                backlog_count += 1;
+            }
+        }
+    }
+
+    ordered
+}
+
+fn prepare_upload_batch(
+    repo: &Repository,
+    index: &mut UploadStatusIndex,
+    seeds: &[UploadCandidateSeed],
+    ignore_patterns: &[String],
+    source: &str,
+) -> Result<PreparedUploadBatch, String> {
+    let now_ms = now_epoch_ms();
+    let explicit_commits = seeds
+        .iter()
+        .map(|seed| seed.commit_sha.clone())
+        .collect::<Vec<_>>();
+    let previously_tracked = index.notes.keys().cloned().collect::<HashSet<_>>();
+    let seed_map = seeds
+        .iter()
+        .map(|seed| (seed.commit_sha.as_str(), seed))
+        .collect::<HashMap<_, _>>();
+
+    let eligible_notes = sync_reachable_note_statuses(repo, index, &explicit_commits, now_ms);
+    let ordered_commits = ordered_upload_candidates(
+        index,
+        &eligible_notes,
+        &previously_tracked,
+        seeds,
+        upload_backlog_limit(),
+    );
+
+    let mut commit_entries = Vec::new();
+    let mut commit_shas = Vec::new();
+    for commit_sha in ordered_commits {
+        let seed = seed_map.get(commit_sha.as_str()).copied();
+        let authorship_log = seed
+            .and_then(|seed| seed.authorship_log.clone())
+            .or_else(|| get_authorship(repo, &commit_sha));
+        let Some(authorship_log) = authorship_log else {
+            let error = "authorship note disappeared before upload".to_string();
+            mark_upload_failed(
+                index,
+                std::slice::from_ref(&commit_sha),
+                &error,
+                now_epoch_ms(),
+            );
+            crate::diagnostics::append_debug_event(
+                "upload_stats_candidate_skipped",
+                json!({
+                    "commitSha": commit_sha.as_str(),
+                    "commitShort": short_sha(&commit_sha),
+                    "source": source,
+                    "reason": "authorship_note_missing",
+                    "repo": repo.canonical_workdir().to_string_lossy().to_string(),
+                }),
+            );
+            continue;
+        };
+
+        let stats = match seed.and_then(|seed| seed.stats.clone()) {
+            Some(stats) => stats,
+            None => match stats_for_commit_stats(repo, &commit_sha, ignore_patterns) {
+                Ok(stats) => stats,
+                Err(error) => {
+                    let error = error.to_string();
+                    mark_upload_failed(
+                        index,
+                        std::slice::from_ref(&commit_sha),
+                        &format!("stats build failed: {}", error),
+                        now_epoch_ms(),
+                    );
+                    crate::diagnostics::append_debug_event(
+                        "upload_stats_candidate_skipped",
+                        json!({
+                            "commitSha": commit_sha.as_str(),
+                            "commitShort": short_sha(&commit_sha),
+                            "source": source,
+                            "reason": "stats_build_failed",
+                            "repo": repo.canonical_workdir().to_string_lossy().to_string(),
+                            "error": error,
+                        }),
+                    );
+                    continue;
+                }
+            },
+        };
+
+        match build_commit_entry(repo, &commit_sha, &authorship_log, &stats) {
+            Ok(commit_entry) => {
+                commit_entries.push(Value::Object(commit_entry));
+                commit_shas.push(commit_sha);
+            }
+            Err(error) => {
+                mark_upload_failed(
+                    index,
+                    std::slice::from_ref(&commit_sha),
+                    &format!("payload build failed: {}", error),
+                    now_epoch_ms(),
+                );
+                crate::diagnostics::append_debug_event(
+                    "upload_stats_candidate_skipped",
+                    json!({
+                        "commitSha": commit_sha.as_str(),
+                        "commitShort": short_sha(&commit_sha),
+                        "source": source,
+                        "reason": "payload_build_failed",
+                        "repo": repo.canonical_workdir().to_string_lossy().to_string(),
+                        "error": error,
+                    }),
+                );
+            }
+        }
+    }
+
+    if commit_entries.is_empty() {
+        return Err("no uploadable authorship notes found".to_string());
+    }
+
+    let payload = build_payload_from_commit_entries(repo, commit_entries, source)?;
+    let payload_summary = upload_payload_summary(&payload);
+    Ok(PreparedUploadBatch {
+        payload,
+        commit_shas,
+        payload_summary,
+    })
 }
 
 /// Resolve the upload endpoint URL from the environment, falling back to the
@@ -236,6 +736,12 @@ fn env_non_empty(name: &str) -> Option<String> {
 
 fn env_first_non_empty(names: &[&str]) -> Option<String> {
     names.iter().find_map(|name| env_non_empty(name))
+}
+
+fn upload_backlog_limit() -> usize {
+    env_non_empty("GIT_AI_UPLOAD_BACKLOG_LIMIT")
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(DEFAULT_UPLOAD_BACKLOG_LIMIT)
 }
 
 fn git_ai_cli_version() -> String {
@@ -375,6 +881,7 @@ pub fn maybe_upload_after_commit(
                 "hint": "post_commit_stats_skipped event should explain whether this was a merge commit or an expensive commit",
             }),
         );
+        mark_note_not_uploaded_best_effort(repo, commit_sha, "stats_unavailable");
         log_debug("stats unavailable for this commit; skipping upload");
         return;
     };
@@ -389,39 +896,6 @@ pub fn maybe_upload_after_commit(
             "statsSummary": upload_stats_summary(stats),
             "promptCount": authorship_log.metadata.prompts.len(),
             "attestationFileCount": authorship_log.attestations.len(),
-        }),
-    );
-
-    let payload = match build_payload(repo, commit_sha, authorship_log, stats) {
-        Ok(payload) => payload,
-        Err(err) => {
-            crate::diagnostics::append_debug_event(
-                "upload_stats_skipped",
-                json!({
-                    "reason": "payload_build_failed",
-                    "source": "auto",
-                    "commitSha": commit_sha,
-                    "commitShort": short_sha(commit_sha),
-                    "repo": repo.canonical_workdir().to_string_lossy().to_string(),
-                    "error": err,
-                }),
-            );
-            log_debug(&format!(
-                "payload build failed for {}: {}",
-                short_sha(commit_sha),
-                err
-            ));
-            return;
-        }
-    };
-    crate::diagnostics::append_debug_event(
-        "upload_stats_payload_build_succeeded",
-        json!({
-            "commitSha": commit_sha,
-            "commitShort": commit_short,
-            "source": "auto",
-            "repo": repo.canonical_workdir().to_string_lossy().to_string(),
-            "payloadSummary": upload_payload_summary(&payload),
         }),
     );
 
@@ -444,16 +918,21 @@ pub fn maybe_upload_after_commit(
             "hasApiKey": api_key.is_some(),
             "hasUserId": user_id.is_some(),
             "userIdSource": if explicit_user_id.is_some() { "GIT_AI_REPORT_REMOTE_USER_ID" } else if user_id.is_some() { "ide_mcp_config" } else { "missing" },
-            "payloadSummary": upload_payload_summary(&payload),
+            "pendingBatch": true,
         }),
     );
     dispatch_upload(UploadDispatch {
         run_in_background: feature_flags.async_mode,
+        repo: repo.clone(),
         url,
-        payload,
         api_key,
         user_id,
-        commit_sha: commit_sha.to_string(),
+        seeds: vec![UploadCandidateSeed {
+            commit_sha: commit_sha.to_string(),
+            authorship_log: Some(authorship_log.clone()),
+            stats: Some(stats.clone()),
+        }],
+        ignore_patterns: Vec::new(),
         commit_short,
         source: "auto".to_string(),
     });
@@ -548,8 +1027,34 @@ pub fn upload_local_commit_stats(
         }),
     );
 
-    let payload = build_payload_with_source(repo, commit_sha, &authorship_log, &stats, source)
+    let (url, url_source) = resolve_upload_url_with_source();
+    let api_key = env_non_empty("GIT_AI_REPORT_REMOTE_API_KEY");
+    let explicit_user_id = env_non_empty("GIT_AI_REPORT_REMOTE_USER_ID");
+    let user_id = explicit_user_id
+        .clone()
+        .or_else(|| resolve_x_user_id(Some(repo.canonical_workdir())));
+
+    let debug_context = UploadDebugContext {
+        commit_sha: commit_sha.to_string(),
+        commit_short: commit_short.clone(),
+        source: source.to_string(),
+        mode: if dry_run {
+            "manual_dry_run".to_string()
+        } else {
+            "manual".to_string()
+        },
+    };
+
+    let _upload_activity_lock = acquire_upload_activity_lock(&debug_context)?;
+    let mut status_index = load_upload_status_index(repo);
+    let seeds = vec![UploadCandidateSeed {
+        commit_sha: commit_sha.to_string(),
+        authorship_log: Some(authorship_log.clone()),
+        stats: Some(stats.clone()),
+    }];
+    let batch = prepare_upload_batch(repo, &mut status_index, &seeds, ignore_patterns, source)
         .map_err(|error| {
+            let _ = save_upload_status_index(repo, &status_index);
             crate::diagnostics::append_debug_event(
                 "upload_stats_skipped",
                 json!({
@@ -570,17 +1075,9 @@ pub fn upload_local_commit_stats(
             "commitShort": commit_short,
             "source": source,
             "repo": repo.canonical_workdir().to_string_lossy().to_string(),
-            "payloadSummary": upload_payload_summary(&payload),
+            "payloadSummary": batch.payload_summary.clone(),
         }),
     );
-
-    let (url, url_source) = resolve_upload_url_with_source();
-    let api_key = env_non_empty("GIT_AI_REPORT_REMOTE_API_KEY");
-    let explicit_user_id = env_non_empty("GIT_AI_REPORT_REMOTE_USER_ID");
-    let user_id = explicit_user_id
-        .clone()
-        .or_else(|| resolve_x_user_id(Some(repo.canonical_workdir())));
-    let payload_summary = upload_payload_summary(&payload);
 
     crate::diagnostics::append_debug_event(
         "upload_stats_ready",
@@ -595,7 +1092,7 @@ pub fn upload_local_commit_stats(
             "hasApiKey": api_key.is_some(),
             "hasUserId": user_id.is_some(),
             "userIdSource": if explicit_user_id.is_some() { "GIT_AI_REPORT_REMOTE_USER_ID" } else if user_id.is_some() { "ide_mcp_config" } else { "missing" },
-            "payloadSummary": payload_summary,
+            "payloadSummary": batch.payload_summary.clone(),
         }),
     );
 
@@ -613,15 +1110,30 @@ pub fn upload_local_commit_stats(
                 "mode": "manual_dry_run",
                 "url": url,
                 "urlSource": url_source,
-                "payloadSummary": upload_payload_summary(&payload),
+                "payloadSummary": batch.payload_summary.clone(),
             }),
         );
         return Ok(ManualUploadOutcome::DryRun {
             commit_sha: commit_sha.to_string(),
             url,
             url_source,
-            payload_summary: upload_payload_summary(&payload),
+            payload_summary: batch.payload_summary.clone(),
         });
+    }
+
+    mark_upload_attempt_started(&mut status_index, &batch.commit_shas, now_epoch_ms());
+    if let Err(error) = save_upload_status_index(repo, &status_index) {
+        crate::diagnostics::append_debug_event(
+            "upload_stats_status_save_failed",
+            json!({
+                "commitSha": commit_sha,
+                "commitShort": commit_short,
+                "source": source,
+                "mode": "manual",
+                "repo": repo.canonical_workdir().to_string_lossy().to_string(),
+                "error": error,
+            }),
+        );
     }
 
     log_info(&format!(
@@ -642,20 +1154,13 @@ pub fn upload_local_commit_stats(
             "url": url,
             "hasApiKey": api_key.is_some(),
             "hasUserId": user_id.is_some(),
-            "payloadSummary": upload_payload_summary(&payload),
+            "payloadSummary": batch.payload_summary.clone(),
         }),
     );
 
-    let debug_context = UploadDebugContext {
-        commit_sha: commit_sha.to_string(),
-        commit_short: commit_short.clone(),
-        source: source.to_string(),
-        mode: "manual".to_string(),
-    };
-
-    match perform_upload(
+    match perform_upload_with_lock_held(
         &url,
-        &payload,
+        &batch.payload,
         api_key.as_deref(),
         user_id.as_deref(),
         &debug_context,
@@ -672,6 +1177,25 @@ pub fn upload_local_commit_stats(
                     "statusCode": status_code,
                 }),
             );
+            mark_upload_succeeded(
+                &mut status_index,
+                &batch.commit_shas,
+                status_code,
+                now_epoch_ms(),
+            );
+            if let Err(error) = save_upload_status_index(repo, &status_index) {
+                crate::diagnostics::append_debug_event(
+                    "upload_stats_status_save_failed",
+                    json!({
+                        "commitSha": commit_sha,
+                        "commitShort": commit_short,
+                        "source": source,
+                        "mode": "manual",
+                        "repo": repo.canonical_workdir().to_string_lossy().to_string(),
+                        "error": error,
+                    }),
+                );
+            }
             log_info(&format!(
                 "uploaded manual stats for {} source={} status={}",
                 commit_short, source, status_code
@@ -696,6 +1220,25 @@ pub fn upload_local_commit_stats(
                     "hasUserId": user_id.is_some(),
                 }),
             );
+            mark_upload_failed(
+                &mut status_index,
+                &batch.commit_shas,
+                &error,
+                now_epoch_ms(),
+            );
+            if let Err(save_error) = save_upload_status_index(repo, &status_index) {
+                crate::diagnostics::append_debug_event(
+                    "upload_stats_status_save_failed",
+                    json!({
+                        "commitSha": commit_sha,
+                        "commitShort": commit_short,
+                        "source": source,
+                        "mode": "manual",
+                        "repo": repo.canonical_workdir().to_string_lossy().to_string(),
+                        "error": save_error,
+                    }),
+                );
+            }
             log_warn(&format!(
                 "manual upload failed for {} source={}: {}",
                 commit_short, source, error
@@ -707,11 +1250,12 @@ pub fn upload_local_commit_stats(
 
 struct UploadDispatch {
     run_in_background: bool,
+    repo: Repository,
     url: String,
-    payload: Value,
     api_key: Option<String>,
     user_id: Option<String>,
-    commit_sha: String,
+    seeds: Vec<UploadCandidateSeed>,
+    ignore_patterns: Vec<String>,
     commit_short: String,
     source: String,
 }
@@ -719,11 +1263,12 @@ struct UploadDispatch {
 fn dispatch_upload(request: UploadDispatch) {
     let UploadDispatch {
         run_in_background,
+        repo,
         url,
-        payload,
         api_key,
         user_id,
-        commit_sha,
+        seeds,
+        ignore_patterns,
         commit_short,
         source,
     } = request;
@@ -732,6 +1277,10 @@ fn dispatch_upload(request: UploadDispatch) {
     } else {
         "inline"
     };
+    let commit_sha = seeds
+        .first()
+        .map(|seed| seed.commit_sha.clone())
+        .unwrap_or_default();
     let debug_context = UploadDebugContext {
         commit_sha: commit_sha.clone(),
         commit_short: commit_short.clone(),
@@ -740,6 +1289,80 @@ fn dispatch_upload(request: UploadDispatch) {
     };
 
     run_upload_task(run_in_background, move || {
+        let _upload_activity_lock = match acquire_upload_activity_lock(&debug_context) {
+            Ok(lock) => lock,
+            Err(error) => {
+                crate::diagnostics::append_debug_event(
+                    "upload_stats_failed",
+                    json!({
+                        "commitSha": commit_sha.as_str(),
+                        "commitShort": commit_short.as_str(),
+                        "source": source.as_str(),
+                        "mode": upload_mode,
+                        "url": url.as_str(),
+                        "error": error,
+                        "hasApiKey": api_key.is_some(),
+                        "hasUserId": user_id.is_some(),
+                    }),
+                );
+                return;
+            }
+        };
+
+        let mut status_index = load_upload_status_index(&repo);
+        let batch =
+            match prepare_upload_batch(&repo, &mut status_index, &seeds, &ignore_patterns, &source)
+            {
+                Ok(batch) => batch,
+                Err(error) => {
+                    let _ = save_upload_status_index(&repo, &status_index);
+                    crate::diagnostics::append_debug_event(
+                        "upload_stats_skipped",
+                        json!({
+                            "reason": "payload_build_failed",
+                            "commitSha": commit_sha.as_str(),
+                            "commitShort": commit_short.as_str(),
+                            "source": source.as_str(),
+                            "mode": upload_mode,
+                            "repo": repo.canonical_workdir().to_string_lossy().to_string(),
+                            "error": error,
+                        }),
+                    );
+                    log_warn(&format!(
+                        "skipping upload for {} because payload build failed: {}",
+                        commit_short, error
+                    ));
+                    return;
+                }
+            };
+
+        crate::diagnostics::append_debug_event(
+            "upload_stats_payload_build_succeeded",
+            json!({
+                "commitSha": commit_sha.as_str(),
+                "commitShort": commit_short.as_str(),
+                "source": source.as_str(),
+                "mode": upload_mode,
+                "repo": repo.canonical_workdir().to_string_lossy().to_string(),
+                "payloadSummary": batch.payload_summary.clone(),
+            }),
+        );
+
+        mark_upload_attempt_started(&mut status_index, &batch.commit_shas, now_epoch_ms());
+        if let Err(error) = save_upload_status_index(&repo, &status_index) {
+            crate::diagnostics::append_debug_event(
+                "upload_stats_status_save_failed",
+                json!({
+                    "commitSha": commit_sha.as_str(),
+                    "commitShort": commit_short.as_str(),
+                    "source": source.as_str(),
+                    "mode": upload_mode,
+                    "repo": repo.canonical_workdir().to_string_lossy().to_string(),
+                    "error": error,
+                }),
+            );
+        }
+
         log_info(&format!(
             "starting upload for {} mode={} url={} has_api_key={} has_user_id={}",
             commit_short,
@@ -751,19 +1374,19 @@ fn dispatch_upload(request: UploadDispatch) {
         crate::diagnostics::append_debug_event(
             "upload_stats_started",
             json!({
-                "commitSha": commit_sha,
-                "commitShort": commit_short,
-                "source": source,
+                "commitSha": commit_sha.as_str(),
+                "commitShort": commit_short.as_str(),
+                "source": source.as_str(),
                 "mode": upload_mode,
-                "url": url,
+                "url": url.as_str(),
                 "hasApiKey": api_key.is_some(),
                 "hasUserId": user_id.is_some(),
-                "payloadSummary": upload_payload_summary(&payload),
+                "payloadSummary": batch.payload_summary.clone(),
             }),
         );
-        match perform_upload(
+        match perform_upload_with_lock_held(
             &url,
-            &payload,
+            &batch.payload,
             api_key.as_deref(),
             user_id.as_deref(),
             &debug_context,
@@ -772,30 +1395,63 @@ fn dispatch_upload(request: UploadDispatch) {
                 crate::diagnostics::append_debug_event(
                     "upload_stats_failed",
                     json!({
-                        "commitSha": commit_sha,
-                        "commitShort": commit_short,
-                        "source": source,
+                        "commitSha": commit_sha.as_str(),
+                        "commitShort": commit_short.as_str(),
+                        "source": source.as_str(),
                         "mode": upload_mode,
-                        "url": url,
-                        "error": err,
+                        "url": url.as_str(),
+                        "error": err.as_str(),
                         "hasApiKey": api_key.is_some(),
                         "hasUserId": user_id.is_some(),
                     }),
                 );
+                mark_upload_failed(&mut status_index, &batch.commit_shas, &err, now_epoch_ms());
+                if let Err(error) = save_upload_status_index(&repo, &status_index) {
+                    crate::diagnostics::append_debug_event(
+                        "upload_stats_status_save_failed",
+                        json!({
+                            "commitSha": commit_sha.as_str(),
+                            "commitShort": commit_short.as_str(),
+                            "source": source.as_str(),
+                            "mode": upload_mode,
+                            "repo": repo.canonical_workdir().to_string_lossy().to_string(),
+                            "error": error,
+                        }),
+                    );
+                }
                 log_warn(&format!("upload failed for {}: {}", commit_short, err));
             }
             Ok(status_code) => {
                 crate::diagnostics::append_debug_event(
                     "upload_stats_succeeded",
                     json!({
-                        "commitSha": commit_sha,
-                        "commitShort": commit_short,
-                        "source": source,
+                        "commitSha": commit_sha.as_str(),
+                        "commitShort": commit_short.as_str(),
+                        "source": source.as_str(),
                         "mode": upload_mode,
-                        "url": url,
+                        "url": url.as_str(),
                         "statusCode": status_code,
                     }),
                 );
+                mark_upload_succeeded(
+                    &mut status_index,
+                    &batch.commit_shas,
+                    status_code,
+                    now_epoch_ms(),
+                );
+                if let Err(error) = save_upload_status_index(&repo, &status_index) {
+                    crate::diagnostics::append_debug_event(
+                        "upload_stats_status_save_failed",
+                        json!({
+                            "commitSha": commit_sha.as_str(),
+                            "commitShort": commit_short.as_str(),
+                            "source": source.as_str(),
+                            "mode": upload_mode,
+                            "repo": repo.canonical_workdir().to_string_lossy().to_string(),
+                            "error": error,
+                        }),
+                    );
+                }
                 log_info(&format!("uploaded stats for {}", commit_short));
             }
         }
@@ -897,14 +1553,13 @@ fn upload_payload_summary(payload: &Value) -> Value {
     })
 }
 
-fn perform_upload(
+fn perform_upload_with_lock_held(
     url: &str,
     payload: &Value,
     api_key: Option<&str>,
     user_id: Option<&str>,
     debug_context: &UploadDebugContext,
 ) -> Result<u16, String> {
-    let _upload_activity_lock = acquire_upload_activity_lock(debug_context)?;
     let mut last_error = None;
 
     for attempt in 1..=UPLOAD_MAX_ATTEMPTS {
@@ -1167,17 +1822,7 @@ fn response_body_excerpt(body: &[u8]) -> String {
         .unwrap_or_else(|_| format!("<{} bytes non-utf8>", body.len()))
 }
 
-/// Build the batch JSON payload for a single commit (matches the spec-kit
-/// `upload-ai-stats.ps1` schema 1:1).
-fn build_payload(
-    repo: &Repository,
-    commit_sha: &str,
-    authorship_log: &AuthorshipLog,
-    stats: &CommitStats,
-) -> Result<Value, String> {
-    build_payload_with_source(repo, commit_sha, authorship_log, stats, "auto")
-}
-
+#[cfg(test)]
 fn build_payload_with_source(
     repo: &Repository,
     commit_sha: &str,
@@ -1185,10 +1830,17 @@ fn build_payload_with_source(
     stats: &CommitStats,
     source: &str,
 ) -> Result<Value, String> {
+    let commit_entry = build_commit_entry(repo, commit_sha, authorship_log, stats)?;
+    build_payload_from_commit_entries(repo, vec![Value::Object(commit_entry)], source)
+}
+
+fn build_commit_entry(
+    repo: &Repository,
+    commit_sha: &str,
+    authorship_log: &AuthorshipLog,
+    stats: &CommitStats,
+) -> Result<Map<String, Value>, String> {
     let workdir = repo.canonical_workdir().to_path_buf();
-    let repo_url = git_repo_url(&workdir);
-    let project_name = derive_project_name(repo_url.as_deref(), &workdir);
-    let branch = git_current_branch(&workdir);
     let (commit_message, commit_author, commit_timestamp) =
         git_commit_metadata(&workdir, commit_sha)
             .ok_or_else(|| "failed to read commit metadata".to_string())?;
@@ -1209,6 +1861,23 @@ fn build_payload_with_source(
     commit_entry.insert("stats".to_string(), stats_json);
     commit_entry.insert("prompts".to_string(), Value::Array(prompt_stats));
 
+    Ok(commit_entry)
+}
+
+fn build_payload_from_commit_entries(
+    repo: &Repository,
+    commit_entries: Vec<Value>,
+    source: &str,
+) -> Result<Value, String> {
+    if commit_entries.is_empty() {
+        return Err("payload must contain at least one commit".to_string());
+    }
+
+    let workdir = repo.canonical_workdir().to_path_buf();
+    let repo_url = git_repo_url(&workdir);
+    let project_name = derive_project_name(repo_url.as_deref(), &workdir);
+    let branch = git_current_branch(&workdir);
+
     let payload = json!({
         "repoUrl": repo_url.unwrap_or_default(),
         "projectName": project_name,
@@ -1217,7 +1886,7 @@ fn build_payload_with_source(
         "reviewDocumentId": Value::Null,
         "authorshipSchemaVersion": AUTHORSHIP_LOG_VERSION,
         "clientContext": build_client_context(),
-        "commits": [Value::Object(commit_entry)],
+        "commits": commit_entries,
     });
 
     Ok(payload)
@@ -1962,8 +2631,138 @@ mod tests {
             Duration::from_millis(10),
         );
 
-        assert!(acquired.is_some(), "lock should become available after worker exits");
+        assert!(
+            acquired.is_some(),
+            "lock should become available after worker exits"
+        );
         worker.join().expect("worker join");
+    }
+
+    #[test]
+    fn note_status_resets_to_not_uploaded_when_note_blob_changes() {
+        let mut index = UploadStatusIndex::default();
+        let commit_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+        ensure_note_status_record(&mut index, commit_sha, Some("old-blob".to_string()), 1);
+        mark_upload_succeeded(&mut index, &[commit_sha.to_string()], 200, 2);
+
+        let record =
+            ensure_note_status_record(&mut index, commit_sha, Some("new-blob".to_string()), 3);
+
+        assert_eq!(record.upload_status, NoteUploadStatus::NotUploaded);
+        assert_eq!(record.note_blob_oid.as_deref(), Some("new-blob"));
+        assert_eq!(record.last_status_code, None);
+        assert_eq!(record.last_error, None);
+    }
+
+    #[test]
+    fn prepare_upload_batch_includes_failed_note_with_current_commit() {
+        let tmp_repo = TmpRepo::new().expect("tmp repo");
+
+        tmp_repo
+            .write_file("first.txt", "first\n", true)
+            .expect("write first file");
+        tmp_repo
+            .trigger_checkpoint_with_author("test_user")
+            .expect("first checkpoint");
+        tmp_repo
+            .commit_with_message("first commit")
+            .expect("first commit");
+        let first_sha = tmp_repo.get_head_commit_sha().expect("first sha");
+
+        let mut status_index = UploadStatusIndex::default();
+        let first_blob = note_blob_oid_for_commit(tmp_repo.gitai_repo(), &first_sha);
+        ensure_note_status_record(&mut status_index, &first_sha, first_blob, 1);
+        mark_upload_failed(&mut status_index, &[first_sha.clone()], "network down", 2);
+
+        tmp_repo
+            .write_file("second.txt", "second\n", true)
+            .expect("write second file");
+        tmp_repo
+            .trigger_checkpoint_with_author("test_user")
+            .expect("second checkpoint");
+        let second_authorship = tmp_repo
+            .commit_with_message("second commit")
+            .expect("second commit");
+        let second_sha = tmp_repo.get_head_commit_sha().expect("second sha");
+        let second_stats =
+            stats_for_commit_stats(tmp_repo.gitai_repo(), &second_sha, &[]).expect("second stats");
+
+        let batch = prepare_upload_batch(
+            tmp_repo.gitai_repo(),
+            &mut status_index,
+            &[UploadCandidateSeed {
+                commit_sha: second_sha.clone(),
+                authorship_log: Some(second_authorship),
+                stats: Some(second_stats),
+            }],
+            &[],
+            "auto",
+        )
+        .expect("batch should be prepared");
+
+        assert_eq!(
+            batch.commit_shas,
+            vec![second_sha.clone(), first_sha.clone()]
+        );
+        let commits = batch.payload["commits"].as_array().expect("commits array");
+        let commit_shas = commits
+            .iter()
+            .map(|commit| commit["commitSha"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(commit_shas, vec![second_sha, first_sha]);
+    }
+
+    #[test]
+    fn prepare_upload_batch_registers_new_notes_without_immediate_backlog_upload() {
+        let tmp_repo = TmpRepo::new().expect("tmp repo");
+
+        tmp_repo
+            .write_file("first.txt", "first\n", true)
+            .expect("write first file");
+        tmp_repo
+            .trigger_checkpoint_with_author("test_user")
+            .expect("first checkpoint");
+        tmp_repo
+            .commit_with_message("first commit")
+            .expect("first commit");
+        let first_sha = tmp_repo.get_head_commit_sha().expect("first sha");
+
+        tmp_repo
+            .write_file("second.txt", "second\n", true)
+            .expect("write second file");
+        tmp_repo
+            .trigger_checkpoint_with_author("test_user")
+            .expect("second checkpoint");
+        let second_authorship = tmp_repo
+            .commit_with_message("second commit")
+            .expect("second commit");
+        let second_sha = tmp_repo.get_head_commit_sha().expect("second sha");
+        let second_stats =
+            stats_for_commit_stats(tmp_repo.gitai_repo(), &second_sha, &[]).expect("second stats");
+
+        let mut status_index = UploadStatusIndex::default();
+        let batch = prepare_upload_batch(
+            tmp_repo.gitai_repo(),
+            &mut status_index,
+            &[UploadCandidateSeed {
+                commit_sha: second_sha.clone(),
+                authorship_log: Some(second_authorship),
+                stats: Some(second_stats),
+            }],
+            &[],
+            "auto",
+        )
+        .expect("batch should be prepared");
+
+        assert_eq!(batch.commit_shas, vec![second_sha]);
+        assert_eq!(
+            status_index
+                .notes
+                .get(&first_sha)
+                .map(|record| record.upload_status),
+            Some(NoteUploadStatus::NotUploaded)
+        );
     }
 
     #[test]
@@ -2070,7 +2869,10 @@ mod tests {
         )
         .expect("payload");
 
-        assert_eq!(payload["clientContext"]["gitAiCliVersion"], git_ai_cli_version());
+        assert_eq!(
+            payload["clientContext"]["gitAiCliVersion"],
+            git_ai_cli_version()
+        );
         assert_eq!(payload["clientContext"]["gitAiPluginVersion"], "0.9.2");
         assert_eq!(payload["clientContext"]["ideName"], "VS Code");
         assert_eq!(payload["clientContext"]["ideVersion"], "1.100.2");

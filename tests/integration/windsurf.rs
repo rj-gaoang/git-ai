@@ -590,10 +590,7 @@ fn test_ai_checkpoint_not_skipped_after_same_content_known_human() {
         .unwrap();
 
     let mut file = repo.filename("same_content_race.txt");
-    file.assert_committed_lines(crate::lines![
-        "base".unattributed_human(),
-        "ai line".ai(),
-    ]);
+    file.assert_committed_lines(crate::lines!["base".unattributed_human(), "ai line".ai(),]);
 }
 
 /// Verifies that after the AI post-edit checkpoint completes (clearing pending

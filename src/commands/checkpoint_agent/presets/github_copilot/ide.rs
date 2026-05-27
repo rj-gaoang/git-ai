@@ -176,12 +176,12 @@ pub(super) fn parse_vscode_native_hooks(
     // Extract file paths from tool_input and tool_response only (not session-level data)
     let (mut extracted_paths, mut path_extraction_source) =
         extract_filepaths_from_current_copilot_tool_call(
-        tool_input,
-        tool_response,
-        cwd,
-        &tool_use_id,
-        tool_name,
-    );
+            tool_input,
+            tool_response,
+            cwd,
+            &tool_use_id,
+            tool_name,
+        );
 
     let transcript_path = transcript_path_from_hook_data(data)
         .or_else(|| chat_session_path_from_hook_data(data))
@@ -213,12 +213,8 @@ pub(super) fn parse_vscode_native_hooks(
     if extracted_paths.is_empty()
         && let Some(path) = transcript_path.as_deref()
     {
-        extracted_paths = extract_filepaths_from_exact_copilot_tool_call(
-            path,
-            &tool_use_id,
-            tool_name,
-            cwd,
-        );
+        extracted_paths =
+            extract_filepaths_from_exact_copilot_tool_call(path, &tool_use_id, tool_name, cwd);
         if !extracted_paths.is_empty() {
             path_extraction_source = CopilotPathExtractionSource::ExactTranscriptToolCall;
         }
@@ -437,7 +433,8 @@ fn extract_filepaths_from_current_copilot_tool_call(
         }
     }
 
-    let fallback_paths = super::extract_filepaths_from_vscode_hook_payload(tool_input, tool_response, cwd);
+    let fallback_paths =
+        super::extract_filepaths_from_vscode_hook_payload(tool_input, tool_response, cwd);
     let source = if fallback_paths.is_empty() {
         CopilotPathExtractionSource::None
     } else {
@@ -497,7 +494,8 @@ fn extract_filepaths_from_copilot_event_stream_jsonl(
             continue;
         };
 
-        if let Some(paths) = find_matching_copilot_tool_call_paths(&entry, tool_use_id, tool_name, cwd)
+        if let Some(paths) =
+            find_matching_copilot_tool_call_paths(&entry, tool_use_id, tool_name, cwd)
             && !paths.is_empty()
         {
             return paths;
@@ -542,12 +540,12 @@ fn find_matching_copilot_tool_call_paths(
     }
 
     match value {
-        serde_json::Value::Object(map) => map
-            .values()
-            .find_map(|child| find_matching_copilot_tool_call_paths(child, tool_use_id, tool_name, cwd)),
-        serde_json::Value::Array(items) => items
-            .iter()
-            .find_map(|child| find_matching_copilot_tool_call_paths(child, tool_use_id, tool_name, cwd)),
+        serde_json::Value::Object(map) => map.values().find_map(|child| {
+            find_matching_copilot_tool_call_paths(child, tool_use_id, tool_name, cwd)
+        }),
+        serde_json::Value::Array(items) => items.iter().find_map(|child| {
+            find_matching_copilot_tool_call_paths(child, tool_use_id, tool_name, cwd)
+        }),
         _ => None,
     }
 }
@@ -679,7 +677,8 @@ fn derive_chat_session_path_from_transcript(
 }
 
 fn infer_copilot_transcript_format(path: &str) -> TranscriptFormat {
-    let is_workspace_storage = path.contains("/workspaceStorage/") || path.contains("\\workspaceStorage\\");
+    let is_workspace_storage =
+        path.contains("/workspaceStorage/") || path.contains("\\workspaceStorage\\");
     let is_jsonl = Path::new(path)
         .extension()
         .and_then(|ext| ext.to_str())
@@ -1285,7 +1284,10 @@ mod tests {
                 assert_eq!(e.context.agent_id.model, "copilot/gpt-5.4");
                 assert_eq!(e.file_paths, vec![cwd.join("src/main.rs")]);
                 assert_eq!(
-                    e.context.metadata.get("chat_session_path").map(String::as_str),
+                    e.context
+                        .metadata
+                        .get("chat_session_path")
+                        .map(String::as_str),
                     Some(chat_session_path.to_string_lossy().as_ref())
                 );
                 assert!(matches!(
@@ -1422,7 +1424,9 @@ mod tests {
         std::fs::create_dir_all(&cwd).unwrap();
 
         let workspace_storage = temp.path().join("workspaceStorage").join("abc");
-        let transcript_dir = workspace_storage.join("GitHub.copilot-chat").join("transcripts");
+        let transcript_dir = workspace_storage
+            .join("GitHub.copilot-chat")
+            .join("transcripts");
         std::fs::create_dir_all(&transcript_dir).unwrap();
 
         let transcript_path = transcript_dir.join("session.jsonl");
@@ -1460,7 +1464,10 @@ mod tests {
             ParsedHookEvent::PostFileEdit(e) => {
                 assert_eq!(e.context.agent_id.model, "copilot/gpt-5.4-mini");
                 assert_eq!(
-                    e.context.metadata.get("chat_session_path").map(String::as_str),
+                    e.context
+                        .metadata
+                        .get("chat_session_path")
+                        .map(String::as_str),
                     Some(chat_session_path.to_string_lossy().as_ref())
                 );
                 assert_eq!(e.file_paths, vec![cwd.join("src/main.rs")]);

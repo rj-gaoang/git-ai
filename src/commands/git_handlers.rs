@@ -421,7 +421,8 @@ mod tests {
 
     #[test]
     fn post_commit_followups_require_successful_commit() {
-        let commit = parse_git_cli_args(&["commit".to_string(), "-m".to_string(), "msg".to_string()]);
+        let commit =
+            parse_git_cli_args(&["commit".to_string(), "-m".to_string(), "msg".to_string()]);
         let push = parse_git_cli_args(&["push".to_string()]);
 
         assert!(should_run_post_commit_followups(&commit, true));
