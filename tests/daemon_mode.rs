@@ -3782,6 +3782,62 @@ fn daemon_restart_when_not_running_starts_fresh() {
     );
 }
 
+#[cfg(windows)]
+#[test]
+#[serial]
+fn daemon_start_refuses_replacement_runtime_when_blocked_pid_cannot_be_killed() {
+    let repo =
+        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::NoDaemon);
+    let config = DaemonConfig::from_home(&repo.daemon_home_path());
+
+    fs::create_dir_all(
+        config
+            .lock_path
+            .parent()
+            .expect("daemon lock path should have a parent"),
+    )
+    .expect("failed to create daemon lock parent directory");
+    let held_lock =
+        DaemonLock::acquire(&config.lock_path).expect("should acquire daemon lock for test");
+
+    let pid_metadata_path = config
+        .lock_path
+        .parent()
+        .expect("daemon lock path should have a parent")
+        .join("daemon.pid.json");
+    fs::write(
+        &pid_metadata_path,
+        json!({
+            "pid": 4,
+            "started_at_ns": 1,
+        })
+        .to_string(),
+    )
+    .expect("failed to write daemon pid metadata");
+
+    let active_runtime_meta_path = config.internal_dir.join("daemon").join("active-runtime.json");
+
+    let output = bg_command(&repo, "start", &[]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        !output.status.success(),
+        "bg start should fail when the blocked daemon PID cannot be recovered"
+    );
+    assert!(
+        stderr.contains("failed to recover unhealthy daemon pid 4")
+            && stderr.contains("refusing to activate a replacement runtime"),
+        "bg start should explain that replacement runtimes are refused while the original daemon still owns the lock: {}",
+        stderr
+    );
+    assert!(
+        !active_runtime_meta_path.exists(),
+        "bg start should not create active-runtime.json when the original daemon lock is still owned"
+    );
+
+    drop(held_lock);
+}
+
 fn process_exists(pid: u32) -> bool {
     #[cfg(unix)]
     {

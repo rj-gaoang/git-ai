@@ -16,6 +16,48 @@ use std::env;
 use std::io::IsTerminal;
 use std::io::Read;
 
+fn install_maintenance_marker_path() -> Option<std::path::PathBuf> {
+    config::internal_dir_path().map(|dir| dir.join("install-maintenance.json"))
+}
+
+fn install_maintenance_block_reason(args: &[String]) -> Option<&'static str> {
+    let command = args.first()?.as_str();
+    match command {
+        "checkpoint" => Some("checkpoint"),
+        "bg" | "d" | "daemon" => match args.get(1).map(String::as_str) {
+            Some("start") => Some("bg start"),
+            Some("run") => Some("bg run"),
+            Some("restart") => Some("bg restart"),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn maybe_exit_for_install_maintenance(args: &[String]) {
+    let Some(reason) = install_maintenance_block_reason(args) else {
+        return;
+    };
+
+    let Some(marker_path) = install_maintenance_marker_path() else {
+        return;
+    };
+
+    if !marker_path.exists() {
+        return;
+    }
+
+    if is_interactive_terminal() {
+        eprintln!(
+            "git-ai install maintenance active; skipping {} while update is in progress ({})",
+            reason,
+            marker_path.display()
+        );
+    }
+
+    std::process::exit(0);
+}
+
 pub fn handle_git_ai(args: &[String]) {
     let perf_entry =
         if std::env::var("GIT_AI_DEBUG_PERFORMANCE").is_ok_and(|v| !v.is_empty() && v != "0") {
@@ -28,6 +70,8 @@ pub fn handle_git_ai(args: &[String]) {
         print_help();
         return;
     }
+
+    maybe_exit_for_install_maintenance(args);
 
     // Initialize the global telemetry handle so that observability and CAS
     // events are routed over the control socket instead of being written to
@@ -1303,7 +1347,35 @@ fn exit_with_log_status(status: std::process::ExitStatus) -> ! {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_head_rev, parse_upload_stats_args};
+    use super::{
+        install_maintenance_block_reason, normalize_head_rev, parse_upload_stats_args,
+    };
+
+    #[test]
+    fn install_maintenance_blocks_checkpoint_commands() {
+        let args = vec!["checkpoint".to_string(), "github-copilot".to_string()];
+        assert_eq!(install_maintenance_block_reason(&args), Some("checkpoint"));
+    }
+
+    #[test]
+    fn install_maintenance_blocks_daemon_start_run_restart() {
+        let start = vec!["bg".to_string(), "start".to_string()];
+        let run = vec!["daemon".to_string(), "run".to_string()];
+        let restart = vec!["d".to_string(), "restart".to_string()];
+
+        assert_eq!(install_maintenance_block_reason(&start), Some("bg start"));
+        assert_eq!(install_maintenance_block_reason(&run), Some("bg run"));
+        assert_eq!(install_maintenance_block_reason(&restart), Some("bg restart"));
+    }
+
+    #[test]
+    fn install_maintenance_allows_other_commands() {
+        let shutdown = vec!["bg".to_string(), "shutdown".to_string()];
+        let status = vec!["status".to_string()];
+
+        assert_eq!(install_maintenance_block_reason(&shutdown), None);
+        assert_eq!(install_maintenance_block_reason(&status), None);
+    }
 
     #[test]
     fn upload_stats_defaults_to_head_and_manual_source() {
