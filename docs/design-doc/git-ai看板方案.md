@@ -88,6 +88,8 @@ Speckit 是团队使用的「规范驱动开发」框架，通过 `.specify/` �
 
 > **实施补充（2026-05-31，自动上传 activity lock 超时兜底）**：黄芳机器 `debug(11).jsonl` 已经能看到 `post_commit_*`、`upload_stats_ready` 和 `upload_stats_started`，说明安装 / post-commit 入口已经恢复；真正阻断上传的是本地 `C:\Users\admin\.git-ai\internal\upload_activity.lock` 在 5 秒内不可用，且失败前没有任何 `upload_stats_http_request_ready` / `upload_stats_http_response_received`。当前 `git-ai` 自动上传路径调整为：后台 / inline 自动上传等待 activity lock 超时后，额外写入 `upload_stats_activity_lock_bypassed`，并继续按 best-effort 发送 HTTP，避免陈旧锁或旧 runtime 残留句柄让统计结果永久停在本地锁之前；手动 `git-ai upload-stats` 仍保持 30 秒严格等待，不绕过锁，避免用户主动补传时并发改写本地上传状态。
 
+> **实施补充（2026-06-01，Windows daemon blocked startup 不再切 replacement runtime）**：继续结合黄芳机器 `install-v2.2.22-20260529082319.log` 与 `debug(11).jsonl` 排查后确认，`upload_stats_activity_lock_timeout` 背后不只是“锁等待不够久”，而是当时机器上已经同时存在 52 个 `git-ai.exe` 进程，多数为 `bg run`。真正放大问题的控制点在 daemon 恢复逻辑：旧实现遇到 `daemon.lock` 被占用、control/trace socket 不可用且 `taskkill` 无法回收旧 PID 时，会继续激活 replacement runtime，导致多套 daemon runtime 并存，再一起争用全局 `upload_activity.lock`。当前 `git-ai/src/commands/daemon.rs` 已改为：若 `hard_kill_daemon_pid(...)` 失败，则直接保留 blocked startup 错误，拒绝激活 replacement runtime，从根上阻断多 daemon 扩散。对应回归测试 `daemon_start_refuses_replacement_runtime_when_blocked_pid_cannot_be_killed`、`checkpoint_fails_hard_when_daemon_startup_is_blocked`、`daemon_restart_when_not_running_starts_fresh` 已通过。
+
 ---
 
 ## 一、现状分析——我们手里有什么牌？
@@ -696,7 +698,7 @@ if (-not $gitAiCmd) {
 4. 上传成功后，本次 batch 里的所有 note 标成 `succeeded`；如果本地 note blob id 后续变化，状态自动回到 `not_uploaded`，避免上传状态与实际 note 内容脱节。
 5. 首次扫描发现的历史 note 只先登记状态，不立即全部拖进当前 batch；后续上传按 `GIT_AI_UPLOAD_BACKLOG_LIMIT`（默认 25）逐步补传，失败记录优先于未上传记录。
 6. async daemon 路径由后台服务执行上传；sync wrapper 路径以内联方式完成上传，避免宿主进程过快退出导致上传线程被带死。HTTP timeout 为 20 秒，上传失败不影响 commit 成功。
-7. async daemon 启动阶段如果遇到 `daemon.lock` 被占用但 control / trace socket 不可用，`git-ai` 会先等待同伴进程完成启动；若超时且能从 `daemon.pid.json` 读到 pid，会自动强制回收旧 daemon 并拉起新 daemon。若 Windows 拒绝结束旧进程（例如旧 daemon 由更高权限进程拉起），新版会激活一套 replacement daemon runtime / pipe，并直接更新全局 Git 配置文件里的 trace2 指向，避免继续被旧锁和旧 pipe 困住。
+7. async daemon 启动阶段如果遇到 `daemon.lock` 被占用但 control / trace socket 不可用，`git-ai` 会先等待同伴进程完成启动；若超时且能从 `daemon.pid.json` 读到 pid，会自动强制回收旧 daemon 并拉起新 daemon。若 Windows 拒绝结束旧进程（例如旧 daemon 由更高权限进程拉起），当前实现会保留 blocked startup 错误并拒绝激活 replacement runtime，避免多个 `bg run` 在不同 runtime 下继续并存、共同争用全局 `upload_activity.lock`。
 
 ### 3.3 路径 B 详细实施：`upload-ai-stats.ps1` 主动上传脚本
 
@@ -2476,7 +2478,7 @@ GitHub Copilot VS Code native hook 的补充说明：当 hook payload 因为脱�
 |-------------|---------|---------------|
 | **git-ai 安装失败**（网络问题、权限问题） | `post-init.ps1` 打印 Warning 但不报错退出，Speckit 其他功能正常使用 | git-ai 是"锦上添花"，不是 Speckit 的核心依赖，安装失败不应阻塞开发 |
 | **git-ai 原生自动上传失败 / 超时** | `post_commit` 里的原生上传只做 best-effort；payload 组装失败、网络错误、非 2xx 响应都只记 debug 日志并跳过，不中断 commit | 即时上传是增强能力，不能为了网络成功率牺牲 commit 成功率 |
-| **git-ai background service 启动被锁阻塞**（旧版常见：`daemon startup blocked: lock held at ...daemon.lock`；新版恢复失败时可能带 `failed to recover unhealthy daemon pid ... taskkill ... 拒绝访问`） | 这是本机 daemon 连接 / 启动问题，不是远程 API 上传失败。报错 1 表示旧版看到锁后直接失败；报错 2 表示新版已经识别出旧 daemon 不健康并尝试 `taskkill`，但 Windows 权限拒绝结束旧进程。最快恢复仍是执行 `git-ai bg restart --hard`；新版在 `taskkill` 被拒绝时会自动切换到 replacement daemon runtime / pipe，并直接改写全局 `.gitconfig` 中的 trace2 指向，后续 commit / checkpoint 不再继续撞旧锁或旧 pipe | `daemon.lock` 是进程级互斥锁，不能靠手动删除文件安全恢复；但 Windows 权限拒绝时，普通进程也不能保证杀掉旧 daemon，所以需要“换 runtime 继续服务”作为最终兜底 |
+| **git-ai background service 启动被锁阻塞**（旧版常见：`daemon startup blocked: lock held at ...daemon.lock`；新版恢复失败时可能带 `failed to recover unhealthy daemon pid ... taskkill ... 拒绝访问`） | 这是本机 daemon 连接 / 启动问题，不是远程 API 上传失败。报错 1 表示旧版看到锁后直接失败；报错 2 表示新版已经识别出旧 daemon 不健康并尝试 `taskkill`，但 Windows 权限拒绝结束旧进程。最快恢复仍是执行 `git-ai bg restart --hard`；当前实现不会再在 `taskkill` 被拒绝时自动切换 replacement runtime，而是保留 blocked startup 错误，避免继续制造新的 `bg run` 进程去争用全局上传锁 | `daemon.lock` 是进程级互斥锁，不能靠手动删除文件安全恢复；Windows 权限拒绝时也不能继续靠“换 runtime”掩盖问题，否则会把一个坏 daemon 扩散成多套 daemon runtime |
 | **upload-ai-stats.ps1 上传失败**（API 不可达） | 一次批量请求失败时整批标记失败；若服务端返回 `results[]`，则按 commit 维度展示"N 成功, M 失败" | 降低请求次数，同时保留按 commit 追踪失败的能力 |
 | **Code Review 时 git-ai 未安装** | 步骤 8.3 检测到 `git-ai --version` 失败后，直接跳到步骤 9，审查报告正常生成但没有 AI 统计表格 | 审查报告的核心价值是代码质量问题，AI 统计是附加信息 |
 | **某个 commit 没有 AI authorship note** | 仍然调用 `git-ai stats <sha> --json`，但将 `hasAuthorshipNote=false` 且把该 commit 归到 `unknownAdditions` 视图 | 最新 `stats` 已能表达“没有归因 note，但有新增行”的情况，直接跳过会丢失有效数据 |
@@ -2967,11 +2969,11 @@ git-ai upload-stats --dry-run --ignore '*.md' --ignore 'src/generated/**' HEAD
 | Windows 手动兜底 | 从 `$HOME\.git-ai\internal\daemon\daemon.pid.json` 读取 pid 后执行 `taskkill /F /T /PID <pid>` |
 | 禁止动作 | 不建议手动删除 `daemon.lock`，因为 Windows 下它代表仍有进程持有独占句柄 |
 | 两类报错含义 | 旧版 `daemon startup blocked: lock held` 表示发现锁后直接失败；新版 `failed to recover unhealthy daemon pid ... taskkill ... 拒绝访问` 表示已经尝试回收旧 daemon，但 Windows 权限拒绝结束该进程 |
-| 代码级自恢复 | `ensure_daemon_running` 遇到锁占用时先等待已有 daemon 完成启动；若 socket 持续不可用且 pid 可读，自动强制回收旧 daemon 并重启；若回收被拒绝，则激活 replacement daemon runtime / pipe，并直接更新全局 Git 配置文件中的 trace2 指向新 runtime，避免 `git config` 子进程也被旧坏 pipe 卡住 |
+| 代码级自恢复 | `ensure_daemon_running` 遇到锁占用时先等待已有 daemon 完成启动；若 socket 持续不可用且 pid 可读，自动强制回收旧 daemon 并重启；若回收被拒绝，则直接保留 blocked startup 错误并拒绝激活 replacement runtime，避免把一个坏 daemon 扩散成多套 `bg run` runtime |
 
 **当前效果：**
 
-正常的 daemon 启动竞争会被等待吸收；daemon 进程存活但 socket 异常的情况会自动重启恢复。若 Windows 拒绝结束旧 daemon，新版不再把恢复完全寄托在 `taskkill` 上，而是换一套 runtime / pipe 继续服务。trace2 刷新走文件级配置更新，避免旧坏 pipe 影响恢复动作。只有在 pid 元数据缺失、replacement runtime 也无法启动、或全局 Git 配置文件无法写入时，才需要人工介入。
+正常的 daemon 启动竞争会被等待吸收；daemon 进程存活但 socket 异常的情况会自动重启恢复。若 Windows 拒绝结束旧 daemon，当前实现不会再换一套 runtime / pipe 继续服务，而是明确保留 blocked startup 错误，阻断新的 daemon 扩散。这样做的取舍是：宁可把异常保留在一个明确错误上，也不再把一个坏 daemon 扩散成多套 runtime 后共同争用全局 `upload_activity.lock`。只有在 pid 元数据缺失、锁长期不释放、或需要现场清理旧残留进程时，才需要人工介入。
 
 ### 2026-04-27：安装链路补充“自动更新到目标最新版本”与“自定义 GitHub 仓库来源”
 

@@ -14,7 +14,7 @@ use crate::config::{Config, PromptStorageMode};
 use crate::error::GitAiError;
 use crate::git::refs::notes_add;
 use crate::git::repository::Repository;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io::IsTerminal;
 
 /// Skip expensive post-commit stats when this threshold is exceeded.
@@ -111,6 +111,7 @@ pub fn post_commit_with_final_state(
         update_prompts_to_latest(checkpoints)?;
         Ok(())
     })?;
+    let checkpoint_summary = checkpoint_input_debug_summary(&parent_working_log);
     crate::diagnostics::append_debug_event(
         "post_commit_working_log_loaded",
         serde_json::json!({
@@ -119,6 +120,7 @@ pub fn post_commit_with_final_state(
             "parentSha": parent_sha,
             "checkpointCount": parent_working_log.len(),
             "checkpointEntryCount": parent_working_log.iter().map(|checkpoint| checkpoint.entries.len()).sum::<usize>(),
+            "checkpointSummary": checkpoint_summary.clone(),
         }),
     );
 
@@ -383,6 +385,26 @@ pub fn post_commit_with_final_state(
                 "statsSummary": commit_stats_debug_summary(&computed),
             }),
         );
+        if should_log_attribution_gap(&computed) {
+            crate::diagnostics::append_debug_event(
+                "post_commit_attribution_gap_detected",
+                serde_json::json!({
+                    "repo": repo.canonical_workdir().to_string_lossy().to_string(),
+                    "commitSha": commit_sha,
+                    "parentSha": parent_sha,
+                    "reason": "all_added_lines_unknown",
+                    "statsSummary": commit_stats_debug_summary(&computed),
+                    "promptSummary": prompt_debug_summary(&authorship_log),
+                    "sessionCount": authorship_log.metadata.sessions.len(),
+                    "attestationFileCount": authorship_log.attestations.len(),
+                    "pathspecCount": pathspecs.len(),
+                    "initialCarryOverFileCount": initial_attributions.files.len(),
+                    "initialCarryOverPromptCount": initial_attributions.prompts.len(),
+                    "initialCarryOverHumanCount": initial_attributions.humans.len(),
+                    "checkpointSummary": checkpoint_summary.clone(),
+                }),
+            );
+        }
         // Record metrics only when we have full stats.
         record_commit_metrics(
             repo,
@@ -589,6 +611,72 @@ fn commit_stats_debug_summary(stats: &crate::authorship::stats::CommitStats) -> 
         "gitDiffDeletedLines": stats.git_diff_deleted_lines,
         "toolModelBreakdownCount": stats.tool_model_breakdown.len(),
     })
+}
+
+fn checkpoint_input_debug_summary(checkpoints: &[Checkpoint]) -> serde_json::Value {
+    let mut checkpoint_kind_counts: BTreeMap<String, usize> = BTreeMap::new();
+    let mut checkpoint_kind_files: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut all_files: BTreeSet<String> = BTreeSet::new();
+    let mut ai_checkpoint_count = 0usize;
+    let mut ai_entry_count = 0usize;
+
+    for checkpoint in checkpoints {
+        let kind = checkpoint.kind.to_str();
+        *checkpoint_kind_counts.entry(kind.clone()).or_insert(0) += 1;
+        if checkpoint.kind.is_ai() {
+            ai_checkpoint_count += 1;
+        }
+
+        let files_for_kind = checkpoint_kind_files.entry(kind).or_default();
+        for entry in &checkpoint.entries {
+            all_files.insert(entry.file.clone());
+            files_for_kind.insert(entry.file.clone());
+            if checkpoint.kind.is_ai() {
+                ai_entry_count += 1;
+            }
+        }
+    }
+
+    let kind_summary: BTreeMap<String, serde_json::Value> = checkpoint_kind_counts
+        .iter()
+        .map(|(kind, count)| {
+            let files = checkpoint_kind_files.get(kind).cloned().unwrap_or_default();
+            (
+                kind.clone(),
+                serde_json::json!({
+                    "checkpointCount": count,
+                    "uniqueFileCount": files.len(),
+                    "uniqueFileSample": sample_checkpoint_files(&files, 5),
+                }),
+            )
+        })
+        .collect();
+
+    serde_json::json!({
+        "checkpointCount": checkpoints.len(),
+        "checkpointEntryCount": checkpoints.iter().map(|checkpoint| checkpoint.entries.len()).sum::<usize>(),
+        "checkpointKindsPresent": checkpoint_kind_counts.keys().cloned().collect::<Vec<_>>(),
+        "checkpointKindCounts": checkpoint_kind_counts,
+        "uniqueFileCount": all_files.len(),
+        "uniqueFileSample": sample_checkpoint_files(&all_files, 10),
+        "kindSummary": kind_summary,
+        "aiCheckpointCount": ai_checkpoint_count,
+        "aiEntryCount": ai_entry_count,
+        "onlyKnownHuman": checkpoint_kind_counts.len() == 1 && checkpoint_kind_counts.contains_key("known_human"),
+        "onlySingleFile": all_files.len() == 1,
+    })
+}
+
+fn sample_checkpoint_files(files: &BTreeSet<String>, limit: usize) -> Vec<String> {
+    files.iter().take(limit).cloned().collect()
+}
+
+fn should_log_attribution_gap(stats: &crate::authorship::stats::CommitStats) -> bool {
+    stats.git_diff_added_lines > 0
+        && stats.ai_additions == 0
+        && stats.human_additions == 0
+        && stats.mixed_additions == 0
+        && stats.unknown_additions == stats.git_diff_added_lines
 }
 
 fn stats_skip_reason_debug(reason: Option<&StatsSkipReason>) -> serde_json::Value {
@@ -1137,5 +1225,96 @@ mod tests {
             !should_skip_expensive_post_commit_stats(&all_zero),
             "All zero values should not skip"
         );
+    }
+
+    #[test]
+    fn test_checkpoint_input_debug_summary_groups_kinds_and_files() {
+        let ai_checkpoint = Checkpoint::new(
+            CheckpointKind::AiAgent,
+            String::new(),
+            "copilot".to_string(),
+            vec![WorkingLogEntry::new(
+                "src/main.rs".to_string(),
+                "sha-ai".to_string(),
+                Vec::new(),
+                Vec::new(),
+            )],
+        );
+        let known_human_checkpoint = Checkpoint::new(
+            CheckpointKind::KnownHuman,
+            String::new(),
+            "liuwang".to_string(),
+            vec![
+                WorkingLogEntry::new(
+                    ".gitignore".to_string(),
+                    "sha-ignore".to_string(),
+                    Vec::new(),
+                    Vec::new(),
+                ),
+                WorkingLogEntry::new(
+                    "src/lib.rs".to_string(),
+                    "sha-lib".to_string(),
+                    Vec::new(),
+                    Vec::new(),
+                ),
+            ],
+        );
+        let human_checkpoint = Checkpoint::new(
+            CheckpointKind::Human,
+            String::new(),
+            "liuwang".to_string(),
+            vec![WorkingLogEntry::new(
+                "src/lib.rs".to_string(),
+                "sha-human".to_string(),
+                Vec::new(),
+                Vec::new(),
+            )],
+        );
+
+        let summary = checkpoint_input_debug_summary(&[
+            ai_checkpoint,
+            known_human_checkpoint,
+            human_checkpoint,
+        ]);
+
+        assert_eq!(summary["checkpointCount"], serde_json::json!(3));
+        assert_eq!(summary["checkpointEntryCount"], serde_json::json!(4));
+        assert_eq!(summary["checkpointKindCounts"]["ai_agent"], serde_json::json!(1));
+        assert_eq!(summary["checkpointKindCounts"]["known_human"], serde_json::json!(1));
+        assert_eq!(summary["checkpointKindCounts"]["human"], serde_json::json!(1));
+        assert_eq!(summary["aiCheckpointCount"], serde_json::json!(1));
+        assert_eq!(summary["aiEntryCount"], serde_json::json!(1));
+        assert_eq!(summary["uniqueFileCount"], serde_json::json!(3));
+        assert_eq!(
+            summary["kindSummary"]["known_human"]["uniqueFileCount"],
+            serde_json::json!(2)
+        );
+        assert_eq!(summary["onlyKnownHuman"], serde_json::json!(false));
+        assert_eq!(summary["onlySingleFile"], serde_json::json!(false));
+    }
+
+    #[test]
+    fn test_should_log_attribution_gap_only_for_all_unknown_additions() {
+        let all_unknown = crate::authorship::stats::CommitStats {
+            unknown_additions: 849,
+            git_diff_added_lines: 849,
+            ..Default::default()
+        };
+        assert!(should_log_attribution_gap(&all_unknown));
+
+        let with_human = crate::authorship::stats::CommitStats {
+            human_additions: 1,
+            unknown_additions: 848,
+            git_diff_added_lines: 849,
+            ..Default::default()
+        };
+        assert!(!should_log_attribution_gap(&with_human));
+
+        let deletion_only = crate::authorship::stats::CommitStats {
+            git_diff_added_lines: 0,
+            unknown_additions: 0,
+            ..Default::default()
+        };
+        assert!(!should_log_attribution_gap(&deletion_only));
     }
 }
