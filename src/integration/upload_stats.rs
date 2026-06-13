@@ -1913,7 +1913,7 @@ fn stats_to_camel_case(stats: &CommitStats, files: Vec<Value>) -> Value {
         let (tool, model) = normalize_tool_model(Some(split_tool.as_str()), split_model.as_deref());
         tool_breakdown.push(json!({
             "tool": tool,
-            "model": model,
+            "model": model_or_unknown(model),
             "aiAdditions": value.ai_additions,
             "aiAccepted": value.ai_accepted,
             "mixedAdditions": value.mixed_additions,
@@ -1950,7 +1950,7 @@ fn build_prompt_stats(prompts: &BTreeMap<String, PromptRecord>) -> Vec<Value> {
             json!({
                 "promptHash": prompt_hash,
                 "tool": tool,
-                "model": model,
+                "model": model_or_unknown(model),
                 "humanAuthor": prompt.human_author.as_ref().and_then(|value| trim_non_empty(value)),
                 "promptText": extract_prompt_text(&prompt.messages),
                 "messages": serialize_prompt_messages(&prompt.messages),
@@ -1997,6 +1997,10 @@ fn trim_non_empty(value: &str) -> Option<String> {
     } else {
         Some(trimmed.to_string())
     }
+}
+
+fn model_or_unknown(model: Option<String>) -> String {
+    model.unwrap_or_else(|| "unknown".to_string())
 }
 
 fn tool_family_key(value: &str) -> Option<String> {
@@ -2430,7 +2434,7 @@ mod tests {
     }
 
     #[test]
-    fn build_prompt_stats_defaults_unknown_tool_and_null_prompt_text() {
+    fn build_prompt_stats_defaults_unknown_tool_and_model_and_null_prompt_text() {
         let mut prompts = BTreeMap::new();
         prompts.insert(
             "prompt-empty".to_string(),
@@ -2453,9 +2457,29 @@ mod tests {
 
         let payload = build_prompt_stats(&prompts);
         assert_eq!(payload[0]["tool"], "unknown");
-        assert!(payload[0]["model"].is_null());
+        assert_eq!(payload[0]["model"], "unknown");
         assert!(payload[0]["promptText"].is_null());
         assert_eq!(payload[0]["messages"], json!([]));
+    }
+
+    #[test]
+    fn stats_to_camel_case_defaults_missing_model_to_unknown() {
+        let mut stats = CommitStats::default();
+        stats.tool_model_breakdown.insert(
+            "cursor".to_string(),
+            crate::authorship::stats::ToolModelHeadlineStats {
+                ai_additions: 1,
+                ai_accepted: 1,
+                mixed_additions: 0,
+                total_ai_additions: 1,
+                total_ai_deletions: 0,
+                time_waiting_for_ai: 0,
+            },
+        );
+
+        let payload = stats_to_camel_case(&stats, Vec::new());
+        assert_eq!(payload["toolModelBreakdown"][0]["tool"], "cursor");
+        assert_eq!(payload["toolModelBreakdown"][0]["model"], "unknown");
     }
 
     #[test]
