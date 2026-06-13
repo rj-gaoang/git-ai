@@ -33,8 +33,8 @@ fn build_candidate_paths(
     repo_workdir: Option<&Path>,
     vscode_override: Option<&OsStr>,
     idea_override: Option<&OsStr>,
-    appdata: Option<&OsStr>,
-    localappdata: Option<&OsStr>,
+    _appdata: Option<&OsStr>,
+    _localappdata: Option<&OsStr>,
     _home_dir: Option<&Path>,
 ) -> Vec<PathBuf> {
     let mut paths = Vec::new();
@@ -56,7 +56,7 @@ fn build_candidate_paths(
 
     #[cfg(windows)]
     {
-        if let Some(appdata) = appdata {
+        if let Some(appdata) = _appdata {
             let appdata = Path::new(appdata);
             push_unique(
                 &mut paths,
@@ -81,7 +81,7 @@ fn build_candidate_paths(
             );
         }
 
-        if let Some(localappdata) = localappdata {
+        if let Some(localappdata) = _localappdata {
             push_unique(
                 &mut paths,
                 &mut seen,
