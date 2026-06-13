@@ -1,0 +1,95 @@
+upload-install-test.ps1
+  s_61f80d25b5397b::t_16280d09209bb8 37-41
+  s_61f80d25b5397b::t_6621beda4d4d98 311-312,332-333
+  s_61f80d25b5397b::t_b8a4545e965421 1-15,19-36,42-201,206-288,290-310,313-328,330-331,334-338,340-355,362-379
+  s_61f80d25b5397b::t_c83b17fe2e3cfa 356-361
+  s_61f80d25b5397b::t_c31d237943da57 16-18,202-205,289,329,339
+---
+{
+  "schema_version": "authorship/3.1.0",
+  "git_ai_version": "2.2.20",
+  "x_user_id": "108",
+  "base_commit_sha": "51450fa9b9c68401a247e06b428d669068dc114d",
+  "prompts": {
+    "s_61f80d25b5397b::t_16280d09209bb8": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "1d2b3762-d077-4641-bcee-fc53a3ebb897",
+        "model": "copilot/gpt-5.5"
+      },
+      "human_author": "gaoang <gaoang@ruijie.com.cn>",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 5,
+      "overriden_lines": 0
+    },
+    "s_61f80d25b5397b::t_6621beda4d4d98": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "1d2b3762-d077-4641-bcee-fc53a3ebb897",
+        "model": "copilot/gpt-5.5"
+      },
+      "human_author": "gaoang <gaoang@ruijie.com.cn>",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 4,
+      "overriden_lines": 0
+    },
+    "s_61f80d25b5397b::t_b8a4545e965421": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "1d2b3762-d077-4641-bcee-fc53a3ebb897",
+        "model": "copilot/gpt-5.5"
+      },
+      "human_author": "gaoang <gaoang@ruijie.com.cn>",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 354,
+      "overriden_lines": 0
+    },
+    "s_61f80d25b5397b::t_c31d237943da57": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "1d2b3762-d077-4641-bcee-fc53a3ebb897",
+        "model": "copilot/gpt-5.5"
+      },
+      "human_author": "gaoang <gaoang@ruijie.com.cn>",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 10,
+      "overriden_lines": 0
+    },
+    "s_61f80d25b5397b::t_c83b17fe2e3cfa": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "1d2b3762-d077-4641-bcee-fc53a3ebb897",
+        "model": "copilot/gpt-5.5"
+      },
+      "human_author": "gaoang <gaoang@ruijie.com.cn>",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 6,
+      "overriden_lines": 0
+    }
+  },
+  "humans": {
+    "h_413aef030e07df": {
+      "author": "gaoang <gaoang@ruijie.com.cn>"
+    }
+  },
+  "sessions": {
+    "s_61f80d25b5397b": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "1d2b3762-d077-4641-bcee-fc53a3ebb897",
+        "model": "copilot/gpt-5.5"
+      },
+      "human_author": "gaoang <gaoang@ruijie.com.cn>"
+    }
+  }
+}

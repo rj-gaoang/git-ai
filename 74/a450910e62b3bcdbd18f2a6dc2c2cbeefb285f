@@ -1,0 +1,126 @@
+src/daemon.rs
+  s_1d12813bdfb252::t_f31cc5572c3e6e 9288-9291,9293-9297,9302-9332
+  s_1d12813bdfb252::t_11d39960abf69a 4136-4155,8330-8333,8347-8353,8499-8501,8514,8523-8529,8531-8542,8548-8549,8553,9286-9287,9292,9298-9301,9333-9334
+README.md
+  s_1d12813bdfb252::t_11d39960abf69a 245
+---
+{
+  "schema_version": "authorship/3.1.0",
+  "git_ai_version": "2.2.4",
+  "x_user_id": "108",
+  "base_commit_sha": "74a450910e62b3bcdbd18f2a6dc2c2cbeefb285f",
+  "prompts": {
+    "s_1d12813bdfb252::t_11d39960abf69a": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "addeff52-ad7b-4ff7-89a2-e5738998a8e8",
+        "model": "copilot/gpt-5.4"
+      },
+      "human_author": "gaoang <gaoang@ruijie.com.cn>",
+      "messages": [],
+      "total_additions": 133,
+      "total_deletions": 29,
+      "accepted_lines": 9968,
+      "overriden_lines": 0
+    },
+    "s_1d12813bdfb252::t_f31cc5572c3e6e": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "addeff52-ad7b-4ff7-89a2-e5738998a8e8",
+        "model": "copilot/gpt-5.4"
+      },
+      "human_author": "gaoang <gaoang@ruijie.com.cn>",
+      "messages": [
+        {
+          "type": "user",
+          "text": "PS D:\\rj-op\\op-return-exchange>  这个项目最进一次commit，为什么没有自动更新我的git-ai版本，可以根据日志排查问题C:\\Users\\admin\\.git-ai\\logs，现在最新的稳定版本是2.2.1",
+          "timestamp": "2026-05-11T12:18:38.091Z"
+        },
+        {
+          "type": "user",
+          "text": "https://github.com/rj-gaoang/git-ai/releases/tag/v2.2.1 最新的下载源就是2.2.1，这是我自己的仓库",
+          "timestamp": "2026-05-11T12:29:02.593Z"
+        },
+        {
+          "type": "user",
+          "text": "我不要手工升级，我就要能够自动升级，应该怎么改",
+          "timestamp": "2026-05-11T12:35:19.927Z"
+        },
+        {
+          "type": "user",
+          "text": "不用管已安装的用户，我的要求就是本次修改完，以后可以正常更新",
+          "timestamp": "2026-05-11T12:54:21.295Z"
+        },
+        {
+          "type": "user",
+          "text": "PS D:\\rj-op\\op-return-exchange> git-ai --version   还是2.1.20，没有更新到最新版2.2.1，而且代码已经commit，但是当前卡住了，一直显示正在commit",
+          "timestamp": "2026-05-11T13:32:37.634Z"
+        },
+        {
+          "type": "user",
+          "text": "1. 现在git-ai的自动更新为什么还会阻塞住其他进程，其他用户也可能会安装失败，不能阻塞用户的正常使用啊 ",
+          "timestamp": "2026-05-11T13:52:29.320Z"
+        },
+        {
+          "type": "user",
+          "text": "刚才PS D:\\rj-op\\op-return-exchange> 已经提交了代码，版本还是2.1.21，没有更新版本",
+          "timestamp": "2026-05-11T14:38:19.465Z"
+        },
+        {
+          "type": "user",
+          "text": "为什么这么难呢？为什么还要等git-ai.exe 关闭？我直接执行irm https://github.com/rj-gaoang/git-ai/releases/download/v2.2.2/install.ps1 | iex  都不用等关闭，直接可以执行成功",
+          "timestamp": "2026-05-11T14:56:04.591Z"
+        },
+        {
+          "type": "user",
+          "text": "打断后会有什么后果，安装完成后不时会有个新的git-ai.exe吗",
+          "timestamp": "2026-05-11T15:09:21.808Z"
+        },
+        {
+          "type": "user",
+          "text": "这也是为什么手工 irm | iex 看起来“直接就能成”，而自动更新不能总这么做。你手工装的时候，脚本可以默认认为“你允许我把正在跑的 git-ai 全停掉”；但自动更新如果也这么干，它等于在用户正常工作中途自杀式重启自己，这个副作用太大了。为什么手工安装就可以“默认认为“你允许我把正在跑的 git-ai 全停掉””？自动更新就不可以？",
+          "timestamp": "2026-05-11T15:12:51.648Z"
+        },
+        {
+          "type": "user",
+          "text": "那应该怎么办？你现在的修复方案是什么？",
+          "timestamp": "2026-05-11T15:18:27.510Z"
+        },
+        {
+          "type": "user",
+          "text": "现在我还未提交的这部分代码有什么作用？\r\n",
+          "timestamp": "2026-05-11T15:30:36.256Z"
+        },
+        {
+          "type": "user",
+          "text": "PS D:\\rj-op\\op-return-exchange> 最近一次提交还是没有更新，现在最新版本是2.2.3",
+          "timestamp": "2026-05-11T16:06:06.905Z"
+        },
+        {
+          "type": "user",
+          "text": "自动更新也采用类似手工更新：“后台强杀进程”的方式，允许自动更新打断 git-ai 进程",
+          "timestamp": "2026-05-12T06:48:45.342Z"
+        },
+        {
+          "type": "user",
+          "text": "PS D:\\rj-op\\op-return-exchange>  刚才最近一次提交，归因结果没有上传到远程看板，git-ai版本也没有自动升级成2.2.5",
+          "timestamp": "2026-05-12T07:25:46.813Z"
+        }
+      ],
+      "total_additions": 133,
+      "total_deletions": 29,
+      "accepted_lines": 40,
+      "overriden_lines": 0
+    }
+  },
+  "sessions": {
+    "s_1d12813bdfb252": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "addeff52-ad7b-4ff7-89a2-e5738998a8e8",
+        "model": "copilot/gpt-5.4"
+      },
+      "human_author": "gaoang <gaoang@ruijie.com.cn>"
+    }
+  }
+}

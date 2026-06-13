@@ -1,0 +1,502 @@
+src/authorship/virtual_attribution.rs
+  s_c6a77bed6d547a::t_61d549f442eecc 107-108,2268-2275,2860-2862
+src/commands/upgrade.rs
+  s_c6a77bed6d547a::t_61d549f442eecc 406-407,437,441-444,666-668,700,713-718,998-1001,1003-1006,1516,1521-1524,1543
+tests/integration/windsurf.rs
+  s_c6a77bed6d547a::t_61d549f442eecc 593
+src/integration/upload_stats.rs
+  s_1927bb380036f5::t_11c4da42ea921a 2717-2759,2764-2767
+  s_1927bb380036f5::t_e03421e88379bd 2760-2763
+  s_1927bb380036f5::t_e8c708ab0313a7 559-571
+  s_c6a77bed6d547a::t_61d549f442eecc 31-32,36,38-39,41,52-54,118-121,200-424,435-544,546,548-557,572-589,591-596,604-700,745-746,884,921,926,930-935,1030-1055,1057,1078,1095,1113,1120,1124-1138,1157,1161,1163,1180-1198,1223-1241,1253,1257-1258,1266,1270-1271,1280-1283,1292-1365,1377-1379,1381,1384,1387,1389,1398-1400,1402-1403,1408-1421,1428-1430,1432,1436-1454,1556,1825-1826,1831,1833-1834,1837,1842,1864-1880,1889,2634-2637,2714-2716,2872-2875
+  s_1927bb380036f5::t_1699829622791d 545,547,558,590,597-603
+  s_1927bb380036f5::t_a2f02a56d7b908 2641-2713
+  s_1927bb380036f5::t_ae8449d739131e 55,741-744
+src/commands/checkpoint_agent/presets/github_copilot/ide.rs
+  s_c6a77bed6d547a::t_61d549f442eecc 179-184,216-217,436-437,497-498,543-548,680-681,1287-1290,1427-1429,1467-1470
+src/commands/git_handlers.rs
+  s_c6a77bed6d547a::t_61d549f442eecc 424-425
+docs/design-doc/git-ai看板方案.md
+  s_1927bb380036f5::t_d8522c161c7772 29,84
+  s_1927bb380036f5::t_f57e6d6008dc07 688-690
+  s_1927bb380036f5::t_ecb1a26d465847 83,663,680,691-693,2417
+README.md
+  s_1927bb380036f5::t_88495e69de9324 141-146
+  s_1927bb380036f5::t_3d0b68b5de7fea 140
+src/transcripts/model_extraction.rs
+  s_c6a77bed6d547a::t_61d549f442eecc 13-15,49-51,211,376-377,393-394,420-421,437-438
+src/daemon/checkpoint.rs
+  s_c6a77bed6d547a::t_61d549f442eecc 583-585
+src/authorship/prompt_utils.rs
+  s_c6a77bed6d547a::t_61d549f442eecc 65-67,207-209,232-233,279-280
+---
+{
+  "schema_version": "authorship/3.1.0",
+  "git_ai_version": "2.2.22",
+  "x_user_id": "108",
+  "base_commit_sha": "6f80435010ef02535bb85c45697cdfee03062a0b",
+  "prompts": {
+    "s_1927bb380036f5::t_09bed556d3a471": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "6ac74f15-a8cf-4ec2-8e47-5db6292c98d5",
+        "model": "copilot/gpt-5.5"
+      },
+      "human_author": "VS Code <vscode@users.noreply.github.com>",
+      "messages": [],
+      "total_additions": 1033,
+      "total_deletions": 228,
+      "accepted_lines": 0,
+      "overriden_lines": 0
+    },
+    "s_1927bb380036f5::t_0dc092c47595e3": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "6ac74f15-a8cf-4ec2-8e47-5db6292c98d5",
+        "model": "copilot/gpt-5.5"
+      },
+      "human_author": "VS Code <vscode@users.noreply.github.com>",
+      "messages": [],
+      "total_additions": 1033,
+      "total_deletions": 228,
+      "accepted_lines": 0,
+      "overriden_lines": 0
+    },
+    "s_1927bb380036f5::t_0dc8cf3ab15219": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "6ac74f15-a8cf-4ec2-8e47-5db6292c98d5",
+        "model": "copilot/gpt-5.5"
+      },
+      "human_author": "VS Code <vscode@users.noreply.github.com>",
+      "messages": [],
+      "total_additions": 1033,
+      "total_deletions": 228,
+      "accepted_lines": 0,
+      "overriden_lines": 0
+    },
+    "s_1927bb380036f5::t_11c4da42ea921a": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "6ac74f15-a8cf-4ec2-8e47-5db6292c98d5",
+        "model": "copilot/gpt-5.5"
+      },
+      "human_author": "VS Code <vscode@users.noreply.github.com>",
+      "messages": [],
+      "total_additions": 1033,
+      "total_deletions": 228,
+      "accepted_lines": 48,
+      "overriden_lines": 0
+    },
+    "s_1927bb380036f5::t_1699829622791d": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "6ac74f15-a8cf-4ec2-8e47-5db6292c98d5",
+        "model": "copilot/gpt-5.5"
+      },
+      "human_author": "VS Code <vscode@users.noreply.github.com>",
+      "messages": [],
+      "total_additions": 1033,
+      "total_deletions": 228,
+      "accepted_lines": 11,
+      "overriden_lines": 0
+    },
+    "s_1927bb380036f5::t_1782acb43ecb1f": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "6ac74f15-a8cf-4ec2-8e47-5db6292c98d5",
+        "model": "copilot/gpt-5.5"
+      },
+      "human_author": "VS Code <vscode@users.noreply.github.com>",
+      "messages": [],
+      "total_additions": 1033,
+      "total_deletions": 228,
+      "accepted_lines": 0,
+      "overriden_lines": 0
+    },
+    "s_1927bb380036f5::t_1f566c564d43b3": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "6ac74f15-a8cf-4ec2-8e47-5db6292c98d5",
+        "model": "copilot/gpt-5.5"
+      },
+      "human_author": "VS Code <vscode@users.noreply.github.com>",
+      "messages": [],
+      "total_additions": 1033,
+      "total_deletions": 228,
+      "accepted_lines": 0,
+      "overriden_lines": 0
+    },
+    "s_1927bb380036f5::t_276ee8b7677bc1": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "6ac74f15-a8cf-4ec2-8e47-5db6292c98d5",
+        "model": "copilot/gpt-5.5"
+      },
+      "human_author": "VS Code <vscode@users.noreply.github.com>",
+      "messages": [],
+      "total_additions": 1033,
+      "total_deletions": 228,
+      "accepted_lines": 0,
+      "overriden_lines": 0
+    },
+    "s_1927bb380036f5::t_319a0af710485b": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "6ac74f15-a8cf-4ec2-8e47-5db6292c98d5",
+        "model": "copilot/gpt-5.5"
+      },
+      "human_author": "VS Code <vscode@users.noreply.github.com>",
+      "messages": [],
+      "total_additions": 1033,
+      "total_deletions": 228,
+      "accepted_lines": 0,
+      "overriden_lines": 0
+    },
+    "s_1927bb380036f5::t_3d0b68b5de7fea": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "6ac74f15-a8cf-4ec2-8e47-5db6292c98d5",
+        "model": "copilot/gpt-5.5"
+      },
+      "human_author": "VS Code <vscode@users.noreply.github.com>",
+      "messages": [],
+      "total_additions": 1033,
+      "total_deletions": 228,
+      "accepted_lines": 1,
+      "overriden_lines": 0
+    },
+    "s_1927bb380036f5::t_45c954c52a8dba": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "6ac74f15-a8cf-4ec2-8e47-5db6292c98d5",
+        "model": "copilot/gpt-5.5"
+      },
+      "human_author": "VS Code <vscode@users.noreply.github.com>",
+      "messages": [],
+      "total_additions": 1033,
+      "total_deletions": 228,
+      "accepted_lines": 0,
+      "overriden_lines": 0
+    },
+    "s_1927bb380036f5::t_53e1c8a29da8c1": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "6ac74f15-a8cf-4ec2-8e47-5db6292c98d5",
+        "model": "copilot/gpt-5.5"
+      },
+      "human_author": "VS Code <vscode@users.noreply.github.com>",
+      "messages": [],
+      "total_additions": 1033,
+      "total_deletions": 228,
+      "accepted_lines": 0,
+      "overriden_lines": 0
+    },
+    "s_1927bb380036f5::t_57581716b1813e": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "6ac74f15-a8cf-4ec2-8e47-5db6292c98d5",
+        "model": "copilot/gpt-5.5"
+      },
+      "human_author": "VS Code <vscode@users.noreply.github.com>",
+      "messages": [],
+      "total_additions": 1033,
+      "total_deletions": 228,
+      "accepted_lines": 0,
+      "overriden_lines": 0
+    },
+    "s_1927bb380036f5::t_5dd4bd8d5f5b60": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "6ac74f15-a8cf-4ec2-8e47-5db6292c98d5",
+        "model": "copilot/gpt-5.5"
+      },
+      "human_author": "VS Code <vscode@users.noreply.github.com>",
+      "messages": [],
+      "total_additions": 1033,
+      "total_deletions": 228,
+      "accepted_lines": 0,
+      "overriden_lines": 0
+    },
+    "s_1927bb380036f5::t_67d7981e3c71cb": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "6ac74f15-a8cf-4ec2-8e47-5db6292c98d5",
+        "model": "copilot/gpt-5.5"
+      },
+      "human_author": "VS Code <vscode@users.noreply.github.com>",
+      "messages": [],
+      "total_additions": 1033,
+      "total_deletions": 228,
+      "accepted_lines": 0,
+      "overriden_lines": 0
+    },
+    "s_1927bb380036f5::t_7ad59a9bde791c": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "6ac74f15-a8cf-4ec2-8e47-5db6292c98d5",
+        "model": "copilot/gpt-5.5"
+      },
+      "human_author": "VS Code <vscode@users.noreply.github.com>",
+      "messages": [],
+      "total_additions": 1033,
+      "total_deletions": 228,
+      "accepted_lines": 0,
+      "overriden_lines": 0
+    },
+    "s_1927bb380036f5::t_88495e69de9324": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "6ac74f15-a8cf-4ec2-8e47-5db6292c98d5",
+        "model": "copilot/gpt-5.5"
+      },
+      "human_author": "VS Code <vscode@users.noreply.github.com>",
+      "messages": [],
+      "total_additions": 1033,
+      "total_deletions": 228,
+      "accepted_lines": 300,
+      "overriden_lines": 0
+    },
+    "s_1927bb380036f5::t_a2f02a56d7b908": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "6ac74f15-a8cf-4ec2-8e47-5db6292c98d5",
+        "model": "copilot/gpt-5.5"
+      },
+      "human_author": "VS Code <vscode@users.noreply.github.com>",
+      "messages": [],
+      "total_additions": 1033,
+      "total_deletions": 228,
+      "accepted_lines": 75,
+      "overriden_lines": 0
+    },
+    "s_1927bb380036f5::t_a6cf1f7e67dbca": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "6ac74f15-a8cf-4ec2-8e47-5db6292c98d5",
+        "model": "copilot/gpt-5.5"
+      },
+      "human_author": "VS Code <vscode@users.noreply.github.com>",
+      "messages": [],
+      "total_additions": 1033,
+      "total_deletions": 228,
+      "accepted_lines": 0,
+      "overriden_lines": 0
+    },
+    "s_1927bb380036f5::t_ae8449d739131e": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "6ac74f15-a8cf-4ec2-8e47-5db6292c98d5",
+        "model": "copilot/gpt-5.5"
+      },
+      "human_author": "VS Code <vscode@users.noreply.github.com>",
+      "messages": [],
+      "total_additions": 1033,
+      "total_deletions": 228,
+      "accepted_lines": 7,
+      "overriden_lines": 0
+    },
+    "s_1927bb380036f5::t_c92674b92f77d4": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "6ac74f15-a8cf-4ec2-8e47-5db6292c98d5",
+        "model": "copilot/gpt-5.5"
+      },
+      "human_author": "VS Code <vscode@users.noreply.github.com>",
+      "messages": [],
+      "total_additions": 1033,
+      "total_deletions": 228,
+      "accepted_lines": 0,
+      "overriden_lines": 0
+    },
+    "s_1927bb380036f5::t_d8522c161c7772": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "6ac74f15-a8cf-4ec2-8e47-5db6292c98d5",
+        "model": "copilot/gpt-5.5"
+      },
+      "human_author": "VS Code <vscode@users.noreply.github.com>",
+      "messages": [],
+      "total_additions": 1033,
+      "total_deletions": 228,
+      "accepted_lines": 3040,
+      "overriden_lines": 0
+    },
+    "s_1927bb380036f5::t_e03421e88379bd": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "6ac74f15-a8cf-4ec2-8e47-5db6292c98d5",
+        "model": "copilot/gpt-5.5"
+      },
+      "human_author": "VS Code <vscode@users.noreply.github.com>",
+      "messages": [],
+      "total_additions": 1033,
+      "total_deletions": 228,
+      "accepted_lines": 4,
+      "overriden_lines": 0
+    },
+    "s_1927bb380036f5::t_e8c708ab0313a7": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "6ac74f15-a8cf-4ec2-8e47-5db6292c98d5",
+        "model": "copilot/gpt-5.5"
+      },
+      "human_author": "VS Code <vscode@users.noreply.github.com>",
+      "messages": [],
+      "total_additions": 1033,
+      "total_deletions": 228,
+      "accepted_lines": 13,
+      "overriden_lines": 0
+    },
+    "s_1927bb380036f5::t_ec15d27dca1213": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "6ac74f15-a8cf-4ec2-8e47-5db6292c98d5",
+        "model": "copilot/gpt-5.5"
+      },
+      "human_author": "VS Code <vscode@users.noreply.github.com>",
+      "messages": [],
+      "total_additions": 1033,
+      "total_deletions": 228,
+      "accepted_lines": 0,
+      "overriden_lines": 0
+    },
+    "s_1927bb380036f5::t_ecb1a26d465847": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "6ac74f15-a8cf-4ec2-8e47-5db6292c98d5",
+        "model": "copilot/gpt-5.5"
+      },
+      "human_author": "VS Code <vscode@users.noreply.github.com>",
+      "messages": [
+        {
+          "type": "user",
+          "text": "当前用户存在上传失败的问题，为了解决这个问题，现在对于本地的每条notes记录增加标记字段，上传成功后编辑成功，失败后标记失败，未上传标记未上传，每次上传记录时，除了上传本地代码修改对应的notes，还需要一块上传失败以及未上传的记录。在PS D:\\rj-op\\op-return-exchange>项目下，当前分支进行测试，直到测试通过",
+          "timestamp": "2026-05-26T14:19:04.267Z"
+        },
+        {
+          "type": "user",
+          "text": "[Terminal d2a660aa-c7a6-4147-a1f7-6886e0203ff6 notification: command completed with exit code 0. The terminal has been cleaned up.]\nTerminal output:\nPS D:\\git-ai-main> Set-Location git-ai; task fmt; task build\ntask : 无法将“task”项识别为 cmdlet、函数、脚本文件或可运行程序的名称。请检查\n名称的拼写，如果包括路径，请确保路径正确，然后再试一次。\n所在位置 行:1 字符: 22\n+ Set-Location git-ai; task fmt; task build\n+                      ~~~~\n    + CategoryInfo          : ObjectNotFound: (task:String) [], CommandNotFoun \n   dException\n    + FullyQualifiedErrorId : CommandNotFoundException\n \ntask : 无法将“task”项识别为 cmdlet、函数、脚本文件或可运行程序的名称。请检查\n名称的拼写，如果包括路径，请确保路径正确，然后再试一次。\n所在位置 行:1 字符: 32\n+ Set-Location git-ai; task fmt; task build\n+                                ~~~~\n    + CategoryInfo          : ObjectNotFound: (task:String) [], CommandNotFoun \n   dException\n    + FullyQualifiedErrorId : CommandNotFoundException\n \nPS D:\\git-ai-main\\git-ai> Get-Location; cargo fmt; cargo build\n\n    Blocking waiting for file lock on package cache\n   Compiling git-ai v2.2.22 (D:\\git-ai-main\\git-ai)\n    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2m 44s       \nPath                 \n----                 \nD:\\git-ai-main\\git-ai\n\n\n",
+          "timestamp": "2026-05-26T14:41:59.619Z"
+        },
+        {
+          "type": "user",
+          "text": "[Terminal bc06612e-0369-4012-b7c4-7e393322cea1 notification: command completed with exit code 0. The terminal has been cleaned up.]\nTerminal output:\nPS D:\\git-ai-main> $Target='D:\\rj-op\\op-return-exchange'; Set-Location $Target; $notes = git notes --ref=ai list; \"notes_count=$($notes.Count)\"; $statusPath = Join-Path (git rev-parse --git-path ai) 'upload_stats_status.json'; \"status_path=$statusPath\"; if (Test-Path $statusPath) { Get-Item $statusPath | Select-Object \nFullName,Length,LastWriteTime | Format-List } else { 'status_file=missing' }\nnotes_count=111\nstatus_path=.git\\ai\\upload_stats_status.json\nstatus_file=missing\nPS D:\\rj-op\\op-return-exchange> $Target='D:\\rj-op\\op-return-exchange'; $GitAi='D:\\git-ai-main\\git-ai\\target\\debug\\git-ai.exe'; Set-Location $Target; & $GitAi stats HEAD --json | Select-Object -First 1\n{\"human_additions\":0,\"unknown_additions\":0,\"mixed_additions\":0,\"ai_additions\":48,\"ai_accepted\":48,\"total_ai_additions\":48,\"total_ai_deletions\":0,\"time_waiting_for_ai\":0,\"git_diff_deleted_lines\":0,\"git_diff_added_lines\":48,\"tool_model_breakdown\":{\"github-copilot::copilot/gpt-5.4-mini\":{\"ai_additions\":48,\"mixed_additions\":0,\"ai_accepted\":48,\"total_ai_additions\":48,\"total_ai_deletions\":0,\"time_waiting_for_ai\":0}}}\nPS D:\\rj-op\\op-return-exchange> Set-Location D:\\git-ai-main\\git-ai; cargo fmt; cargo test note_status_resets_to_not_uploaded_when_note_blob_changes --lib; cargo test prepare_upload_batch_includes_failed_note_with_current_commit --lib; cargo test prepare_upload_batch_registers_new_notes_without_immediate_backlog_upload \n--lib; cargo build\n   Compiling git-ai v2.2.22 (D:\\git-ai-main\\git-ai)\nwarning: function `pending_status` is never used                               \n   --> src\\integration\\upload_stats.rs:542:4\n    |\n542 | fn pending_status(upload_status: NoteUploadStatus) -> bool {\n    |    ^^^^^^^^^^^^^^\n    |\n    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default\n\nwarning: `git-ai` (lib) generated 1 warning                                    \nwarning: `git-ai` (lib test) generated 1 warning (1 duplicate)                 \n    Finished `test` profile [unoptimized + debuginfo] target(s) in 29.53s\n     Running unittests src\\lib.rs (target\\debug\\deps\\git_ai-731931ffa3d57d99.exe)\n\nrunning 1 test\ntest integration::upload_stats::tests::note_status_resets_to_not_uploaded_when_note_blob_changes ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1602 filtered out; finished in 0.00s\n\nwarning: function `pending_status` is never used\n   --> src\\integration\\upload_stats.rs:542:4\n    |\n542 | fn pending_status(upload_status: NoteUploadStatus) -> bool {\n    |    ^^^^^^^^^^^^^^\n    |\n    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default\n\nwarning: `git-ai` (lib) generated 1 warning\nwarning: `git-ai` (lib test) generated 1 warning (1 duplicate)\n    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.17s\n     Running unittests src\\lib.rs (target\\debug\\deps\\git_ai-731931ffa3d57d99.exe)\n\nrunning 1 test\ntest integration::upload_stats::tests::prepare_upload_batch_includes_failed_note_with_current_commit ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1602 filtered out; finished in 10.93s\n\nwarning: function `pending_status` is never used\n   --> src\\integration\\upload_stats.rs:542:4\n    |\n542 | fn pending_status(upload_status: NoteUploadStatus) -> bool {\n    |    ^^^^^^^^^^^^^^\n    |\n\nwarning: `git-ai` (lib) generated 1 warning\nwarning: `git-ai` (lib test) generated 1 warning (1 duplicate)\n    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.29s\n     Running unittests src\\lib.rs (target\\debug\\deps\\git_ai-731931ffa3d57d99.exe)\n\nrunning 1 test\ntest integration::upload_stats::tests::prepare_upload_batch_registers_new_notes_without_immediate_backlog_upload ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1602 filtered out; finished in 9.94s\n\n   Compiling git-ai v2.2.22 (D:\\git-ai-main\\git-ai)\nwarning: function `pending_status` is never used                               \n   --> src\\integration\\upload_stats.rs:542:4\n    |\n542 | fn pending_status(upload_status: NoteUploadStatus) -> bool {\n    |    ^^^^^^^^^^^^^^\n    |\n    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default\n\nwarning: `git-ai` (lib) generated 1 warning                                    \n    Finished `dev` profile [unoptimized + debuginfo] target(s) in 16.42s       \nPS D:\\git-ai-main\\git-ai> cargo fmt; cargo test note_status_resets_to_not_uploaded_when_note_blob_changes --lib; cargo test prepare_upload_batch_includes_failed_note_with_current_commit --lib; cargo test prepare_upload_batch_registers_new_notes_without_immediate_backlog_upload --lib; cargo build\n   Compiling git-ai v2.2.22 (D:\\git-ai-main\\git-ai)\n    Finished `test` profile [unoptimized + debuginfo] target(s) in 25.95s      \n     Running unittests src\\lib.rs (target\\debug\\deps\\git_ai-731931ffa3d57d99.exe)\n\nrunning 1 test\ntest integration::upload_stats::tests::note_status_resets_to_not_uploaded_when_note_blob_changes ... ok\n\n\n    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.40s\n     Running unittests src\\lib.rs (target\\debug\\deps\\git_ai-731931ffa3d57d99.exe)\n\nrunning 1 test\ntest integration::upload_stats::tests::prepare_upload_batch_includes_failed_note_with_current_commit ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1602 filtered out; finished in 11.29s\n\n    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.15s\n     Running unittests src\\lib.rs (target\\debug\\deps\\git_ai-731931ffa3d57d99.exe)\n\nrunning 1 test\ntest integration::upload_stats::tests::prepare_upload_batch_registers_new_notes_without_immediate_backlog_upload ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1602 filtered out; f\n\n   Compiling git-ai v2.2.22 (D:\\git-ai-main\\git-ai)\n    Finished `dev` profile [unoptimized + debuginfo] target(s) in 11.45s       \nPS D:\\git-ai-main\\git-ai> $Target='D:\\rj-op\\op-return-exchange'; $GitAi='D:\\git-ai-main\\git-ai\\target\\debug\\git-ai.exe'; Set-Location $Target; git status --short; git branch --show-current; git rev-parse HEAD; & $GitAi upload-stats --dry-run\n?? target/test-classes/com/ruijie/opreturnexchange/GeneratedSimpleTestForty.class\n?? target/test-classes/com/ruijie/opreturnexchange/GeneratedSimpleTestFortyOne.class\n?? target/test-classes/com/ruijie/opreturnexchange/GeneratedSimpleTestFortyTwo.class\nai_test\n7eac********a731\n[git-ai] upload-ai-stats: prepared dry-run upload for 7eacb26 source=manual url=https://service-gw.ruijie.com.cn/api/ai-cr-manage-service/api/public/upload/ai-stats\n[git-ai] upload-stats: dry-run 7eacb26 source=manual url=https://service-gw.ruijie.com.cn/api/ai-cr-manage-service/api/public/upload/ai-stats urlSource=built_in_default summary={\"commitCount\":1,\"fileCount\":6,\"firstCommitSha\":\"7eacb26e2524d8hText\":1,\"stats\":{\"aiAdditions\":48,\"gitDiffAddedLines\":48,\"gitDiffDeletedLines\":0,\"humanAdditions\":0,\"unknownAdditions\":0}}\n[git-ai] upload-stats: completed source=manual uploaded=0 dry_run=1 skipped=0 failed=0\nPS D:\\rj-op\\op-return-exchange> $Target='D:\\rj-op\\op-return-exchange'; $GitAi='D:\\git-ai-main\\git-ai\\target\\debug\\git-ai.exe'; Set-Location $Target; & $GitAi upload-stats\n[git-ai] upload-ai-stats: starting manual upload for 7eacb26 source=manual url=https://service-gw.ruijie.com.cn/api/ai-cr-manage-service/api/public/upload/ai-st\n[git-ai] upload-ai-stats: perform_upload url=https://service-gw.ruijie.com.cn/api/ai-cr-manage-service/api/public/upload/ai-stats has_api_key=false has_user_id=true\n[git-ai] upload-ai-stats: perform_upload response status=200 url=https://service-gw.ruijie.com.cn/api/ai-cr-manage-service/api/public/upload/ai-stats\n[git-ai] upload-ai-stats: uploaded manual stats for 7eacb26 source=manual status=200\n[git-ai] upload-stats: uploaded 7eacb26 source=manual status=200 url=https://service-gw.ruijie.com.cn/api/ai-cr-manage-service/api/public/upload/ai-stats\n[git-ai] upload-stats: completed source=manual uploaded=1 dry_run=0 skipped=0 failed=0\nPS D:\\rj-op\\op-return-exchange> $Target='D:\\rj-op\\op-return-exchange'; Set-Location $Target; $statusPath = Join-Path (git rev-parse --git-path ai) 'upload_stats_status.json'; \"status_path=$statusPath\"; $json = Get-Content $statusPath -Raw |Count)\"; $items | ForEach-Object { $_.Value.uploadStatus } | Group-Object | ForEach-Object { \"$($_.Name)=$($_.Count)\" }; $head = git rev-parse HEAD; $headStatus = $json.notes.$head; \"head_status=$($headStatus.uploadStatus)\"; \"head_blob=$($headStatus.noteBlobOid)\"\nstatus_path=.git\\ai\\upload_stats_status.json\ntotal=92\nnot_uploaded=91\nsucceeded=1\nhead_status=succeeded\nhead_blob=4e6b********6646\nPS D:\\rj-op\\op-return-exchange> $Target='D:\\rj-op\\op-return-exchange'; $GitAi='D:\\git-ai-main\\git-ai\\target\\debug\\git-ai.exe'; Set-Location $Target; $env:GIT_AI_UPLOAD_BACKLOG_LIMIT='1'; & $GitAi upload-stats --dry-run; Remove-Item Env:\\GIT_AI_UPLOAD_BACKLOG_LIMIT\n[git-ai] upload-ai-stats: prepared dry-run upload for 7eacb26 source=manual url=https://service-gw.ruijie.com.cn/api/ai-cr-manage-service/api/public/upload/ai-stats\n[git-ai] upload-stats: dry-run 7eacb26 source=manual url=https://service-gw.ruijie.com.cn/api/ai-cr-manage-service/api/public/upload/ai-stats urlSource=built_inhText\":1,\"stats\":{\"aiAdditions\":48,\"gitDiffAddedLines\":48,\"gitDiffDeletedLines\":0,\"humanAdditions\":0,\"unknownAdditions\":0}}\n[git-ai] upload-stats: completed source=manual uploaded=0 dry_run=1 skipped=0 failed=0\nPS D:\\rj-op\\op-return-exchange> $Target='D:\\rj-op\\op-return-exchange'; $GitAi='D:\\git-ai-main\\git-ai\\target\\debug\\git-ai.exe'; Set-Location $Target; $env:GIT_AI_BACKLOG_LIMIT\n[git-ai] upload-ai-stats: starting manual upload for 7eacb26 source=manual url=https://service-gw.ruijie.com.cn/api/ai-cr-manage-service/api/public/upload/ai-stats has_api_key=false has_user_id=true\n[git-ai] upload-ai-stats: perform_upload url=https://service-gw.ruijie.com.cn/api/ai-cr-manage-service/api/public/upload/ai-stats has_api_key=false has_user_id=true\n[git-ai] upload-ai-stats: perform_upload response status=200 url=https://service-gw.ruijie.com.cn/api/ai-cr-manage-service/api/public/upload/ai-stats\n[git-ai] upload-ai-stats: uploaded manual stats for 7eacb26 source=manual status=200\n[git-ai] upload-stats: uploaded 7eacb26 source=manual status=200 url=https://service-gw.ruijie.com.cn/api/ai-cr-manage-service/api/public/upload/ai-stats\n[git-ai] upload-stats: completed source=manual uploaded=1 dry_run=0 skipped=0 failed=0\nPS D:\\rj-op\\op-return-exchange> $Target='D:\\rj-op\\op-return-exchange'; Set-Location $Target; $statusPath = Join-Path (git rev-parse --git-path ai) 'upload_stats_status.json'; $json = Get-Content $statusPath -Raw | ConvertFrom-Json; $items = @($json.notes.PSObject.Properties); \"total=$($items.Count)\"; $items | ForEach-Object { $_.Value.uploadStatus } | Group-Object | ForEach-Object { \"$($_.Name)=$($_.Count)\" }; $head = git rev-parse HEAD; \"head_status=$($json.notes.$head.uploadStatus)\"\ntotal=92\nsucceeded=2\nnot_uploaded=90\nhead_status=succeeded\nPS D:\\rj-op\\op-return-exchange> $Target='D:\\rj-op\\op-return-exchange'; $GitAi='D:\\git-ai-main\\git-ai\\target\\debug\\git-ai.exe'; Set-Location $Target; & $GitAi upload-stats --dry-run\n[git-ai] upload-ai-stats: prepared dry-run upload for 7eacb26 source=manual url=https://service-gw.ruijie.com.cn/api/ai-cr-manage-service/api/public/upload/ai-stats\n[git-ai] upload-stats: dry-run 7eacb26 source=manual url=https://service-gw.ruijie.com.cn/api/ai-cr-manage-service/api/public/upload/ai-stats urlSource=built_in_default summary={\"commitCount\":26,\"fileCount\":6,\"firstCommitSha\":\"7eac********a731\",\"hasAuthorshipNote\":true,\"promptCount\":1,\"promptsWithText\":1,\"stats\":{\"aiAdditions\":48,\"gitDiffAddedLines\":48,\"gitDiffDeletedLines\":0,\"humanAdditions\":0,\"unknownAdditions\":0}}\n[git-ai] upload-stats: completed source=manual uploaded=0 dry_run=1 skipped=0 failed=0\n",
+          "timestamp": "2026-05-26T15:07:48.628Z"
+        },
+        {
+          "type": "user",
+          "text": "[Terminal f157debb-454f-478a-bd4a-5aa962cea5f6 notification: command completed with exit code 0. The terminal has been cleaned up.]\nTerminal output:\nPS D:\\git-ai-main> $Target='D:\\rj-op\\op-return-exchange'; $GitAi='D:\\git-ai-main\\git-ai\\target\\debug\\git-ai.exe'; Set-Location $Target; & $GitAi upload-stats\n[git-ai] upload-ai-stats: starting manual upload for 7eacb26 source=manual url=https://service-gw.ruijie.com.cn/api/ai-cr-manage-service/api/public/upload/ai-stats has_api_key=false has_user_id=true\n[git-ai] upload-ai-stats: perform_upload url=https://service-gw.ruijie.com.cn/api/ai-cr-manage-service/api/public/upload/ai-stats has_api_key=false has_user_id=true\n[git-ai] upload-ai-stats: perform_upload response status=200 url=https://service-gw.ruijie.com.cn/api/ai-cr-manage-service/api/public/upload/ai-stats\n[git-ai] upload-ai-stats: uploaded manual stats for 7eacb26 source=manual status=200\n[git-ai] upload-stats: uploaded 7eacb26 source=manual status=200 url=https://service-gw.ruijie.com.cn/api/ai-cr-manage-service/api/public/upload/ai-stats\n[git-ai] upload-stats: completed source=manual uploaded=1 dry_run=0 skipped=0 failed=0\n\n\n\n\n\n\n\n\n\n\n\n\n\n",
+          "timestamp": "2026-05-26T15:09:26.980Z"
+        },
+        {
+          "type": "user",
+          "text": "为什么我没有看到 D:\\rj-op\\op-return-exchange>的统计结果提交记录",
+          "timestamp": "2026-05-26T15:21:46.069Z"
+        },
+        {
+          "type": "user",
+          "text": "Try Again",
+          "timestamp": "2026-05-26T15:25:32.971Z"
+        },
+        {
+          "type": "user",
+          "text": "git-ai upload-stats命令会上传什么？",
+          "timestamp": "2026-05-27T01:21:00.597Z"
+        },
+        {
+          "type": "user",
+          "text": "我刚才执行了，为什么什么都没上传PS D:\\git-ai-main> git-ai upload-stats  \r\n[git-ai] upload-stats: skipped d75d218 source=manual reason=no_authors\r\n[git-ai] upload-stats: completed source=manual uploaded=0 dry_run=0 sk\r\nPS D:\\git-ai-main> ",
+          "timestamp": "2026-05-27T06:10:27.499Z"
+        },
+        {
+          "type": "user",
+          "text": "怎么查看D:\\rj-op\\op-return-exchange中有哪些记录没有上传",
+          "timestamp": "2026-05-27T06:41:39.097Z"
+        }
+      ],
+      "total_additions": 1033,
+      "total_deletions": 228,
+      "accepted_lines": 7,
+      "overriden_lines": 0
+    },
+    "s_1927bb380036f5::t_f499e72d6756ed": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "6ac74f15-a8cf-4ec2-8e47-5db6292c98d5",
+        "model": "copilot/gpt-5.5"
+      },
+      "human_author": "VS Code <vscode@users.noreply.github.com>",
+      "messages": [],
+      "total_additions": 1033,
+      "total_deletions": 228,
+      "accepted_lines": 0,
+      "overriden_lines": 0
+    },
+    "s_1927bb380036f5::t_f57e6d6008dc07": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "6ac74f15-a8cf-4ec2-8e47-5db6292c98d5",
+        "model": "copilot/gpt-5.5"
+      },
+      "human_author": "VS Code <vscode@users.noreply.github.com>",
+      "messages": [],
+      "total_additions": 1033,
+      "total_deletions": 228,
+      "accepted_lines": 3,
+      "overriden_lines": 0
+    },
+    "s_c6a77bed6d547a::t_61d549f442eecc": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "9dac5a9d-3e85-49d9-9ac1-2ab537cd567b",
+        "model": "copilot/gpt-5.5"
+      },
+      "human_author": "VS Code <vscode@users.noreply.github.com>",
+      "messages": [
+        {
+          "type": "user",
+          "text": "2026-05-25 14:31:23 commit的代码全是AI生成的，为什么没有识别不出来",
+          "timestamp": "2026-05-25T09:03:42.733Z"
+        },
+        {
+          "type": "user",
+          "text": "为什么报错",
+          "timestamp": "2026-05-26T11:57:52.679Z"
+        },
+        {
+          "type": "user",
+          "text": "为什么5月23日之后统计结果没有上传",
+          "timestamp": "2026-05-26T12:52:07.056Z"
+        },
+        {
+          "type": "user",
+          "text": "结合两边日志，判断是否是service安装失败导致git-ai没有上传，并修复这个问题，尽量在service中修复，不要修改git-ai的代码",
+          "timestamp": "2026-05-26T14:31:36.752Z"
+        }
+      ],
+      "total_additions": 163,
+      "total_deletions": 117,
+      "accepted_lines": 2937,
+      "overriden_lines": 0
+    }
+  },
+  "sessions": {
+    "s_1927bb380036f5": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "6ac74f15-a8cf-4ec2-8e47-5db6292c98d5",
+        "model": "copilot/gpt-5.5"
+      },
+      "human_author": "VS Code <vscode@users.noreply.github.com>"
+    },
+    "s_c6a77bed6d547a": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "9dac5a9d-3e85-49d9-9ac1-2ab537cd567b",
+        "model": "copilot/gpt-5.5"
+      },
+      "human_author": "VS Code <vscode@users.noreply.github.com>"
+    }
+  }
+}

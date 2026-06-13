@@ -1,0 +1,13 @@
+---
+{
+  "schema_version": "authorship/3.1.0",
+  "git_ai_version": "2.2.18",
+  "x_user_id": "108",
+  "base_commit_sha": "6b7015d177e40952c09764de5f7afcf0af055487",
+  "prompts": {},
+  "humans": {
+    "h_413aef030e07df": {
+      "author": "gaoang <gaoang@ruijie.com.cn>"
+    }
+  }
+}

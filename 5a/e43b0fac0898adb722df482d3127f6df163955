@@ -1,0 +1,100 @@
+install.ps1
+  s_bdad5c76a217c8::t_ca46fb95a15edf 314-394,588-592,619-623,716-732
+docs/design-doc/git-ai看板方案.md
+  s_bdad5c76a217c8::t_0771b5f4aa3493 85-86
+---
+{
+  "schema_version": "authorship/3.1.0",
+  "git_ai_version": "2.2.23",
+  "x_user_id": "108",
+  "base_commit_sha": "5ae43b0fac0898adb722df482d3127f6df163955",
+  "prompts": {
+    "s_bdad5c76a217c8::t_0771b5f4aa3493": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "5d7bb3a7-0642-4d42-bc41-e8126995c08b",
+        "model": "copilot/gpt-5.4"
+      },
+      "human_author": "gaoang <gaoang@ruijie.com.cn>",
+      "messages": [
+        {
+          "type": "user",
+          "text": "为什么安装失败",
+          "timestamp": "2026-05-25T01:34:52.316Z"
+        },
+        {
+          "type": "user",
+          "text": "为什么安装失败",
+          "timestamp": "2026-05-25T01:34:57.485Z"
+        },
+        {
+          "type": "user",
+          "text": "？",
+          "timestamp": "2026-05-25T02:52:04.112Z"
+        },
+        {
+          "type": "user",
+          "text": "看下日志，为什么报错",
+          "timestamp": "2026-05-25T03:26:08.964Z"
+        },
+        {
+          "type": "user",
+          "text": "怎么是“主失败仍然是下载 GitHub Release 二进制失败”，日志哪一部分说是github？现在url不都是127.16.37.100？$installerUrl = 'http://172.16.37.100:8888/ruijie-ai/install.ps1'",
+          "timestamp": "2026-05-25T03:29:16.157Z"
+        },
+        {
+          "type": "user",
+          "text": "执行的是：& \"$env:ProgramFiles\\RuiJieAIUpdateService\\ruijie-ai-update-service.exe\" stop\r\nirm http://172.16.37.100:8888/ruijie-ai-update-service/install-direct.ps1 | iex，没有执行“http://172.16.37.100:8888/ruijie-ai/install.ps1”",
+          "timestamp": "2026-05-25T03:33:05.444Z"
+        },
+        {
+          "type": "user",
+          "text": "改 install.ps1，让它从内网下载二进制，不再走 GitHub",
+          "timestamp": "2026-05-25T05:43:20.783Z"
+        },
+        {
+          "type": "user",
+          "text": "/git-ai-windows-diagnostics 根据文件夹里的日志排查问题。该用户在2026-05-23 19:47:10仍可上传git-ai 统计记录到远程看板，在这之后就无法上传，而且该用户本地的git-ai版本也没有成功更新到2.2.22，排查问题并修复",
+          "timestamp": "2026-05-27T15:00:16.288Z"
+        },
+        {
+          "type": "user",
+          "text": "/git-ai-windows-diagnostics  1.当前git-ai在/opt/ai-cr/ruijie-ai文件目录下，windows-update-service是在/opt/ai-cr/ruijie-ai-update-service确认是否需要修改代码；2.当前问题是因为自动更新时service停不掉当前正在git-ai正在运行的进程而引起，这个问题需要进行修复",
+          "timestamp": "2026-05-27T15:24:55.396Z"
+        },
+        {
+          "type": "user",
+          "text": "自动安装或更新git-ai版本时不要一直重试，尝试3次失败即可再等待24h",
+          "timestamp": "2026-05-27T15:38:10.637Z"
+        }
+      ],
+      "total_additions": 110,
+      "total_deletions": 9,
+      "accepted_lines": 3052,
+      "overriden_lines": 0
+    },
+    "s_bdad5c76a217c8::t_ca46fb95a15edf": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "5d7bb3a7-0642-4d42-bc41-e8126995c08b",
+        "model": "copilot/gpt-5.4"
+      },
+      "human_author": "gaoang <gaoang@ruijie.com.cn>",
+      "messages": [],
+      "total_additions": 110,
+      "total_deletions": 9,
+      "accepted_lines": 952,
+      "overriden_lines": 0
+    }
+  },
+  "sessions": {
+    "s_bdad5c76a217c8": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "5d7bb3a7-0642-4d42-bc41-e8126995c08b",
+        "model": "copilot/gpt-5.4"
+      },
+      "human_author": "gaoang <gaoang@ruijie.com.cn>"
+    }
+  }
+}
