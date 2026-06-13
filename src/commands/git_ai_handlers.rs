@@ -1347,9 +1347,7 @@ fn exit_with_log_status(status: std::process::ExitStatus) -> ! {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        install_maintenance_block_reason, normalize_head_rev, parse_upload_stats_args,
-    };
+    use super::{install_maintenance_block_reason, normalize_head_rev, parse_upload_stats_args};
 
     #[test]
     fn install_maintenance_blocks_checkpoint_commands() {
@@ -1365,7 +1363,10 @@ mod tests {
 
         assert_eq!(install_maintenance_block_reason(&start), Some("bg start"));
         assert_eq!(install_maintenance_block_reason(&run), Some("bg run"));
-        assert_eq!(install_maintenance_block_reason(&restart), Some("bg restart"));
+        assert_eq!(
+            install_maintenance_block_reason(&restart),
+            Some("bg restart")
+        );
     }
 
     #[test]

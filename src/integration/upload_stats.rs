@@ -827,6 +827,8 @@ pub fn maybe_upload_after_commit(
     commit_sha: &str,
     authorship_log: &AuthorshipLog,
     stats: Option<&CommitStats>,
+    recompute_missing_stats: bool,
+    ignore_patterns: &[String],
 ) {
     let config = crate::config::Config::fresh();
     let feature_flags = config.feature_flags();
@@ -866,10 +868,7 @@ pub fn maybe_upload_after_commit(
         return;
     }
 
-    // Stats are only present when the post-commit fast path computed them.
-    // Without stats we have nothing meaningful to upload (the PowerShell
-    // script effectively did the same thing by calling `git-ai stats`).
-    let Some(stats) = stats else {
+    if stats.is_none() && !recompute_missing_stats {
         crate::diagnostics::append_debug_event(
             "upload_stats_skipped",
             json!({
@@ -886,6 +885,13 @@ pub fn maybe_upload_after_commit(
         return;
     };
 
+    let seed_stats = stats.cloned();
+    let stats_source = if seed_stats.is_some() {
+        "post_commit_fast_path"
+    } else {
+        "background_recompute"
+    };
+
     crate::diagnostics::append_debug_event(
         "upload_stats_payload_build_started",
         json!({
@@ -893,7 +899,10 @@ pub fn maybe_upload_after_commit(
             "commitShort": commit_short,
             "source": "auto",
             "repo": repo.canonical_workdir().to_string_lossy().to_string(),
-            "statsSummary": upload_stats_summary(stats),
+            "statsSource": stats_source,
+            "statsSummary": seed_stats.as_ref().map(upload_stats_summary),
+            "willRecomputeStats": seed_stats.is_none(),
+            "ignorePatternCount": ignore_patterns.len(),
             "promptCount": authorship_log.metadata.prompts.len(),
             "attestationFileCount": authorship_log.attestations.len(),
         }),
@@ -912,12 +921,17 @@ pub fn maybe_upload_after_commit(
             "commitShort": commit_short,
             "source": "auto",
             "repo": repo.canonical_workdir().to_string_lossy().to_string(),
-            "mode": if feature_flags.async_mode { "background" } else { "inline" },
+            "mode": if feature_flags.async_mode {
+                "background"
+            } else {
+                "inline"
+            },
             "url": url,
             "urlSource": url_source,
             "hasApiKey": api_key.is_some(),
             "hasUserId": user_id.is_some(),
             "userIdSource": if explicit_user_id.is_some() { "GIT_AI_REPORT_REMOTE_USER_ID" } else if user_id.is_some() { "ide_mcp_config" } else { "missing" },
+            "statsSource": stats_source,
             "pendingBatch": true,
         }),
     );
@@ -930,9 +944,9 @@ pub fn maybe_upload_after_commit(
         seeds: vec![UploadCandidateSeed {
             commit_sha: commit_sha.to_string(),
             authorship_log: Some(authorship_log.clone()),
-            stats: Some(stats.clone()),
+            stats: seed_stats,
         }],
-        ignore_patterns: Vec::new(),
+        ignore_patterns: ignore_patterns.to_vec(),
         commit_short,
         source: "auto".to_string(),
     });
@@ -2763,6 +2777,44 @@ mod tests {
                 .map(|record| record.upload_status),
             Some(NoteUploadStatus::NotUploaded)
         );
+    }
+
+    #[test]
+    fn prepare_upload_batch_computes_missing_seed_stats() {
+        let tmp_repo = TmpRepo::new().expect("tmp repo");
+
+        tmp_repo
+            .write_file("ai.txt", "first ai line\nsecond ai line\n", true)
+            .expect("write ai file");
+        tmp_repo
+            .trigger_checkpoint_with_ai("Claude", Some("claude-3-sonnet"), Some("cursor"))
+            .expect("ai checkpoint");
+        let authorship_log = tmp_repo
+            .commit_with_message("ai commit")
+            .expect("ai commit");
+        let commit_sha = tmp_repo.get_head_commit_sha().expect("commit sha");
+
+        let mut status_index = UploadStatusIndex::default();
+        let batch = prepare_upload_batch(
+            tmp_repo.gitai_repo(),
+            &mut status_index,
+            &[UploadCandidateSeed {
+                commit_sha: commit_sha.clone(),
+                authorship_log: Some(authorship_log),
+                stats: None,
+            }],
+            &[],
+            "auto",
+        )
+        .expect("batch should be prepared with recomputed stats");
+
+        assert_eq!(batch.commit_shas, vec![commit_sha.clone()]);
+        let commits = batch.payload["commits"].as_array().expect("commits array");
+        let commit = commits.first().expect("first commit");
+        assert_eq!(commit["commitSha"], commit_sha);
+        assert_eq!(commit["stats"]["gitDiffAddedLines"], 2);
+        assert_eq!(commit["stats"]["aiAdditions"], 2);
+        assert_eq!(commit["stats"]["unknownAdditions"], 0);
     }
 
     #[test]

@@ -3815,7 +3815,10 @@ fn daemon_start_refuses_replacement_runtime_when_blocked_pid_cannot_be_killed() 
     )
     .expect("failed to write daemon pid metadata");
 
-    let active_runtime_meta_path = config.internal_dir.join("daemon").join("active-runtime.json");
+    let active_runtime_meta_path = config
+        .internal_dir
+        .join("daemon")
+        .join("active-runtime.json");
 
     let output = bg_command(&repo, "start", &[]);
     let stderr = String::from_utf8_lossy(&output.stderr);

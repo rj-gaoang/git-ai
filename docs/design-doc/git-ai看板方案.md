@@ -33,6 +33,8 @@ Speckit 是团队使用的「规范驱动开发」框架，通过 `.specify/` �
 
 > **文档更新说明（2026-04-24）**：本文最初主要从“Speckit 如何集成 git-ai”的视角写，当前已经补充 `git-ai` 本身的源码改动，包括 `post_commit` 挂接点、原生上传模块、feature flag、环境变量约定、失败降级策略，以及代码级验证结果。也就是说，这份文档现在同时覆盖 Speckit 侧改造和 git-ai 侧改造，不再只是一份脚本集成方案。
 
+> **实施补充（2026-06-12，大提交自动上传补算 stats）**：针对 `debug.jsonl` 中 `post_commit_stats_skipped(reason=expensive_commit)` 后又出现 `upload_stats_skipped(reason=stats_unavailable)` 的链路，`git-ai` 自动上传不再因为 post-commit 快路径未携带 `CommitStats` 而直接跳过。大提交仍然保留提交钩子内的昂贵统计保护，但 `post_commit` 会把同一份 ignore patterns 和“允许补算”标记传给上传模块；上传任务在构建 payload 时重新调用 `stats_for_commit_stats(...)` 补齐统计后再上传。merge commit 的 stats 缺失仍保持跳过，避免把合并提交误上传为 0 行统计。新增诊断字段 `statsSource=background_recompute`、`willRecomputeStats=true`、`willRecomputeMissingStatsForUpload=true` 用于确认该路径已经进入补算。
+
 > **实施补充（2026-04-26）**：当前实现又追加了 4 个关键约束。
 > 1. 服务端 `GitAiStatsServiceImpl.create()` 会先按 `git_ai_commit_stats.commit_code` 过滤重复 commit；同一 commit 被重复上传时，不再重复创建 summary/commit/file/tool/prompt 记录。
 > 2. `git_ai_tool_stats` 一直都是 `tool` / `model` 分列存储；之前“看不到验证记录”的根因不是表结构，而是部分上传链路没有提交 `prompts[]`，而 commit 级 `toolModelBreakdown` 又可能为空。现在三条上传链路都会上传 `prompts[]`，服务端也会根据 prompt 明细回填提交级工具统计。

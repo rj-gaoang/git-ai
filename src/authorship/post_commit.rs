@@ -511,6 +511,9 @@ pub fn post_commit_with_final_state(
         }
     }
 
+    let will_recompute_missing_stats_for_upload =
+        matches!(skip_reason.as_ref(), Some(StatsSkipReason::Expensive(_)));
+
     // Best-effort upload of authorship stats to the team-managed remote.
     // Always non-blocking and silent on failure so it cannot disrupt commits.
     crate::diagnostics::append_debug_event(
@@ -521,6 +524,7 @@ pub fn post_commit_with_final_state(
             "parentSha": parent_sha,
             "hasStats": stats.is_some(),
             "statsSkipReason": stats_skip_reason_debug(skip_reason.as_ref()),
+            "willRecomputeMissingStatsForUpload": will_recompute_missing_stats_for_upload,
         }),
     );
     crate::integration::upload_stats::maybe_upload_after_commit(
@@ -528,6 +532,8 @@ pub fn post_commit_with_final_state(
         &commit_sha,
         &authorship_log,
         stats.as_ref(),
+        will_recompute_missing_stats_for_upload,
+        &ignore_patterns,
     );
 
     Ok((commit_sha.to_string(), authorship_log))
@@ -553,7 +559,11 @@ fn log_post_commit_stats_skipped(
             "commitSha": commit_sha,
             "parentSha": parent_sha,
             "reason": reason,
-            "effect": "auto_upload_will_skip_because_stats_are_unavailable",
+            "effect": if reason == "expensive_commit" {
+                "auto_upload_will_recompute_stats_before_upload"
+            } else {
+                "auto_upload_will_skip_because_stats_are_unavailable"
+            },
             "estimate": estimate.map(|estimate| serde_json::json!({
                 "filesWithAdditions": estimate.files_with_additions,
                 "addedLines": estimate.added_lines,
