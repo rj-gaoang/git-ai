@@ -1210,6 +1210,128 @@ mod tests {
     }
 
     #[test]
+    fn weak_known_human_save_after_ai_does_not_create_human_additions() {
+        let tmp_repo = TmpRepo::new().unwrap();
+
+        tmp_repo
+            .write_file("test.txt", "Base line\n", true)
+            .unwrap();
+        tmp_repo
+            .trigger_checkpoint_with_author("test_user")
+            .unwrap();
+        tmp_repo.commit_with_message("Initial commit").unwrap();
+
+        tmp_repo
+            .write_file(
+                "test.txt",
+                "Base line\nAI line 1\nAI line 2\nAI line 3\n",
+                true,
+            )
+            .unwrap();
+        tmp_repo
+            .trigger_checkpoint_with_ai("Claude", Some("claude-3-sonnet"), Some("cursor"))
+            .unwrap();
+
+        tmp_repo
+            .write_file(
+                "test.txt",
+                "Base line\nAI line 1\nAI line 2\nAI line 3\nAI follow-up line\n",
+                true,
+            )
+            .unwrap();
+        tmp_repo
+            .trigger_checkpoint_with_weak_known_human("test_user")
+            .unwrap();
+
+        let authorship_log = tmp_repo
+            .commit_with_message("AI lines with IDE save")
+            .unwrap();
+
+        let head_sha = tmp_repo.get_head_commit_sha().unwrap();
+        let stats = stats_for_commit_stats(tmp_repo.gitai_repo(), &head_sha, &[]).unwrap();
+
+        assert_eq!(stats.git_diff_added_lines, 4);
+        assert_eq!(stats.ai_additions, 3);
+        assert_eq!(stats.human_additions, 0);
+        assert_eq!(stats.unknown_additions, 1);
+
+        let attestation_hashes: Vec<&str> = authorship_log
+            .attestations
+            .iter()
+            .flat_map(|file| file.entries.iter())
+            .map(|entry| entry.hash.as_str())
+            .collect();
+        assert!(
+            attestation_hashes
+                .iter()
+                .all(|hash| !hash.starts_with("h_")),
+            "weak KnownHuman save must not emit known-human h_* attestations: {:?}",
+            attestation_hashes
+        );
+        assert!(
+            !attestation_hashes.contains(&"known_human"),
+            "weak KnownHuman save must be downgraded to the human sentinel, not emitted as a bare attestation hash"
+        );
+    }
+
+    #[test]
+    fn weak_known_human_save_on_ai_content_preserves_ai_additions() {
+        let tmp_repo = TmpRepo::new().unwrap();
+
+        tmp_repo
+            .write_file("test.txt", "Base line\n", true)
+            .unwrap();
+        tmp_repo
+            .trigger_checkpoint_with_author("test_user")
+            .unwrap();
+        tmp_repo.commit_with_message("Initial commit").unwrap();
+
+        tmp_repo
+            .write_file(
+                "test.txt",
+                "Base line\nAI line 1\nAI line 2\nAI line 3\n",
+                true,
+            )
+            .unwrap();
+        tmp_repo
+            .trigger_checkpoint_with_ai("Claude", Some("claude-3-sonnet"), Some("cursor"))
+            .unwrap();
+        tmp_repo
+            .trigger_checkpoint_with_weak_known_human("test_user")
+            .unwrap();
+
+        let authorship_log = tmp_repo
+            .commit_with_message("AI lines with IDE save")
+            .unwrap();
+
+        let head_sha = tmp_repo.get_head_commit_sha().unwrap();
+        let stats = stats_for_commit_stats(tmp_repo.gitai_repo(), &head_sha, &[]).unwrap();
+
+        assert_eq!(stats.git_diff_added_lines, 3);
+        assert_eq!(stats.ai_additions, 3);
+        assert_eq!(stats.human_additions, 0);
+        assert_eq!(stats.unknown_additions, 0);
+
+        let attestation_hashes: Vec<&str> = authorship_log
+            .attestations
+            .iter()
+            .flat_map(|file| file.entries.iter())
+            .map(|entry| entry.hash.as_str())
+            .collect();
+        assert!(
+            attestation_hashes
+                .iter()
+                .all(|hash| !hash.starts_with("h_")),
+            "weak KnownHuman save must not emit known-human h_* attestations: {:?}",
+            attestation_hashes
+        );
+        assert!(
+            !attestation_hashes.contains(&"known_human"),
+            "weak KnownHuman save must be downgraded to the human sentinel, not emitted as a bare attestation hash"
+        );
+    }
+
+    #[test]
     fn test_stats_for_initial_commit() {
         let tmp_repo = TmpRepo::new().unwrap();
 

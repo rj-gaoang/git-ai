@@ -35,6 +35,8 @@ Speckit 是团队使用的「规范驱动开发」框架，通过 `.specify/` �
 
 > **实施补充（2026-06-12，大提交自动上传补算 stats）**：针对 `debug.jsonl` 中 `post_commit_stats_skipped(reason=expensive_commit)` 后又出现 `upload_stats_skipped(reason=stats_unavailable)` 的链路，`git-ai` 自动上传不再因为 post-commit 快路径未携带 `CommitStats` 而直接跳过。大提交仍然保留提交钩子内的昂贵统计保护，但 `post_commit` 会把同一份 ignore patterns 和“允许补算”标记传给上传模块；上传任务在构建 payload 时重新调用 `stats_for_commit_stats(...)` 补齐统计后再上传。merge commit 的 stats 缺失仍保持跳过，避免把合并提交误上传为 0 行统计。新增诊断字段 `statsSource=background_recompute`、`willRecomputeStats=true`、`willRecomputeMissingStatsForUpload=true` 用于确认该路径已经进入补算。
 
+> **实施补充（2026-06-13，弱 KnownHuman 保存不再强归人工）**：针对王治尧机器 `2026-06-12T10:38:52` 提交 `cabbb35a` 中 `gitDiffAddedLines=1576`、`humanAdditions=900`，但现场确认代码全部由 AI 编写的误归因链路，`git-ai` 已调整 checkpoint 处理：当同一 base commit 的 working log 中已经存在 AI checkpoint / 非人工归因，而后续 `KnownHuman` 保存事件缺少明确编辑器元数据（例如没有 `kh_editor`，常见于 AI 工具调用后 IDE 自动保存或弱来源保存事件）时，不再把它作为强人工 attestation 写入 `h_*`，而是降级为普通 `Human` checkpoint。这样它不会覆盖已有 AI 归因，也不会把不确定的大块新增代码误报成人工；真实带编辑器元数据的 KnownHuman 仍保持原有人工归因语义。新增回归测试 `weak_known_human_save_after_ai_does_not_create_human_additions`，同时保留 `test_stats_for_mixed_commit` 验证真实人工追加仍能计入 `humanAdditions`。另 `2026-06-12T14:29:56` 提交 `750ef1d` 属于大提交 `expensive_commit -> stats_unavailable` 链路，已由前述“大提交自动上传补算 stats”修复覆盖。
+
 > **实施补充（2026-04-26）**：当前实现又追加了 4 个关键约束。
 > 1. 服务端 `GitAiStatsServiceImpl.create()` 会先按 `git_ai_commit_stats.commit_code` 过滤重复 commit；同一 commit 被重复上传时，不再重复创建 summary/commit/file/tool/prompt 记录。
 > 2. `git_ai_tool_stats` 一直都是 `tool` / `model` 分列存储；之前“看不到验证记录”的根因不是表结构，而是部分上传链路没有提交 `prompts[]`，而 commit 级 `toolModelBreakdown` 又可能为空。现在三条上传链路都会上传 `prompts[]`，服务端也会根据 prompt 明细回填提交级工具统计。

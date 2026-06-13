@@ -161,7 +161,35 @@ impl TmpRepo {
         &self,
         author: &str,
     ) -> Result<(usize, usize, usize), GitAiError> {
-        self.trigger_checkpoint(author, CheckpointKind::KnownHuman, None)
+        self.trigger_checkpoint_with_known_human_metadata(author, true)
+    }
+
+    pub fn trigger_checkpoint_with_weak_known_human(
+        &self,
+        author: &str,
+    ) -> Result<(usize, usize, usize), GitAiError> {
+        self.trigger_checkpoint_with_known_human_metadata(author, false)
+    }
+
+    fn trigger_checkpoint_with_known_human_metadata(
+        &self,
+        author: &str,
+        include_editor_metadata: bool,
+    ) -> Result<(usize, usize, usize), GitAiError> {
+        self.trigger_checkpoint_with_metadata(
+            author,
+            CheckpointKind::KnownHuman,
+            None,
+            if include_editor_metadata {
+                HashMap::from([
+                    ("kh_editor".to_string(), "test-editor".to_string()),
+                    ("kh_editor_version".to_string(), "1.0.0".to_string()),
+                    ("kh_extension_version".to_string(), "1.0.0".to_string()),
+                ])
+            } else {
+                HashMap::new()
+            },
+        )
     }
 
     pub fn trigger_checkpoint_with_ai(
@@ -258,6 +286,16 @@ impl TmpRepo {
         kind: CheckpointKind,
         agent_id: Option<AgentId>,
     ) -> Result<(usize, usize, usize), GitAiError> {
+        self.trigger_checkpoint_with_metadata(author, kind, agent_id, HashMap::new())
+    }
+
+    fn trigger_checkpoint_with_metadata(
+        &self,
+        author: &str,
+        kind: CheckpointKind,
+        agent_id: Option<AgentId>,
+        metadata: HashMap<String, String>,
+    ) -> Result<(usize, usize, usize), GitAiError> {
         let paths = self.current_checkpoint_scope_paths()?;
         if paths.is_empty() {
             return Ok((0, 0, 0));
@@ -307,7 +345,7 @@ impl TmpRepo {
             files: checkpoint_files,
             path_role,
             transcript_source: None,
-            metadata: HashMap::new(),
+            metadata,
         };
         let resolved = ResolvedCheckpointExecution {
             base_commit: base_string,

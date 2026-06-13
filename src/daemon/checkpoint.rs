@@ -534,6 +534,13 @@ fn working_log_entry_has_non_human_attribution(entry: &WorkingLogEntry) -> bool 
             .any(|attr| is_ai_author_id(&attr.author_id))
 }
 
+fn has_known_human_editor_metadata(request: &CheckpointRequest) -> bool {
+    request
+        .metadata
+        .get("kh_editor")
+        .is_some_and(|value| !value.trim().is_empty() && !value.eq_ignore_ascii_case("unknown"))
+}
+
 fn build_previous_file_state_maps(
     previous_checkpoints: &[Checkpoint],
     initial_attributions: &HashMap<String, Vec<LineAttribution>>,
@@ -812,6 +819,20 @@ async fn get_checkpoint_entries(
 ) -> Result<(Vec<WorkingLogEntry>, Vec<FileLineStats>), GitAiError> {
     let entries_fn_start = Instant::now();
 
+    let effective_kind = if kind == CheckpointKind::KnownHuman
+        && !has_known_human_editor_metadata(checkpoint_request)
+        && previous_checkpoints.iter().any(|checkpoint| {
+            checkpoint.kind.is_ai()
+                || checkpoint
+                    .entries
+                    .iter()
+                    .any(working_log_entry_has_non_human_attribution)
+        }) {
+        CheckpointKind::Human
+    } else {
+        kind
+    };
+
     // Read INITIAL attributions from working log (empty if file doesn't exist)
     let initial_read_start = Instant::now();
     let initial_data = working_log.read_initial_attributions();
@@ -841,8 +862,8 @@ async fn get_checkpoint_entries(
     );
 
     // Determine author_id based on checkpoint kind and agent_id
-    let author_id = match kind {
-        CheckpointKind::Human => kind.to_str(), // "human" — stripped, never attested
+    let author_id = match effective_kind {
+        CheckpointKind::Human => effective_kind.to_str(), // "human" — stripped, never attested
         CheckpointKind::KnownHuman => {
             crate::authorship::authorship_log_serialization::generate_human_short_hash(author)
         }
@@ -916,7 +937,7 @@ async fn get_checkpoint_entries(
             smol::unblock(move || {
                 get_checkpoint_entry_for_file(
                     file_path,
-                    kind,
+                    effective_kind,
                     repo,
                     working_log,
                     previous_file_state_by_file,

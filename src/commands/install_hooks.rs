@@ -358,6 +358,7 @@ pub fn run(args: &[String]) -> Result<HashMap<String, String>, GitAiError> {
     // These are no longer used — all telemetry now routes through the daemon.
     if !dry_run {
         cleanup_legacy_envelope_logs();
+        crate::integration::install_test_upload::maybe_upload_install_success();
     }
 
     Ok(to_hashmap(statuses))

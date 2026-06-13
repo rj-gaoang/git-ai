@@ -1289,9 +1289,18 @@ mod tests {
 
         assert_eq!(summary["checkpointCount"], serde_json::json!(3));
         assert_eq!(summary["checkpointEntryCount"], serde_json::json!(4));
-        assert_eq!(summary["checkpointKindCounts"]["ai_agent"], serde_json::json!(1));
-        assert_eq!(summary["checkpointKindCounts"]["known_human"], serde_json::json!(1));
-        assert_eq!(summary["checkpointKindCounts"]["human"], serde_json::json!(1));
+        assert_eq!(
+            summary["checkpointKindCounts"]["ai_agent"],
+            serde_json::json!(1)
+        );
+        assert_eq!(
+            summary["checkpointKindCounts"]["known_human"],
+            serde_json::json!(1)
+        );
+        assert_eq!(
+            summary["checkpointKindCounts"]["human"],
+            serde_json::json!(1)
+        );
         assert_eq!(summary["aiCheckpointCount"], serde_json::json!(1));
         assert_eq!(summary["aiEntryCount"], serde_json::json!(1));
         assert_eq!(summary["uniqueFileCount"], serde_json::json!(3));
