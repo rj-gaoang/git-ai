@@ -39,6 +39,8 @@ Speckit 是团队使用的「规范驱动开发」框架，通过 `.specify/` �
 
 > **实施补充（2026-06-14，安装测试上传、无 note 兜底、北京时间与安装生效闭环）**：本轮现场把“源码已修”和“用户机器真实生效”拆成独立闭环处理。上传协议层面，安装成功后的测试上传、commit 后自动上传、手动 `upload-stats` 回补共用同一套远程看板 schema，并都写入 `~/.git-ai/logs/debug.jsonl`。安装测试上传不能因为 MCP `X-USER-ID` 缺失而跳过，身份顺序为 MCP / 环境用户 ID、Git 邮箱、IP 地址，且不得伪造测试用户；payload 至少包含 git-ai 版本、Git 版本、操作系统和版本，并补齐后端必填的 `model=unknown`。自动 / 手动上传遇到没有 `refs/notes/ai` 的 commit 时，不再跳过，而是发送 `hasAuthorshipNote=false` 的 metadata-only payload，把新增行计入 `unknownAdditions`，不凭空制造 AI 或人工归因。所有上传时间统一先解析原始 `%aI` 时区，再转换为北京时间 `yyyy-MM-dd HH:mm:ss`，不能上传 RFC3339 纳秒格式，也不能只截字符串导致 `05:13` 误报成北京时间。现场 `bfd32c8` 未自动上传的直接根因最终确认为全局 `core.hooksPath` 指向不存在的旧 `yoavlax.ai-contribution-tracker\git-hooks` 目录，Git 提交阶段根本没有进入 post-commit hook；修复后 `install-hooks` 会自动清理失效的历史 hooksPath，并在 Windows 下重启 daemon 前兜底清理同安装目录残留的 `git-ai.exe bg run`，即使 `daemon.pid.json` 缺失也不能让旧进程继续接收 Trace2 / wrapper 事件。现场验证要求同步检查源码、release 构建、`%USERPROFILE%\.git-ai\bin\git-ai.exe`、`git.exe` 哈希、Trace2 pipe、`core.hooksPath` 和 daemon 进程，避免再次出现“安装了新版本但旧进程还在跑”的误判。
 
+> **实施补充（2026-06-14，Windows 安装器 busy exe 替换闭环）**：针对 `v2.2.30` Windows 安装日志反复打印 `Waiting for file to be available: C:\Users\admin\.git-ai\bin\git-ai.exe` 与 `Stopping lingering git-ai processes: ...` 的问题，根因不是单台机器需要手工清理进程，而是安装器把“运行中的 exe 不能用独占写句柄打开”当成必须等待的失败条件；同时旧清理逻辑只对枚举到的 PID 执行 `Stop-Process`，不会杀完整进程树，VS Code / Copilot hook 残留的 `checkpoint ... --hook-input stdin` 子进程或旧 `bg run` 子进程仍可能继续持有旧 `git-ai.exe` 镜像。`taskkill /T` 输出中“成功终止的是子进程，父 PID 又显示没有实例在运行”正好说明旧安装器枚举到的 blocker 和真实占用者之间存在父子进程 / 瞬时进程错位。修复方案落在 `git-ai/install.ps1`：新增 `Install-BinaryWithRenameFallback`，替换 `git-ai.exe` 时不再一直等待可写句柄；若直接覆盖失败，先尝试关闭 daemon 与同安装目录进程树，再把旧 `git-ai.exe` 重命名为同目录 `git-ai.exe.retired-<timestamp>-<pid>`，立即把新二进制放回稳定路径，旧文件能删则删，删不掉则通过 `MoveFileEx(..., MOVEFILE_DELAY_UNTIL_REBOOT)` 登记重启后删除。`Stop-GitAiManagedProcesses` 同步改为调用 `taskkill.exe /F /T /PID`，避免只杀父进程留下真正锁文件的 hook 子进程；legacy `git.exe` wrapper 禁用也改为优先重命名，避免老用户迁移时在同类文件锁上再次卡住。验证使用隔离 HOME 的真实 PowerShell 安装脚本测试，而不是修当前机器：`cargo test --test windows_script_checks -- --nocapture` 已覆盖新用户安装、老 wrapper 禁用、daemon 运行中重装、`GIT_AI_DEFER_IF_BUSY=1` passive update 下旧 `git-ai.exe` 仍运行但安装成功并退休旧 exe 的场景。
+
 > **实施补充（2026-06-14，张一峰 op-api 归因误判 / 漏判修复）**：针对 `logs/zyf-20260614.jsonl` 中两条已确认“实际均为 AI 生成”的异常提交补齐根因和修复。其一，`2026-06-01 15:19:37` 左右的 `op-api` 提交 `e2cc766`，日志显示 `promptCount=0`、`sessionCount=0`、`checkpointCount=1`，最终却得到 `humanAdditions=346`、`aiAdditions=0`、`unknownAdditions=7`；根因是缺少真实 AI checkpoint / prompt 时，IDE 自动保存类的弱 `KnownHuman` 事件被当成强人工 attestation 写入 `h_*`，把整块新增代码误报成人工。现在 `KnownHuman` 必须带有效 `kh_editor` 元数据才保留强人工语义；缺少编辑器元数据时降级为普通 `Human` checkpoint，不再产生 `h_*` 归因，也不会凭空把未知新增行算成人工。其二，`2026-06-11 13:58:10` 左右的 `op-api` 提交 `991aca4`，`src/main/java/com/ruijie/op/api/controller/JobTask.java` 实际为 AI 生成，但统计只覆盖了约 150 行 AI，其余落到 unknown；根因是 Copilot terminal / bash 工具调用在缺失 pre snapshot、snapshot 失败或 hook 超时时，旧链路直接放弃 post checkpoint，导致部分 AI 改动没有落入 authorship note。现在 `PostBashCall` 会在 `MissingPreSnapshot` / `SnapshotFailed` / `HookTimeout` / post-hook error 时回退到 `git_status_fallback` 提取实际变更文件，并继续发送 AI checkpoint。新增诊断事件 `bash_post_checkpoint_resolved`、`checkpoint_request_send`、`checkpoint_request_started`、`checkpoint_request_finished`，用于确认路径解析、daemon 接收和 checkpoint 落盘是否完整。对应回归测试包括 `weak_known_human_without_ai_checkpoint_does_not_claim_human_additions` 与 `test_run_in_terminal_missing_pre_snapshot_uses_git_status_fallback`。
 
 > **实施补充（2026-04-26）**：当前实现又追加了 4 个关键约束。
@@ -2449,6 +2451,7 @@ GitHub Copilot VS Code native hook 的补充说明：当 hook payload 因为脱�
 | 2.26 | `install-hooks` 自动修复失效全局 `core.hooksPath` 并清理旧 daemon | `git-ai/src/commands/install_hooks.rs` | 如果全局 `core.hooksPath` 指向不存在的历史托管目录，如 `ai-contribution-tracker` / `.git-ai` / `.git/ai/hooks`，安装时自动删除；Windows 重启 daemon 前按安装目录兜底清理旧 `git-ai.exe bg run`，避免旧进程继续处理 Trace2 / post-commit |
 | 2.27 | 弱 KnownHuman 不再把无 AI checkpoint 的新增代码强归人工 | `git-ai/src/daemon/checkpoint.rs`、`git-ai/src/authorship/stats.rs`、`git-ai/src/commands/checkpoint_agent/presets/mock_known_human.rs` | 缺少有效 `kh_editor` 的 `KnownHuman` 降级为普通 `Human`，不再写入 `h_*` 强人工 attestation；覆盖 `e2cc766` 这类 `promptCount=0` 却把 346 行 AI 误报成人工的场景 |
 | 2.28 | Copilot terminal / bash post checkpoint 缺失时用 git status 兜底 | `git-ai/src/commands/checkpoint_agent/orchestrator.rs`、`git-ai/src/daemon.rs`、`git-ai/src/commands/git_ai_handlers.rs`、`git-ai/tests/integration/github_copilot_tools.rs` | `MissingPreSnapshot` / `SnapshotFailed` / `HookTimeout` / post-hook error 不再静默丢失 AI 改动，回退到 `git_status_fallback` 后继续发送 AI checkpoint；新增 `bash_post_checkpoint_resolved`、`checkpoint_request_send`、`checkpoint_request_started`、`checkpoint_request_finished` debug 事件 |
+| 2.29 | Windows 安装器遇到 busy `git-ai.exe` 时退休旧文件并替换稳定路径 | `git-ai/install.ps1`、`git-ai/tests/windows_script_checks.rs` | 不再要求运行中的 exe 必须能打开独占写句柄；覆盖失败时先杀同安装目录进程树，再将旧 `git-ai.exe` 重命名为 `git-ai.exe.retired-*`，新二进制立即落回原路径；`GIT_AI_DEFER_IF_BUSY=1` passive update 下旧 daemon 仍运行也能完成安装 |
 
 ### Phase 3（2-3 天）：Code Review 自动上传
 
@@ -2681,6 +2684,30 @@ env:
 
 ## 变更日志
 
+### 2026-06-14：Windows 安装器 busy exe 替换闭环
+
+**变更原因：**
+
+`v2.2.30` Windows 安装现场出现反复打印 `Waiting for file to be available: C:\Users\admin\.git-ai\bin\git-ai.exe` 和 `Stopping lingering git-ai processes: ...` 的问题。用户手工执行 `taskkill /F /IM git-ai.exe /T` 后，输出显示真正被终止的是一批子进程，而安装器日志中的多个父 PID 随后又提示“没有此任务的实例在运行”。这说明问题不只是“某个进程没杀掉”，而是旧安装器的两个假设不成立：第一，运行中的 Windows exe 不能用独占写句柄打开，但仍可以先重命名到同目录退休路径，再把新 exe 放回原稳定路径；第二，只对 `Win32_Process` 枚举到的 PID 执行 `Stop-Process`，无法保证清掉 hook / checkpoint / daemon 的完整子进程树，真实占用者可能继续持有旧 `git-ai.exe` 镜像。
+
+**本次代码级修改：**
+
+| 文件 | 修改点 | 影响 |
+|------|--------|------|
+| `git-ai/install.ps1` | 新增 `Install-BinaryWithRenameFallback` | 替换 `git-ai.exe` 时，直接覆盖失败后不再无限等待可写句柄，而是退休旧 exe、恢复稳定路径到新 exe，避免安装卡在运行中 binary 上 |
+| `git-ai/install.ps1` | 新增 `Register-DeleteOnReboot` / `Remove-OrScheduleDelete` | 旧 retired exe 能立即删除就删除；仍被进程持有时登记为下次重启删除，避免安装目录长期堆积旧 binary |
+| `git-ai/install.ps1` | 新增 `Stop-ProcessTree`，`Stop-GitAiManagedProcesses` 改用 `taskkill.exe /F /T /PID` | 清理同安装目录进程时杀完整进程树，避免只杀父进程留下真正锁文件的 hook / checkpoint 子进程 |
+| `git-ai/install.ps1` | legacy `git.exe` wrapper 禁用改为优先重命名，失败后才等待 | 老用户从旧 wrapper 迁移时，不再因为 wrapper 正在运行就提前进入长时间等待 |
+| `git-ai/tests/windows_script_checks.rs` | 新增 `windows_install_script_passive_update_retires_busy_exe` | 隔离 HOME 下真实跑 `install.ps1`：先安装、启动旧 `git-ai.exe bg run` 占用 exe，再用 `GIT_AI_DEFER_IF_BUSY=1` 重装，验证安装成功且输出 retired 旧 exe |
+| `git-ai/tests/windows_script_checks.rs` | 新增静态约束测试 | 锁定主流程必须走 busy-binary rename fallback，并使用 `taskkill /T` 清理进程树，防止后续回退为直接覆盖 / 单 PID `Stop-Process` |
+
+**验证结论：**
+
+- `cargo fmt --check` 通过。
+- `install.ps1` PowerShell parser 检查通过。
+- `cargo test --test windows_script_checks -- --nocapture` 通过，13 个测试覆盖新用户安装、老 wrapper 禁用、daemon 运行中重装、passive auto-update 下 busy `git-ai.exe` 仍运行但安装成功。
+- 本次修复没有通过手工清理当前机器安装目录来规避问题；验证均在测试隔离 HOME 中执行，用来保证其他用户安装 / 升级遇到相同进程占用时也能完成替换。
+
 ### 2026-06-14：张一峰 op-api 弱 KnownHuman 误归人工与 bash checkpoint 漏归因修复
 
 **变更原因：**
@@ -2814,6 +2841,7 @@ env:
 | latest / release asset 和源码版本不一致 | `latest/download` 仍跳旧 tag，或者下载到的 asset 自报版本不对 | “本机源码修好”与“外部默认自动更新能拿到正确版本”必须拆成两个闭环；发布后必须同时核对 GitHub latest 的 302 跳转和下载后二进制的 `--version` |
 | 安装器在 `Checksum verified` 之后长时间无输出 | 用户误以为下载卡住或脚本死锁 | 这个阶段很可能不是下载，而是卡在 `Acquire-UploadActivityLock` 或后续 `Wait-ForFileAvailable`；如果安装器不打印等待对象，现场很难第一时间分辨是 upload lock 还是 exe 文件锁 |
 | 安装器反复打印 `Stopping lingering git-ai processes: ...` 但 kill 不掉 | `taskkill` 提示“没有此任务的实例在运行”，安装脚本仍不断重复同一批 PID | 仅靠 `Win32_Process` 枚举会把 ghost PID / 已退出进程对象也算进 blocker；再叠加 `Stop-Process` 错误被吞掉，脚本输出会持续误导现场 |
+| 安装器一直等 `git-ai.exe` 可写 | 运行中的旧 `git-ai.exe` / hook 子进程仍持有 exe 镜像，安装器无法用独占写句柄打开目标文件 | 不能把“无法独占写打开”当作必须等待的失败条件。Windows 支持先把运行中的 exe 重命名到同目录 retired 路径，再把新 exe 放回稳定路径；安装器应使用 retired binary 替换策略，并对同安装目录进程使用 `taskkill /F /T /PID` 清完整进程树 |
 | `checkpoint ... --hook-input stdin` 残留进程锁住安装目录 | VS Code / Copilot hook 链路出现卡死，`git-ai.exe` 无法替换 | hook 调用方必须写完并关闭 stdin；否则会留下挂死的 checkpoint 进程。即使 replacement runtime 能绕过旧锁继续服务，如果 runtime 拷贝和过期锁不回收，还会进一步放大 `~/.git-ai/internal` 膨胀问题 |
 
 ### 2026-05-04：修复上传成功误判，并补齐服务端 `git_ai_tool_stats` 主键类型

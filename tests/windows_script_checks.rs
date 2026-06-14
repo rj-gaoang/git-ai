@@ -220,6 +220,14 @@ fn run_command_with_timeout(command: &mut Command, timeout: Duration) -> Command
 }
 
 fn run_install_script(repo: &TestRepo, timeout: Duration) -> CommandResult {
+    run_install_script_with_extra_env(repo, timeout, &[])
+}
+
+fn run_install_script_with_extra_env(
+    repo: &TestRepo,
+    timeout: Duration,
+    extra_env: &[(&str, &str)],
+) -> CommandResult {
     let mut command = Command::new("powershell");
     command
         .arg("-NoProfile")
@@ -229,6 +237,9 @@ fn run_install_script(repo: &TestRepo, timeout: Duration) -> CommandResult {
         .arg(install_script_path())
         .current_dir(env!("CARGO_MANIFEST_DIR"));
     configure_install_env(&mut command, repo);
+    for (key, value) in extra_env {
+        command.env(key, value);
+    }
     run_command_with_timeout(&mut command, timeout)
 }
 
@@ -365,6 +376,63 @@ fn windows_install_script_reinstall_stops_running_daemon() {
 
 #[test]
 #[serial]
+fn windows_install_script_passive_update_retires_busy_exe() {
+    let repo =
+        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::NoDaemon);
+
+    let initial_install = run_install_script(&repo, Duration::from_secs(90));
+    assert!(
+        initial_install.status.success(),
+        "initial install should succeed\nstdout:\n{}\nstderr:\n{}",
+        initial_install.stdout,
+        initial_install.stderr
+    );
+
+    let installed_git_ai = installed_git_ai_path(&repo);
+    assert!(
+        installed_git_ai.exists(),
+        "git-ai.exe should be installed at {}",
+        installed_git_ai.display()
+    );
+
+    let mut daemon = spawn_installed_daemon(&repo);
+    wait_for_child_to_stay_alive(&repo, &mut daemon, Duration::from_secs(2));
+
+    let reinstall = run_install_script_with_extra_env(
+        &repo,
+        Duration::from_secs(90),
+        &[("GIT_AI_DEFER_IF_BUSY", "1")],
+    );
+    assert!(
+        reinstall.status.success(),
+        "passive reinstall with daemon running should succeed\nstdout:\n{}\nstderr:\n{}",
+        reinstall.stdout,
+        reinstall.stderr
+    );
+    assert!(
+        reinstall
+            .stdout
+            .contains("Retired active git-ai.exe before install"),
+        "installer should retire the busy exe instead of deferring\nstdout:\n{}\nstderr:\n{}",
+        reinstall.stdout,
+        reinstall.stderr
+    );
+
+    let version = run_installed_git_ai(&repo, &["--version"], Duration::from_secs(15));
+    assert!(
+        version.status.success(),
+        "installed git-ai should remain usable after passive reinstall\nstdout:\n{}\nstderr:\n{}",
+        version.stdout,
+        version.stderr
+    );
+
+    let _ = daemon.kill();
+    let _ = daemon.wait();
+    kill_installed_processes(&repo);
+}
+
+#[test]
+#[serial]
 fn windows_daemon_creates_log_file() {
     let repo =
         TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::NoDaemon);
@@ -486,5 +554,39 @@ fn windows_install_script_gates_daemon_restart_to_self_update() {
     assert!(
         script.contains("Start-DaemonIfRequested"),
         "install.ps1 should funnel daemon restart attempts through the gated helper"
+    );
+}
+
+#[test]
+fn windows_install_script_replaces_busy_binary_by_retiring_it() {
+    let script = fs::read_to_string(install_script_path()).expect("failed to read install.ps1");
+    assert!(
+        script.contains("function Install-BinaryWithRenameFallback"),
+        "install.ps1 should install through the busy-binary rename fallback"
+    );
+    assert!(
+        script.contains("Install-BinaryWithRenameFallback -Source $tmpFile -Destination $finalExe"),
+        "install.ps1 should replace git-ai.exe via the rename fallback"
+    );
+    assert!(
+        script.contains("Retired active $Description before install"),
+        "install.ps1 should explain when it retires an active binary"
+    );
+    assert!(
+        !script.contains("Move-Item -Force -Path $tmpFile -Destination $finalExe"),
+        "install.ps1 should not directly overwrite git-ai.exe after waiting for a write handle"
+    );
+}
+
+#[test]
+fn windows_install_script_stops_process_trees() {
+    let script = fs::read_to_string(install_script_path()).expect("failed to read install.ps1");
+    assert!(
+        script.contains("function Stop-ProcessTree"),
+        "install.ps1 should use a process-tree aware kill helper"
+    );
+    assert!(
+        script.contains("taskkill.exe /F /T /PID"),
+        "install.ps1 should use taskkill /T so hook child processes do not keep git-ai.exe locked"
     );
 }

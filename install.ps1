@@ -72,6 +72,73 @@ function Test-FileAvailable {
     }
 }
 
+function Register-DeleteOnReboot {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path
+    )
+
+    try {
+        if (-not ('GitAiMoveFileEx' -as [type])) {
+            Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public static class GitAiMoveFileEx {
+    [DllImport("kernel32.dll", SetLastError=true, CharSet=CharSet.Unicode)]
+    public static extern bool MoveFileEx(string existingFileName, string newFileName, int flags);
+}
+"@ -ErrorAction Stop
+        }
+
+        $moveFileDelayUntilReboot = 0x4
+        return [GitAiMoveFileEx]::MoveFileEx($Path, $null, $moveFileDelayUntilReboot)
+    } catch {
+        return $false
+    }
+}
+
+function Remove-OrScheduleDelete {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path
+    )
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return $true
+    }
+
+    try {
+        Remove-Item -Force -LiteralPath $Path -ErrorAction Stop
+        return $true
+    } catch {
+        if (Register-DeleteOnReboot -Path $Path) {
+            Write-Warning "Scheduled stale git-ai binary for deletion on next reboot: $Path"
+            return $true
+        }
+
+        Write-Warning "Warning: Failed to delete stale git-ai binary: $Path"
+        return $false
+    }
+}
+
+function Get-RetiredBinaryPath {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$InstallDir
+    )
+
+    $fileName = Split-Path -Leaf $Path
+    $timestamp = Get-Date -Format 'yyyyMMddHHmmss'
+    $basePath = Join-Path $InstallDir "$fileName.retired-$timestamp-$PID"
+    $candidatePath = $basePath
+    $suffix = 1
+
+    while (Test-Path -LiteralPath $candidatePath) {
+        $candidatePath = "$basePath-$suffix"
+        $suffix += 1
+    }
+
+    return $candidatePath
+}
+
 function Stop-GitAiBackgroundService {
     param(
         [Parameter(Mandatory = $true)][string]$GitAiExe,
@@ -129,6 +196,26 @@ function Get-GitAiManagedProcesses {
     return $processes
 }
 
+function Stop-ProcessTree {
+    param(
+        [Parameter(Mandatory = $true)][int]$ProcessId
+    )
+
+    try {
+        $taskkillOutput = & taskkill.exe /F /T /PID $ProcessId 2>&1
+        if ($LASTEXITCODE -eq 0) {
+            return $true
+        }
+    } catch { }
+
+    try {
+        Stop-Process -Id $ProcessId -Force -ErrorAction Stop
+        return $true
+    } catch {
+        return $false
+    }
+}
+
 function Stop-GitAiManagedProcesses {
     param(
         [Parameter(Mandatory = $true)][string]$InstallDir
@@ -143,12 +230,66 @@ function Stop-GitAiManagedProcesses {
     Write-Warning ("Stopping lingering git-ai processes: {0}" -f ($processIds -join ', '))
 
     foreach ($processId in $processIds) {
-        try {
-            Stop-Process -Id $processId -Force -ErrorAction Stop
-        } catch { }
+        [void](Stop-ProcessTree -ProcessId $processId)
     }
 
     return $true
+}
+
+function Install-BinaryWithRenameFallback {
+    param(
+        [Parameter(Mandatory = $true)][string]$Source,
+        [Parameter(Mandatory = $true)][string]$Destination,
+        [Parameter(Mandatory = $true)][string]$InstallDir,
+        [Parameter(Mandatory = $true)][string]$Description
+    )
+
+    if (-not (Test-Path -LiteralPath $Destination)) {
+        Move-Item -Force -LiteralPath $Source -Destination $Destination
+        return
+    }
+
+    try {
+        Move-Item -Force -LiteralPath $Source -Destination $Destination -ErrorAction Stop
+        return
+    } catch { }
+
+    $gitAiExe = Join-Path $InstallDir 'git-ai.exe'
+    $passiveAutoUpdate = Test-PassiveAutoUpdateMode
+    if (-not $passiveAutoUpdate) {
+        [void](Stop-GitAiBackgroundService -GitAiExe $gitAiExe -Hard)
+        [void](Stop-GitAiManagedProcesses -InstallDir $InstallDir)
+
+        try {
+            Move-Item -Force -LiteralPath $Source -Destination $Destination -ErrorAction Stop
+            return
+        } catch { }
+    }
+
+    $retiredPath = Get-RetiredBinaryPath -Path $Destination -InstallDir $InstallDir
+    try {
+        Move-Item -Force -LiteralPath $Destination -Destination $retiredPath -ErrorAction Stop
+        Write-Warning "Retired active $Description before install: $Destination -> $retiredPath"
+    } catch {
+        if ($passiveAutoUpdate) {
+            Write-ErrorAndExit "Deferred auto-update because $Destination is still in use and could not be retired. git-ai will retry on a later update check."
+        }
+
+        Write-ErrorAndExit "Failed to replace $Destination. Please close running git-ai processes and try again. $($_.Exception.Message)"
+    }
+
+    try {
+        Move-Item -Force -LiteralPath $Source -Destination $Destination -ErrorAction Stop
+    } catch {
+        try {
+            if ((-not (Test-Path -LiteralPath $Destination)) -and (Test-Path -LiteralPath $retiredPath)) {
+                Move-Item -Force -LiteralPath $retiredPath -Destination $Destination -ErrorAction SilentlyContinue
+            }
+        } catch { }
+        Write-ErrorAndExit "Failed to install $Description to $Destination after retiring the old file. $($_.Exception.Message)"
+    }
+
+    [void](Remove-OrScheduleDelete -Path $retiredPath)
 }
 
 function Wait-ForFileAvailable {
@@ -229,15 +370,19 @@ function Disable-LegacyGitWrapper {
         return
     }
 
-    if (-not (Wait-ForFileAvailable -Path $GitShim -InstallDir $InstallDir -MaxWaitSeconds 300 -RetryIntervalSeconds 5)) {
-        if (Test-PassiveAutoUpdateMode) {
-            Write-ErrorAndExit "Deferred auto-update because $GitShim is still in use. git-ai will retry on a later update check."
+    $disabledPath = Get-LegacyGitWrapperDisabledPath -InstallDir $InstallDir
+    try {
+        Move-Item -Force -LiteralPath $GitShim -Destination $disabledPath -ErrorAction Stop
+    } catch {
+        if (-not (Wait-ForFileAvailable -Path $GitShim -InstallDir $InstallDir -MaxWaitSeconds 300 -RetryIntervalSeconds 5)) {
+            if (Test-PassiveAutoUpdateMode) {
+                Write-ErrorAndExit "Deferred auto-update because $GitShim is still in use and could not be disabled. git-ai will retry on a later update check."
+            }
+            Write-ErrorAndExit "Timeout waiting for $GitShim to be available. Please close any running git processes and try again."
         }
-        Write-ErrorAndExit "Timeout waiting for $GitShim to be available. Please close any running git processes and try again."
+        Move-Item -Force -LiteralPath $GitShim -Destination $disabledPath
     }
 
-    $disabledPath = Get-LegacyGitWrapperDisabledPath -InstallDir $InstallDir
-    Move-Item -Force -LiteralPath $GitShim -Destination $disabledPath
     Write-Warning "Disabled legacy git.exe wrapper: $GitShim -> $disabledPath"
 }
 
@@ -743,25 +888,7 @@ $uploadActivityLock = Acquire-UploadActivityLock
 $finalExe = Join-Path $installDir 'git-ai.exe'
 $gitShim = Join-Path $installDir 'git.exe'
 
-if ((Test-PassiveAutoUpdateMode) -and (Test-Path -LiteralPath $gitShim)) {
-    if (-not (Wait-ForFileAvailable -Path $gitShim -InstallDir $installDir -MaxWaitSeconds 300 -RetryIntervalSeconds 5)) {
-        Remove-Item -Force -ErrorAction SilentlyContinue $tmpFile
-        Write-ErrorAndExit "Deferred auto-update because $gitShim is still in use. git-ai will retry on a later update check."
-    }
-}
-
-# Wait for git-ai.exe to be available if it exists and is in use
-if (Test-Path -LiteralPath $finalExe) {
-    if (-not (Wait-ForFileAvailable -Path $finalExe -InstallDir $installDir -MaxWaitSeconds 300 -RetryIntervalSeconds 5)) {
-        Remove-Item -Force -ErrorAction SilentlyContinue $tmpFile
-        if (Test-PassiveAutoUpdateMode) {
-            Write-ErrorAndExit "Deferred auto-update because $finalExe is still in use. git-ai will retry on a later update check."
-        }
-        Write-ErrorAndExit "Timeout waiting for $finalExe to be available. Please close any running git-ai processes and try again."
-    }
-}
-
-Move-Item -Force -Path $tmpFile -Destination $finalExe
+Install-BinaryWithRenameFallback -Source $tmpFile -Destination $finalExe -InstallDir $installDir -Description 'git-ai.exe'
 try { Unblock-File -Path $finalExe -ErrorAction SilentlyContinue } catch { }
 
 # Existing Windows users may still have the legacy git.exe wrapper. Disable it
