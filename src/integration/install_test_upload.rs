@@ -201,7 +201,7 @@ fn local_ip_address() -> Option<String> {
 
 fn build_install_test_payload(version: &str, identity: &InstallUserIdentity) -> Value {
     let now_ms = now_epoch_ms();
-    let now_text = chrono::Utc::now().to_rfc3339();
+    let now_text = format_install_test_timestamp(chrono::Utc::now());
     let git_version = git_version_string();
     let os_name = std::env::consts::OS.to_string();
     let os_arch = std::env::consts::ARCH.to_string();
@@ -441,6 +441,10 @@ fn plugin_version() -> Option<String> {
     ])
 }
 
+fn format_install_test_timestamp(now: chrono::DateTime<chrono::Utc>) -> String {
+    now.format("%Y-%m-%d %H:%M:%S").to_string()
+}
+
 fn synthetic_commit_sha(version: &str, user_id: &str, now_ms: u64) -> String {
     let mut hasher = Sha256::new();
     hasher.update(b"git-ai-install-test");
@@ -448,6 +452,9 @@ fn synthetic_commit_sha(version: &str, user_id: &str, now_ms: u64) -> String {
     hasher.update(user_id.as_bytes());
     hasher.update(now_ms.to_string().as_bytes());
     format!("{:x}", hasher.finalize())
+        .chars()
+        .take(40)
+        .collect()
 }
 
 fn now_epoch_ms() -> u64 {
@@ -520,6 +527,11 @@ mod tests {
             "ide_mcp_config"
         );
         assert_eq!(payload["commits"][0]["author"], "real-user-123");
+        let commit_sha = payload["commits"][0]["commitSha"].as_str().unwrap();
+        let timestamp = payload["commits"][0]["timestamp"].as_str().unwrap();
+        assert_eq!(commit_sha.len(), 40);
+        assert!(timestamp.contains(' '));
+        assert!(!timestamp.contains('T'));
         assert_eq!(
             payload["commits"][0]["prompts"][0]["humanAuthor"],
             "real-user-123"
@@ -528,6 +540,16 @@ mod tests {
             payload["commits"][0]["prompts"][0]["customAttributes"]["installTest"],
             "true"
         );
+    }
+
+    #[test]
+    fn install_test_timestamp_matches_backend_format() {
+        let formatted = format_install_test_timestamp(
+            chrono::DateTime::parse_from_rfc3339("2026-06-14T04:48:37.873568900+00:00")
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+        );
+        assert_eq!(formatted, "2026-06-14 04:48:37");
     }
 
     #[test]
@@ -547,6 +569,8 @@ mod tests {
             std::env::remove_var("GIT_AI_REPORT_REMOTE_USER_ID");
             std::env::remove_var("GIT_AI_VSCODE_MCP_CONFIG_PATH");
             std::env::remove_var("GIT_AI_IDEA_MCP_CONFIG_PATH");
+            std::env::set_var("APPDATA", temp_dir.path().join("appdata"));
+            std::env::set_var("LOCALAPPDATA", temp_dir.path().join("localappdata"));
             std::env::set_var("GIT_CONFIG_NOSYSTEM", "1");
             std::env::set_var(
                 "GIT_CONFIG_GLOBAL",
@@ -580,6 +604,8 @@ mod tests {
             std::env::remove_var("GIT_AI_REPORT_REMOTE_USER_ID");
             std::env::remove_var("GIT_AI_VSCODE_MCP_CONFIG_PATH");
             std::env::remove_var("GIT_AI_IDEA_MCP_CONFIG_PATH");
+            std::env::set_var("APPDATA", temp_dir.path().join("appdata"));
+            std::env::set_var("LOCALAPPDATA", temp_dir.path().join("localappdata"));
             std::env::set_var("GIT_CONFIG_NOSYSTEM", "1");
             std::env::set_var(
                 "GIT_CONFIG_GLOBAL",
@@ -666,7 +692,7 @@ mod tests {
                 "GIT_AUTHOR_EMAIL",
             ];
             Self {
-                _lock: ENV_GUARD_LOCK.lock().unwrap(),
+                _lock: ENV_GUARD_LOCK.lock().unwrap_or_else(|err| err.into_inner()),
                 vars: vars
                     .into_iter()
                     .map(|var| (var, std::env::var_os(var)))
