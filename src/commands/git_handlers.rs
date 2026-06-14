@@ -64,11 +64,30 @@ pub fn handle_git(args: &[String]) {
     // and delegate directly to the real git so existing completion scripts work.
     if in_shell_completion_context() {
         let orig_args: Vec<String> = std::env::args().skip(1).collect();
+        crate::diagnostics::append_debug_event(
+            "git_proxy_completion_passthrough",
+            serde_json::json!({
+                "argsPreview": crate::diagnostics::sanitized_command_args(&orig_args),
+                "argCount": orig_args.len(),
+                "currentDir": crate::diagnostics::current_dir_for_debug(),
+                "currentExe": crate::diagnostics::current_exe_for_debug(),
+            }),
+        );
         proxy_to_git(&orig_args, true, None);
         return;
     }
 
     let parsed = parse_git_cli_args(args);
+    crate::diagnostics::append_debug_event(
+        "git_proxy_entered",
+        serde_json::json!({
+            "command": parsed.command.as_deref(),
+            "argsPreview": crate::diagnostics::sanitized_command_args(args),
+            "argCount": args.len(),
+            "currentDir": crate::diagnostics::current_dir_for_debug(),
+            "currentExe": crate::diagnostics::current_exe_for_debug(),
+        }),
+    );
 
     // Read-only invocations don't need wrapper state (the daemon fast-paths
     // their trace events and never processes them through the normalizer).
@@ -87,6 +106,13 @@ pub fn handle_git(args: &[String]) {
     };
 
     if is_read_only {
+        crate::diagnostics::append_debug_event(
+            "git_proxy_route",
+            serde_json::json!({
+                "route": "read_only_passthrough",
+                "command": parsed.command.as_deref(),
+            }),
+        );
         let exit_status = proxy_to_git(args, false, None);
         exit_with_status(exit_status);
     }
@@ -104,6 +130,13 @@ pub fn handle_git(args: &[String]) {
         .is_some_and(|cmd| matches!(cmd, "clone" | "init"));
 
     if is_repo_creating {
+        crate::diagnostics::append_debug_event(
+            "git_proxy_route",
+            serde_json::json!({
+                "route": "repo_creating_passthrough",
+                "command": parsed.command.as_deref(),
+            }),
+        );
         let exit_status = proxy_to_git(args, false, None);
         exit_with_status(exit_status);
     }
@@ -119,6 +152,14 @@ pub fn handle_git(args: &[String]) {
     );
 
     if !daemon_connected {
+        crate::diagnostics::append_debug_event(
+            "git_proxy_route",
+            serde_json::json!({
+                "route": "daemon_unavailable_passthrough",
+                "command": parsed.command.as_deref(),
+                "repositoryFound": repository.is_some(),
+            }),
+        );
         let exit_status = proxy_to_git(args, false, None);
         if should_run_post_commit_followups(&parsed, exit_status.success()) {
             crate::commands::upgrade::maybe_schedule_background_update_check_after_commit();
@@ -133,6 +174,16 @@ pub fn handle_git(args: &[String]) {
         .as_deref()
         .and_then(crate::git::repo_state::read_head_state_for_worktree);
     let invocation_id = crate::uuid::generate_v4();
+    crate::diagnostics::append_debug_event(
+        "git_proxy_route",
+        serde_json::json!({
+            "route": "daemon_wrapper",
+            "command": parsed.command.as_deref(),
+            "repositoryFound": repository.is_some(),
+            "worktree": worktree.as_ref().map(|path| path.to_string_lossy().to_string()),
+            "wrapperInvocationId": invocation_id,
+        }),
+    );
 
     // Send pre-state BEFORE running git so it's available when the daemon
     // processes the atexit trace event and starts the wrapper state timeout.
@@ -547,6 +598,26 @@ fn proxy_to_git(
             crate::git::command_classification::is_definitely_read_only_invocation(cmd, subcommand)
         })
     };
+    let real_git_path = config::Config::get().git_cmd().to_string();
+    #[cfg(windows)]
+    let interactive_terminal = is_interactive_terminal();
+    let mut spawn_started_fields = serde_json::json!({
+        "realGitPath": real_git_path,
+        "argsPreview": crate::diagnostics::sanitized_command_args(args),
+        "argCount": args.len(),
+        "exitOnCompletion": exit_on_completion,
+        "suppressTrace2": suppress_trace2,
+        "wrapperInvocationIdPresent": wrapper_invocation_id.is_some(),
+        "currentDir": crate::diagnostics::current_dir_for_debug(),
+    });
+    #[cfg(windows)]
+    if let Some(fields) = spawn_started_fields.as_object_mut() {
+        fields.insert(
+            "interactiveTerminal".to_string(),
+            serde_json::json!(interactive_terminal),
+        );
+    }
+    crate::diagnostics::append_debug_event("git_proxy_spawn_started", spawn_started_fields);
 
     // Use spawn for interactive commands
     let child = {
@@ -558,7 +629,7 @@ fn proxy_to_git(
             let is_interactive = unsafe { libc::isatty(libc::STDIN_FILENO) == 1 };
             let should_setpgid = !is_interactive;
 
-            let mut cmd = Command::new(config::Config::get().git_cmd());
+            let mut cmd = Command::new(&real_git_path);
             cmd.args(args);
             cmd.env(ENV_SKIP_MANAGED_HOOKS, "1");
             if suppress_trace2 {
@@ -586,7 +657,7 @@ fn proxy_to_git(
         }
         #[cfg(not(unix))]
         {
-            let mut cmd = Command::new(config::Config::get().git_cmd());
+            let mut cmd = Command::new(&real_git_path);
             cmd.args(args);
             cmd.env(ENV_SKIP_MANAGED_HOOKS, "1");
             if suppress_trace2 {
@@ -599,7 +670,7 @@ fn proxy_to_git(
 
             #[cfg(windows)]
             {
-                if !is_interactive_terminal() {
+                if !interactive_terminal {
                     cmd.creation_flags(CREATE_NO_WINDOW);
                 }
             }
@@ -611,6 +682,14 @@ fn proxy_to_git(
     #[cfg(unix)]
     match child {
         Ok((mut child, setpgid)) => {
+            crate::diagnostics::append_debug_event(
+                "git_proxy_spawn_succeeded",
+                serde_json::json!({
+                    "realGitPath": real_git_path,
+                    "childProcessId": child.id(),
+                    "setProcessGroup": setpgid,
+                }),
+            );
             #[cfg(unix)]
             {
                 if setpgid {
@@ -623,6 +702,14 @@ fn proxy_to_git(
             let status = child.wait();
             match status {
                 Ok(status) => {
+                    crate::diagnostics::append_debug_event(
+                        "git_proxy_child_exited",
+                        serde_json::json!({
+                            "realGitPath": real_git_path,
+                            "exitCode": status.code(),
+                            "success": status.success(),
+                        }),
+                    );
                     #[cfg(unix)]
                     {
                         if setpgid {
@@ -636,6 +723,14 @@ fn proxy_to_git(
                     status
                 }
                 Err(e) => {
+                    crate::diagnostics::append_debug_event(
+                        "git_proxy_wait_failed",
+                        serde_json::json!({
+                            "realGitPath": real_git_path,
+                            "errorKind": format!("{:?}", e.kind()),
+                            "error": e.to_string(),
+                        }),
+                    );
                     #[cfg(unix)]
                     {
                         if setpgid {
@@ -649,6 +744,14 @@ fn proxy_to_git(
             }
         }
         Err(e) => {
+            crate::diagnostics::append_debug_event(
+                "git_proxy_spawn_failed",
+                serde_json::json!({
+                    "realGitPath": real_git_path,
+                    "errorKind": format!("{:?}", e.kind()),
+                    "error": e.to_string(),
+                }),
+            );
             eprintln!("Failed to execute git command: {}", e);
             std::process::exit(1);
         }
@@ -657,21 +760,52 @@ fn proxy_to_git(
     #[cfg(not(unix))]
     match child {
         Ok(mut child) => {
+            crate::diagnostics::append_debug_event(
+                "git_proxy_spawn_succeeded",
+                serde_json::json!({
+                    "realGitPath": real_git_path,
+                    "childProcessId": child.id(),
+                }),
+            );
             let status = child.wait();
             match status {
                 Ok(status) => {
+                    crate::diagnostics::append_debug_event(
+                        "git_proxy_child_exited",
+                        serde_json::json!({
+                            "realGitPath": real_git_path,
+                            "exitCode": status.code(),
+                            "success": status.success(),
+                        }),
+                    );
                     if exit_on_completion {
                         exit_with_status(status);
                     }
                     status
                 }
                 Err(e) => {
+                    crate::diagnostics::append_debug_event(
+                        "git_proxy_wait_failed",
+                        serde_json::json!({
+                            "realGitPath": real_git_path,
+                            "errorKind": format!("{:?}", e.kind()),
+                            "error": e.to_string(),
+                        }),
+                    );
                     eprintln!("Failed to wait for git process: {}", e);
                     std::process::exit(1);
                 }
             }
         }
         Err(e) => {
+            crate::diagnostics::append_debug_event(
+                "git_proxy_spawn_failed",
+                serde_json::json!({
+                    "realGitPath": real_git_path,
+                    "errorKind": format!("{:?}", e.kind()),
+                    "error": e.to_string(),
+                }),
+            );
             eprintln!("Failed to execute git command: {}", e);
             std::process::exit(1);
         }

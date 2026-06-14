@@ -17,7 +17,7 @@ use regex::Regex;
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, ExitStatus, Output};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[cfg(windows)]
@@ -2622,7 +2622,8 @@ pub fn exec_git_allow_nonzero_with_profile(
 ) -> Result<Output, GitAiError> {
     let effective_args =
         args_with_internal_git_profile(&args_with_disabled_hooks_if_needed(args), profile);
-    let mut cmd = Command::new(config::Config::get().git_cmd());
+    let real_git_path = config::Config::get().git_cmd().to_string();
+    let mut cmd = Command::new(&real_git_path);
     cmd.args(&effective_args);
     cmd.env_remove("GIT_EXTERNAL_DIFF");
     cmd.env_remove("GIT_DIFF_OPTS");
@@ -2634,7 +2635,31 @@ pub fn exec_git_allow_nonzero_with_profile(
         }
     }
 
-    cmd.output().map_err(GitAiError::IoError)
+    log_internal_git_started_if_enabled(&real_git_path, &effective_args, profile, "output");
+    match cmd.output() {
+        Ok(output) => {
+            log_internal_git_output_if_needed(
+                &real_git_path,
+                &effective_args,
+                profile,
+                "output",
+                output.status,
+                None,
+                &output.stderr,
+            );
+            Ok(output)
+        }
+        Err(error) => {
+            log_internal_git_spawn_error(
+                &real_git_path,
+                &effective_args,
+                profile,
+                "output",
+                &error,
+            );
+            Err(GitAiError::IoError(error))
+        }
+    }
 }
 
 /// Helper to execute a git command with an explicit internal profile.
@@ -2673,7 +2698,8 @@ pub fn exec_git_stdin_with_profile(
     // TODO Make sure to handle process signals, etc.
     let effective_args =
         args_with_internal_git_profile(&args_with_disabled_hooks_if_needed(args), profile);
-    let mut cmd = Command::new(config::Config::get().git_cmd());
+    let real_git_path = config::Config::get().git_cmd().to_string();
+    let mut cmd = Command::new(&real_git_path);
     cmd.args(&effective_args)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -2688,7 +2714,15 @@ pub fn exec_git_stdin_with_profile(
         }
     }
 
-    let mut child = cmd.spawn().map_err(GitAiError::IoError)?;
+    log_internal_git_started_if_enabled(&real_git_path, &effective_args, profile, "stdin");
+    let mut child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            log_internal_git_spawn_error(&real_git_path, &effective_args, profile, "stdin", &error);
+            return Err(GitAiError::IoError(error));
+        }
+    };
+    let child_id = child.id();
 
     // Write stdin in a separate thread to avoid deadlock: if we write all stdin
     // before reading stdout, the child's stdout pipe buffer can fill up, causing
@@ -2702,7 +2736,31 @@ pub fn exec_git_stdin_with_profile(
         })
     });
 
-    let output = child.wait_with_output().map_err(GitAiError::IoError)?;
+    let output = match child.wait_with_output() {
+        Ok(output) => {
+            log_internal_git_output_if_needed(
+                &real_git_path,
+                &effective_args,
+                profile,
+                "stdin",
+                output.status,
+                Some(child_id),
+                &output.stderr,
+            );
+            output
+        }
+        Err(error) => {
+            log_internal_git_wait_error(
+                &real_git_path,
+                &effective_args,
+                profile,
+                "stdin",
+                Some(child_id),
+                &error,
+            );
+            return Err(GitAiError::IoError(error));
+        }
+    };
 
     if let Some(handle) = stdin_handle
         && let Err(e) = handle.join().expect("stdin writer thread panicked")
@@ -2722,6 +2780,151 @@ pub fn exec_git_stdin_with_profile(
     }
 
     Ok(output)
+}
+
+fn internal_git_spawn_logging_enabled() -> bool {
+    std::env::var("GIT_AI_DEBUG_INTERNAL_GIT")
+        .ok()
+        .is_some_and(|value| {
+            !matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "" | "0" | "false" | "off" | "no"
+            )
+        })
+}
+
+fn is_windows_application_init_failure(status: ExitStatus) -> bool {
+    matches!(
+        status.code().map(|code| code as u32),
+        Some(0xC000_0142 | 0xC000_0135 | 0xC000_007B)
+    )
+}
+
+fn profile_name(profile: InternalGitProfile) -> &'static str {
+    match profile {
+        InternalGitProfile::General => "general",
+        InternalGitProfile::PatchParse => "patch_parse",
+        InternalGitProfile::NumstatParse => "numstat_parse",
+        InternalGitProfile::RawDiffParse => "raw_diff_parse",
+    }
+}
+
+fn log_internal_git_started_if_enabled(
+    real_git_path: &str,
+    effective_args: &[String],
+    profile: InternalGitProfile,
+    mode: &str,
+) {
+    if !internal_git_spawn_logging_enabled() {
+        return;
+    }
+
+    crate::diagnostics::append_debug_event(
+        "internal_git_spawn_started",
+        serde_json::json!({
+            "realGitPath": real_git_path,
+            "argsPreview": crate::diagnostics::sanitized_command_args(effective_args),
+            "argCount": effective_args.len(),
+            "profile": profile_name(profile),
+            "mode": mode,
+            "currentDir": crate::diagnostics::current_dir_for_debug(),
+        }),
+    );
+}
+
+fn log_internal_git_output_if_needed(
+    real_git_path: &str,
+    effective_args: &[String],
+    profile: InternalGitProfile,
+    mode: &str,
+    status: ExitStatus,
+    child_process_id: Option<u32>,
+    stderr: &[u8],
+) {
+    let application_init_failure = is_windows_application_init_failure(status);
+    if !application_init_failure && !internal_git_spawn_logging_enabled() {
+        return;
+    }
+
+    crate::diagnostics::append_debug_event(
+        "internal_git_child_exited",
+        serde_json::json!({
+            "realGitPath": real_git_path,
+            "argsPreview": crate::diagnostics::sanitized_command_args(effective_args),
+            "argCount": effective_args.len(),
+            "profile": profile_name(profile),
+            "mode": mode,
+            "childProcessId": child_process_id,
+            "exitCode": status.code(),
+            "exitCodeHex": status.code().map(|code| format!("0x{:08X}", code as u32)),
+            "success": status.success(),
+            "windowsApplicationInitFailure": application_init_failure,
+            "stderrPreview": stderr_preview(stderr),
+            "currentDir": crate::diagnostics::current_dir_for_debug(),
+        }),
+    );
+}
+
+fn log_internal_git_spawn_error(
+    real_git_path: &str,
+    effective_args: &[String],
+    profile: InternalGitProfile,
+    mode: &str,
+    error: &std::io::Error,
+) {
+    crate::diagnostics::append_debug_event(
+        "internal_git_spawn_failed",
+        serde_json::json!({
+            "realGitPath": real_git_path,
+            "argsPreview": crate::diagnostics::sanitized_command_args(effective_args),
+            "argCount": effective_args.len(),
+            "profile": profile_name(profile),
+            "mode": mode,
+            "errorKind": format!("{:?}", error.kind()),
+            "error": error.to_string(),
+            "rawOsError": error.raw_os_error(),
+            "currentDir": crate::diagnostics::current_dir_for_debug(),
+        }),
+    );
+}
+
+fn log_internal_git_wait_error(
+    real_git_path: &str,
+    effective_args: &[String],
+    profile: InternalGitProfile,
+    mode: &str,
+    child_process_id: Option<u32>,
+    error: &std::io::Error,
+) {
+    crate::diagnostics::append_debug_event(
+        "internal_git_wait_failed",
+        serde_json::json!({
+            "realGitPath": real_git_path,
+            "argsPreview": crate::diagnostics::sanitized_command_args(effective_args),
+            "argCount": effective_args.len(),
+            "profile": profile_name(profile),
+            "mode": mode,
+            "childProcessId": child_process_id,
+            "errorKind": format!("{:?}", error.kind()),
+            "error": error.to_string(),
+            "rawOsError": error.raw_os_error(),
+            "currentDir": crate::diagnostics::current_dir_for_debug(),
+        }),
+    );
+}
+
+fn stderr_preview(stderr: &[u8]) -> Option<String> {
+    if stderr.is_empty() {
+        return None;
+    }
+
+    let text = String::from_utf8_lossy(stderr);
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    Some(trimmed.chars().take(512).collect())
 }
 
 /// Parse git version string (e.g., "git version 2.39.3 (Apple Git-146)") to extract major, minor, patch.

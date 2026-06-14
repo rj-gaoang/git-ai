@@ -201,6 +201,46 @@ function Wait-ForFileAvailable {
     return $false
 }
 
+function Get-LegacyGitWrapperDisabledPath {
+    param(
+        [Parameter(Mandatory = $true)][string]$InstallDir
+    )
+
+    $timestamp = Get-Date -Format 'yyyyMMddHHmmss'
+    $basePath = Join-Path $InstallDir "git.exe.disabled-legacy-wrapper-$timestamp"
+    $candidatePath = $basePath
+    $suffix = 1
+
+    while (Test-Path -LiteralPath $candidatePath) {
+        $candidatePath = "$basePath-$suffix"
+        $suffix += 1
+    }
+
+    return $candidatePath
+}
+
+function Disable-LegacyGitWrapper {
+    param(
+        [Parameter(Mandatory = $true)][string]$GitShim,
+        [Parameter(Mandatory = $true)][string]$InstallDir
+    )
+
+    if (-not (Test-Path -LiteralPath $GitShim)) {
+        return
+    }
+
+    if (-not (Wait-ForFileAvailable -Path $GitShim -InstallDir $InstallDir -MaxWaitSeconds 300 -RetryIntervalSeconds 5)) {
+        if (Test-PassiveAutoUpdateMode) {
+            Write-ErrorAndExit "Deferred auto-update because $GitShim is still in use. git-ai will retry on a later update check."
+        }
+        Write-ErrorAndExit "Timeout waiting for $GitShim to be available. Please close any running git processes and try again."
+    }
+
+    $disabledPath = Get-LegacyGitWrapperDisabledPath -InstallDir $InstallDir
+    Move-Item -Force -LiteralPath $GitShim -Destination $disabledPath
+    Write-Warning "Disabled legacy git.exe wrapper: $GitShim -> $disabledPath"
+}
+
 function Get-UploadActivityLockPath {
     $internalDir = Join-Path $HOME '.git-ai\internal'
     New-Item -ItemType Directory -Force -Path $internalDir | Out-Null
@@ -724,18 +764,9 @@ if (Test-Path -LiteralPath $finalExe) {
 Move-Item -Force -Path $tmpFile -Destination $finalExe
 try { Unblock-File -Path $finalExe -ErrorAction SilentlyContinue } catch { }
 
-# Refresh git.exe for existing wrapper users (it's a copy, not a symlink on Windows)
-$gitShim = Join-Path $installDir 'git.exe'
-if (Test-Path -LiteralPath $gitShim) {
-    if (-not (Wait-ForFileAvailable -Path $gitShim -InstallDir $installDir -MaxWaitSeconds 300 -RetryIntervalSeconds 5)) {
-        if (Test-PassiveAutoUpdateMode) {
-            Write-ErrorAndExit "Deferred auto-update because $gitShim is still in use. git-ai will retry on a later update check."
-        }
-        Write-ErrorAndExit "Timeout waiting for $gitShim to be available. Please close any running git processes and try again."
-    }
-    Copy-Item -Force -Path $finalExe -Destination $gitShim
-    try { Unblock-File -Path $gitShim -ErrorAction SilentlyContinue } catch { }
-}
+# Existing Windows users may still have the legacy git.exe wrapper. Disable it
+# instead of refreshing it so PATH resolves to the real Git executable.
+Disable-LegacyGitWrapper -GitShim $gitShim -InstallDir $installDir
 
 # Login user with install token if provided
 $needLogin = $false

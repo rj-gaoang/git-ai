@@ -1,5 +1,6 @@
 use chrono::{FixedOffset, SecondsFormat, Utc};
 use serde_json::{Map, Value, json};
+use std::ffi::OsString;
 use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -29,6 +30,23 @@ pub(crate) fn debug_stderr_enabled() -> bool {
                     "" | "0" | "false" | "off" | "no"
                 )
             })
+}
+
+pub fn append_process_started_event(binary_name: &str, args: &[String]) {
+    append_debug_event(
+        "process_started",
+        json!({
+            "binaryName": binary_name,
+            "argv0": std::env::args_os().next().map(os_string_to_lossy),
+            "argsPreview": sanitized_command_args(args),
+            "argCount": args.len(),
+            "currentDir": current_dir_for_debug(),
+            "currentExe": current_exe_for_debug(),
+            "gitAiVersion": env!("CARGO_PKG_VERSION"),
+            "isGitProxy": binary_name != "git-ai" && binary_name != "git-ai.exe",
+            "pathHead": path_head_for_debug(8),
+        }),
+    );
 }
 
 pub(crate) fn append_debug_event(event: &str, fields: Value) {
@@ -79,6 +97,86 @@ pub(crate) fn append_debug_event(event: &str, fields: Value) {
 
 pub(crate) fn debug_log_path() -> Option<PathBuf> {
     crate::config::git_ai_dir_path().map(|dir| dir.join("logs").join(DEBUG_LOG_FILE))
+}
+
+pub(crate) fn sanitized_command_args(args: &[String]) -> Vec<String> {
+    let mut sanitized = Vec::with_capacity(args.len());
+    let mut redact_next = false;
+
+    for arg in args {
+        if redact_next {
+            sanitized.push("<redacted>".to_string());
+            redact_next = false;
+            continue;
+        }
+
+        if matches!(arg.as_str(), "-m" | "--message" | "-F" | "--file") {
+            sanitized.push(arg.clone());
+            redact_next = true;
+            continue;
+        }
+
+        if let Some((flag, _)) = arg.split_once('=')
+            && matches!(flag, "--message" | "--file")
+        {
+            sanitized.push(format!("{flag}=<redacted>"));
+            continue;
+        }
+
+        if arg.starts_with("-m") && arg.len() > 2 {
+            sanitized.push("-m<redacted>".to_string());
+            continue;
+        }
+
+        sanitized.push(redact_url_credentials(arg));
+    }
+
+    sanitized
+}
+
+pub(crate) fn current_dir_for_debug() -> Option<String> {
+    std::env::current_dir()
+        .ok()
+        .map(|path| path.to_string_lossy().to_string())
+}
+
+pub(crate) fn current_exe_for_debug() -> Option<String> {
+    std::env::current_exe()
+        .ok()
+        .map(|path| path.to_string_lossy().to_string())
+}
+
+fn path_head_for_debug(limit: usize) -> Option<Vec<String>> {
+    let path = std::env::var_os("PATH")?;
+    Some(
+        std::env::split_paths(&path)
+            .take(limit)
+            .map(|path| path.to_string_lossy().to_string())
+            .collect(),
+    )
+}
+
+fn os_string_to_lossy(value: OsString) -> String {
+    value.to_string_lossy().to_string()
+}
+
+fn redact_url_credentials(value: &str) -> String {
+    for scheme in ["https://", "http://", "ssh://"] {
+        let Some(rest) = value.strip_prefix(scheme) else {
+            continue;
+        };
+        let Some(at_index) = rest.find('@') else {
+            return value.to_string();
+        };
+        let Some(first_slash) = rest.find('/') else {
+            return value.to_string();
+        };
+        if at_index < first_slash {
+            return format!("{scheme}<redacted>@{}", &rest[at_index + 1..]);
+        }
+    }
+
+    value.to_string()
 }
 
 fn debug_timestamp(now_utc: chrono::DateTime<Utc>) -> String {
@@ -186,5 +284,27 @@ mod tests {
             .with_timezone(&Utc);
 
         assert_eq!(debug_timestamp(now), "2026-05-04T14:30:00.123+08:00");
+    }
+
+    #[test]
+    fn sanitized_command_args_redacts_commit_message_and_url_credentials() {
+        let args = vec![
+            "commit".to_string(),
+            "-m".to_string(),
+            "secret message".to_string(),
+            "--message=another secret".to_string(),
+            "https://token@example.com/repo.git".to_string(),
+        ];
+
+        assert_eq!(
+            sanitized_command_args(&args),
+            vec![
+                "commit",
+                "-m",
+                "<redacted>",
+                "--message=<redacted>",
+                "https://<redacted>@example.com/repo.git",
+            ]
+        );
     }
 }

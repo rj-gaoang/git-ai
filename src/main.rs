@@ -58,6 +58,7 @@ fn main() {
     }
 
     let cli = Cli::parse();
+    git_ai::diagnostics::append_process_started_event(&binary_name, &cli.args);
 
     #[cfg(debug_assertions)]
     {

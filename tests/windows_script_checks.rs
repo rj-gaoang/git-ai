@@ -239,13 +239,6 @@ fn run_installed_git_ai(repo: &TestRepo, args: &[&str], timeout: Duration) -> Co
     run_command_with_timeout(&mut command, timeout)
 }
 
-fn run_installed_git_wrapper(repo: &TestRepo, args: &[&str], timeout: Duration) -> CommandResult {
-    let mut command = Command::new(installed_git_wrapper_path(repo));
-    command.args(args).current_dir(repo.path());
-    configure_install_env(&mut command, repo);
-    run_command_with_timeout(&mut command, timeout)
-}
-
 fn spawn_installed_daemon(repo: &TestRepo) -> Child {
     let stdout_log = OpenOptions::new()
         .create(true)
@@ -403,49 +396,6 @@ fn seed_existing_wrapper(repo: &TestRepo) {
 
 #[test]
 #[serial]
-fn windows_git_extension_upgrade_requires_direct_git_ai_binary() {
-    let repo =
-        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::NoDaemon);
-
-    // Pre-seed wrapper state so the installer treats this as an existing-user
-    // upgrade and refreshes git.exe — this test exercises wrapper behavior.
-    seed_existing_wrapper(&repo);
-
-    let initial_install = run_install_script(&repo, Duration::from_secs(90));
-    assert!(
-        initial_install.status.success(),
-        "initial install should succeed\nstdout:\n{}\nstderr:\n{}",
-        initial_install.stdout,
-        initial_install.stderr
-    );
-
-    let result = run_installed_git_wrapper(
-        &repo,
-        &["ai", "upgrade", "--force"],
-        Duration::from_secs(15),
-    );
-    let combined = format!("{}{}", result.stdout, result.stderr);
-
-    assert!(
-        !result.status.success(),
-        "`git ai upgrade` should fail fast on Windows\nstdout:\n{}\nstderr:\n{}",
-        result.stdout,
-        result.stderr
-    );
-    assert!(
-        combined.contains("`git ai upgrade` is not supported on Windows"),
-        "expected Windows upgrade guard message, got:\n{}",
-        combined
-    );
-    assert!(
-        combined.contains("git-ai upgrade"),
-        "expected direct command hint, got:\n{}",
-        combined
-    );
-}
-
-#[test]
-#[serial]
 fn windows_install_script_skips_wrapper_for_new_users() {
     let repo =
         TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::NoDaemon);
@@ -477,7 +427,7 @@ fn windows_install_script_skips_wrapper_for_new_users() {
 
 #[test]
 #[serial]
-fn windows_install_script_refreshes_wrapper_for_existing_users() {
+fn windows_install_script_disables_wrapper_for_existing_users() {
     let repo =
         TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::NoDaemon);
 
@@ -492,8 +442,24 @@ fn windows_install_script_refreshes_wrapper_for_existing_users() {
     );
 
     assert!(
-        installed_git_wrapper_path(&repo).exists(),
-        "git.exe wrapper should be refreshed for existing users"
+        !installed_git_wrapper_path(&repo).exists(),
+        "existing git.exe wrapper should be disabled instead of refreshed"
+    );
+
+    let bin_dir = repo.test_home_path().join(".git-ai").join("bin");
+    let disabled_wrappers: Vec<_> = fs::read_dir(&bin_dir)
+        .expect("failed to read git-ai bin dir")
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("git.exe.disabled-legacy-wrapper-")
+        })
+        .collect();
+    assert!(
+        !disabled_wrappers.is_empty(),
+        "installer should preserve the legacy git.exe wrapper under a disabled name"
     );
 }
 
@@ -505,7 +471,7 @@ fn windows_install_script_does_not_shadow_reserved_pid_variable() {
         "install.ps1 should not iterate with the reserved $PID variable name"
     );
     assert!(
-        script.contains("foreach ($managedPid in $pids)"),
+        script.contains("foreach ($processId in $processIds)"),
         "install.ps1 should use a non-reserved loop variable for managed process ids"
     );
 }
