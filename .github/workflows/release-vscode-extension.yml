@@ -127,6 +127,7 @@ jobs:
     needs: [publish-vsce, publish-ovsx]
     if: |
       always() &&
+      github.repository == 'git-ai-project/git-ai' &&
       !inputs.dry_run &&
       (needs.publish-vsce.result == 'success' || needs.publish-vsce.result == 'skipped') &&
       (needs.publish-ovsx.result == 'success' || needs.publish-ovsx.result == 'skipped') &&

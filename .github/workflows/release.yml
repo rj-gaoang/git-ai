@@ -428,7 +428,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Generate release bot token
-        if: inputs.release_production == true
+        if: github.repository == 'git-ai-project/git-ai' && inputs.release_production == true
         id: release-bot-token
         uses: actions/create-github-app-token@1b10c78c7865c340bc4f6099eb2f838309f1e8c3 # v3.1.1
         with:
@@ -436,20 +436,20 @@ jobs:
           private-key: ${{ secrets.GIT_AI_INTERNAL_RELEASE_BOT_PRIVATE_KEY }}
 
       - name: Checkout code for version bump
-        if: inputs.release_production == true
+        if: github.repository == 'git-ai-project/git-ai' && inputs.release_production == true
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           token: ${{ steps.release-bot-token.outputs.token }}
           fetch-depth: 0
 
       - name: Install Rust toolchain
-        if: inputs.release_production == true
+        if: github.repository == 'git-ai-project/git-ai' && inputs.release_production == true
         uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
         with:
           toolchain: stable
 
       - name: Bump version in Cargo.toml
-        if: inputs.release_production == true
+        if: github.repository == 'git-ai-project/git-ai' && inputs.release_production == true
         id: bump-version
         run: |
           # Extract current version
@@ -478,7 +478,7 @@ jobs:
           echo "new_version=${NEW_VERSION}" >> $GITHUB_OUTPUT
 
       - name: Commit and push version bump
-        if: inputs.release_production == true
+        if: github.repository == 'git-ai-project/git-ai' && inputs.release_production == true
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
