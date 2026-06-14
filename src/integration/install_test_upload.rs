@@ -1,6 +1,7 @@
 use crate::git::repository::{exec_git, parse_git_var_identity};
 use crate::http;
 use crate::integration::ide_mcp::resolve_x_user_id;
+use chrono::{DateTime, FixedOffset, Utc};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::net::UdpSocket;
@@ -11,6 +12,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 const DEFAULT_UPLOAD_URL: &str =
     "https://service-gw.ruijie.com.cn/api/ai-cr-manage-service/api/public/upload/ai-stats";
 const UPLOAD_TIMEOUT_SECS: u64 = 20;
+const BEIJING_OFFSET_SECONDS: i32 = 8 * 60 * 60;
 
 pub fn maybe_upload_install_success() {
     if std::env::var("GIT_AI_SKIP_INSTALL_TEST_UPLOAD").as_deref() == Ok("1")
@@ -201,7 +203,7 @@ fn local_ip_address() -> Option<String> {
 
 fn build_install_test_payload(version: &str, identity: &InstallUserIdentity) -> Value {
     let now_ms = now_epoch_ms();
-    let now_text = format_install_test_timestamp(chrono::Utc::now());
+    let now_text = format_install_test_timestamp(Utc::now());
     let git_version = git_version_string();
     let os_name = std::env::consts::OS.to_string();
     let os_arch = std::env::consts::ARCH.to_string();
@@ -441,8 +443,12 @@ fn plugin_version() -> Option<String> {
     ])
 }
 
-fn format_install_test_timestamp(now: chrono::DateTime<chrono::Utc>) -> String {
-    now.format("%Y-%m-%d %H:%M:%S").to_string()
+fn format_install_test_timestamp(now: DateTime<Utc>) -> String {
+    let beijing_offset = FixedOffset::east_opt(BEIJING_OFFSET_SECONDS)
+        .expect("UTC+08:00 should always be a valid fixed offset");
+    now.with_timezone(&beijing_offset)
+        .format("%Y-%m-%d %H:%M:%S")
+        .to_string()
 }
 
 fn synthetic_commit_sha(version: &str, user_id: &str, now_ms: u64) -> String {
@@ -549,7 +555,7 @@ mod tests {
                 .unwrap()
                 .with_timezone(&chrono::Utc),
         );
-        assert_eq!(formatted, "2026-06-14 04:48:37");
+        assert_eq!(formatted, "2026-06-14 12:48:37");
     }
 
     #[test]
