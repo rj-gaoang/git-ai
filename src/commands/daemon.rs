@@ -288,32 +288,72 @@ fn recover_blocked_daemon_startup(
 ) -> Result<Option<DaemonConfig>, String> {
     match wait_for_blocked_daemon(config, timeout) {
         BlockedDaemonWaitResult::BecameHealthy => Ok(Some(config.clone())),
-        BlockedDaemonWaitResult::MissingPidMetadata => Err(format!(
-            "daemon startup blocked: lock held at {}; no daemon pid metadata available for recovery",
-            config.lock_path.display()
-        )),
+        BlockedDaemonWaitResult::MissingPidMetadata => {
+            let reason = format!(
+                "locked daemon at {} has no pid metadata",
+                config.lock_path.display()
+            );
+            activate_replacement_runtime_after_recovery_failure(reason, timeout)
+        }
         BlockedDaemonWaitResult::TimedOutWithPid(pid) => {
             if daemon_is_up(config) {
                 return Ok(Some(config.clone()));
             }
             if let Err(error) = hard_kill_daemon_pid(config, pid) {
-                return Err(format!(
-                    "daemon startup blocked: lock held at {}; failed to recover unhealthy daemon pid {}: {}; refusing to activate a replacement runtime while the existing process still owns the daemon lock",
-                    config.lock_path.display(),
+                let reason = format!(
+                    "failed to recover locked daemon pid {} at {}: {}",
                     pid,
+                    config.lock_path.display(),
                     error,
-                ));
+                );
+                return activate_replacement_runtime_after_recovery_failure(reason, timeout);
             }
             if !wait_for_daemon_dead(config, Duration::from_secs(2)) {
-                return Err(format!(
-                    "daemon startup blocked: lock held at {}; daemon pid {} did not release the lock after force kill",
+                let reason = format!(
+                    "daemon pid {} did not release lock {} after force kill",
+                    pid,
                     config.lock_path.display(),
-                    pid
-                ));
+                );
+                return activate_replacement_runtime_after_recovery_failure(reason, timeout);
             }
             Ok(None)
         }
     }
+}
+
+#[cfg(not(any(test, feature = "test-support")))]
+fn activate_replacement_runtime_after_recovery_failure(
+    reason: String,
+    timeout: Duration,
+) -> Result<Option<DaemonConfig>, String> {
+    eprintln!(
+        "[git-ai] warning: {}; activating a replacement daemon runtime",
+        reason
+    );
+    let replacement = DaemonConfig::activate_replacement_runtime(&reason)
+        .map_err(|e| format!("failed to activate replacement daemon runtime: {}", e))?;
+
+    if let Err(e) =
+        crate::commands::install_hooks::configure_async_mode_daemon_trace2_for_config(&replacement)
+    {
+        eprintln!(
+            "[git-ai] warning: failed to update trace2 for replacement daemon runtime: {}",
+            e
+        );
+    }
+
+    start_daemon_detached_with_config(replacement, timeout).map(Some)
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn activate_replacement_runtime_after_recovery_failure(
+    reason: String,
+    _timeout: Duration,
+) -> Result<Option<DaemonConfig>, String> {
+    Err(format!(
+        "daemon startup blocked: {}; replacement daemon runtime disabled in test builds",
+        reason
+    ))
 }
 
 fn wait_for_blocked_daemon(config: &DaemonConfig, timeout: Duration) -> BlockedDaemonWaitResult {

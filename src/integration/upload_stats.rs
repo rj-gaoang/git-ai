@@ -33,6 +33,7 @@ use crate::git::repository::{Repository, exec_git};
 use crate::http;
 use crate::integration::ide_mcp::resolve_x_user_id;
 use crate::utils::LockFile;
+use chrono::{DateTime, FixedOffset};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -53,6 +54,7 @@ const UPLOAD_STATUS_FILE: &str = "upload_stats_status.json";
 const UPLOAD_STATUS_SCHEMA_VERSION: u32 = 1;
 const MAX_STATUS_ERROR_CHARS: usize = 500;
 const DEFAULT_UPLOAD_BACKLOG_LIMIT: usize = 25;
+const BEIJING_OFFSET_SECONDS: i32 = 8 * 60 * 60;
 
 fn upload_activity_lock_path_from_internal_dir(internal_dir: &Path) -> PathBuf {
     internal_dir.join(UPLOAD_ACTIVITY_LOCK_FILE)
@@ -973,20 +975,13 @@ pub fn upload_local_commit_stats(
     );
 
     let Some(authorship_log) = get_authorship(repo, commit_sha) else {
-        crate::diagnostics::append_debug_event(
-            "upload_stats_skipped",
-            json!({
-                "reason": "manual_no_authorship_note",
-                "source": source,
-                "commitSha": commit_sha,
-                "commitShort": commit_short,
-                "repo": repo.canonical_workdir().to_string_lossy().to_string(),
-            }),
+        return upload_local_commit_stats_without_authorship_note(
+            repo,
+            commit_sha,
+            ignore_patterns,
+            dry_run,
+            source,
         );
-        return Ok(ManualUploadOutcome::Skipped {
-            commit_sha: commit_sha.to_string(),
-            reason: "no_authorship_note",
-        });
     };
 
     crate::diagnostics::append_debug_event(
@@ -1848,6 +1843,16 @@ fn build_payload_with_source(
     build_payload_from_commit_entries(repo, vec![Value::Object(commit_entry)], source)
 }
 
+fn build_payload_without_authorship_note(
+    repo: &Repository,
+    commit_sha: &str,
+    stats: &CommitStats,
+    source: &str,
+) -> Result<Value, String> {
+    let commit_entry = build_commit_entry_without_authorship_note(repo, commit_sha, stats)?;
+    build_payload_from_commit_entries(repo, vec![Value::Object(commit_entry)], source)
+}
+
 fn build_commit_entry(
     repo: &Repository,
     commit_sha: &str,
@@ -1874,6 +1879,34 @@ fn build_commit_entry(
     commit_entry.insert("hasAuthorshipNote".to_string(), Value::Bool(true));
     commit_entry.insert("stats".to_string(), stats_json);
     commit_entry.insert("prompts".to_string(), Value::Array(prompt_stats));
+
+    Ok(commit_entry)
+}
+
+fn build_commit_entry_without_authorship_note(
+    repo: &Repository,
+    commit_sha: &str,
+    stats: &CommitStats,
+) -> Result<Map<String, Value>, String> {
+    let workdir = repo.canonical_workdir().to_path_buf();
+    let (commit_message, commit_author, commit_timestamp) =
+        git_commit_metadata(&workdir, commit_sha)
+            .ok_or_else(|| "failed to read commit metadata".to_string())?;
+
+    let file_stats = build_file_stats_without_authorship_note(repo, commit_sha);
+    let stats_json = stats_to_camel_case(stats, file_stats);
+
+    let mut commit_entry = Map::new();
+    commit_entry.insert(
+        "commitSha".to_string(),
+        Value::String(commit_sha.to_string()),
+    );
+    commit_entry.insert("commitMessage".to_string(), Value::String(commit_message));
+    commit_entry.insert("author".to_string(), Value::String(commit_author));
+    commit_entry.insert("timestamp".to_string(), Value::String(commit_timestamp));
+    commit_entry.insert("hasAuthorshipNote".to_string(), Value::Bool(false));
+    commit_entry.insert("stats".to_string(), stats_json);
+    commit_entry.insert("prompts".to_string(), Value::Array(Vec::new()));
 
     Ok(commit_entry)
 }
@@ -1939,6 +1972,23 @@ fn stats_to_camel_case(stats: &CommitStats, files: Vec<Value>) -> Value {
     })
 }
 
+fn fallback_stats_without_authorship_note(
+    repo: &Repository,
+    commit_sha: &str,
+    ignore_patterns: &[String],
+) -> Result<CommitStats, String> {
+    let (git_diff_added_lines, git_diff_deleted_lines) =
+        crate::authorship::stats::get_git_diff_stats(repo, commit_sha, ignore_patterns)
+            .map_err(|error| error.to_string())?;
+
+    Ok(CommitStats {
+        unknown_additions: git_diff_added_lines,
+        git_diff_added_lines,
+        git_diff_deleted_lines,
+        ..Default::default()
+    })
+}
+
 fn build_prompt_stats(prompts: &BTreeMap<String, PromptRecord>) -> Vec<Value> {
     prompts
         .iter()
@@ -1996,6 +2046,172 @@ fn trim_non_empty(value: &str) -> Option<String> {
         None
     } else {
         Some(trimmed.to_string())
+    }
+}
+
+fn upload_local_commit_stats_without_authorship_note(
+    repo: &Repository,
+    commit_sha: &str,
+    ignore_patterns: &[String],
+    dry_run: bool,
+    source: &str,
+) -> Result<ManualUploadOutcome, String> {
+    let commit_short = short_sha(commit_sha).to_string();
+    crate::diagnostics::append_debug_event(
+        "upload_stats_manual_missing_authorship_note",
+        json!({
+            "commitSha": commit_sha,
+            "commitShort": commit_short,
+            "source": source,
+            "repo": repo.canonical_workdir().to_string_lossy().to_string(),
+            "dryRun": dry_run,
+            "effect": "uploading metadata-only stats with hasAuthorshipNote=false",
+        }),
+    );
+
+    let stats = fallback_stats_without_authorship_note(repo, commit_sha, ignore_patterns)?;
+    crate::diagnostics::append_debug_event(
+        "upload_stats_manual_missing_note_stats_computed",
+        json!({
+            "commitSha": commit_sha,
+            "commitShort": commit_short,
+            "source": source,
+            "repo": repo.canonical_workdir().to_string_lossy().to_string(),
+            "statsSummary": upload_stats_summary(&stats),
+        }),
+    );
+
+    let payload = build_payload_without_authorship_note(repo, commit_sha, &stats, source)?;
+    let payload_summary = upload_payload_summary(&payload);
+    crate::diagnostics::append_debug_event(
+        "upload_stats_payload_build_succeeded",
+        json!({
+            "commitSha": commit_sha,
+            "commitShort": commit_short,
+            "source": source,
+            "repo": repo.canonical_workdir().to_string_lossy().to_string(),
+            "payloadSummary": payload_summary.clone(),
+            "hasAuthorshipNote": false,
+        }),
+    );
+
+    let (url, url_source) = resolve_upload_url_with_source();
+    let api_key = env_non_empty("GIT_AI_REPORT_REMOTE_API_KEY");
+    let explicit_user_id = env_non_empty("GIT_AI_REPORT_REMOTE_USER_ID");
+    let user_id = explicit_user_id
+        .clone()
+        .or_else(|| resolve_x_user_id(Some(repo.canonical_workdir())));
+
+    let debug_context = UploadDebugContext {
+        commit_sha: commit_sha.to_string(),
+        commit_short: commit_short.clone(),
+        source: source.to_string(),
+        mode: if dry_run {
+            "manual_dry_run_missing_note".to_string()
+        } else {
+            "manual_missing_note".to_string()
+        },
+    };
+
+    let _upload_activity_lock = acquire_upload_activity_lock(&debug_context)?;
+    crate::diagnostics::append_debug_event(
+        "upload_stats_ready",
+        json!({
+            "commitSha": commit_sha,
+            "commitShort": commit_short,
+            "source": source,
+            "repo": repo.canonical_workdir().to_string_lossy().to_string(),
+            "mode": if dry_run { "manual_dry_run_missing_note" } else { "manual_missing_note" },
+            "url": url,
+            "urlSource": url_source,
+            "hasApiKey": api_key.is_some(),
+            "hasUserId": user_id.is_some(),
+            "userIdSource": if explicit_user_id.is_some() { "GIT_AI_REPORT_REMOTE_USER_ID" } else if user_id.is_some() { "ide_mcp_config" } else { "missing" },
+            "payloadSummary": payload_summary.clone(),
+            "hasAuthorshipNote": false,
+        }),
+    );
+
+    if dry_run {
+        crate::diagnostics::append_debug_event(
+            "upload_stats_dry_run_prepared",
+            json!({
+                "commitSha": commit_sha,
+                "commitShort": commit_short,
+                "source": source,
+                "mode": "manual_dry_run_missing_note",
+                "url": url,
+                "urlSource": url_source,
+                "payloadSummary": payload_summary.clone(),
+                "hasAuthorshipNote": false,
+            }),
+        );
+        return Ok(ManualUploadOutcome::DryRun {
+            commit_sha: commit_sha.to_string(),
+            url,
+            url_source,
+            payload_summary,
+        });
+    }
+
+    crate::diagnostics::append_debug_event(
+        "upload_stats_started",
+        json!({
+            "commitSha": commit_sha,
+            "commitShort": commit_short,
+            "source": source,
+            "mode": "manual_missing_note",
+            "url": url,
+            "hasApiKey": api_key.is_some(),
+            "hasUserId": user_id.is_some(),
+            "payloadSummary": payload_summary.clone(),
+            "hasAuthorshipNote": false,
+        }),
+    );
+
+    match perform_upload_with_lock_held(
+        &url,
+        &payload,
+        api_key.as_deref(),
+        user_id.as_deref(),
+        &debug_context,
+    ) {
+        Ok(status_code) => {
+            crate::diagnostics::append_debug_event(
+                "upload_stats_succeeded",
+                json!({
+                    "commitSha": commit_sha,
+                    "commitShort": commit_short,
+                    "source": source,
+                    "mode": "manual_missing_note",
+                    "url": url,
+                    "statusCode": status_code,
+                    "hasAuthorshipNote": false,
+                }),
+            );
+            Ok(ManualUploadOutcome::Uploaded {
+                commit_sha: commit_sha.to_string(),
+                url,
+                status_code,
+            })
+        }
+        Err(error) => {
+            crate::diagnostics::append_debug_event(
+                "upload_stats_failed",
+                json!({
+                    "commitSha": commit_sha,
+                    "commitShort": commit_short,
+                    "source": source,
+                    "mode": "manual_missing_note",
+                    "url": url,
+                    "error": &error,
+                    "hasApiKey": api_key.is_some(),
+                    "hasUserId": user_id.is_some(),
+                    "hasAuthorshipNote": false,
+                }),
+            );
+            Err(error)
+        }
     }
 }
 
@@ -2145,6 +2361,24 @@ fn build_file_stats(
     files
 }
 
+fn build_file_stats_without_authorship_note(repo: &Repository, commit_sha: &str) -> Vec<Value> {
+    let workdir = repo.canonical_workdir().to_path_buf();
+    git_diff_tree_numstat(&workdir, commit_sha)
+        .into_iter()
+        .map(|(file_path, added, deleted)| {
+            json!({
+                "filePath": file_path,
+                "gitDiffAddedLines": added,
+                "gitDiffDeletedLines": deleted,
+                "aiAdditions": 0,
+                "humanAdditions": 0,
+                "unknownAdditions": added,
+                "toolModelBreakdown": [],
+            })
+        })
+        .collect()
+}
+
 fn build_added_lines_by_file(
     repo: &Repository,
     commit_sha: &str,
@@ -2263,9 +2497,17 @@ fn git_commit_metadata(workdir: &Path, commit_sha: &str) -> Option<(String, Stri
 }
 
 fn format_timestamp(raw: &str) -> String {
-    // Convert ISO-8601 (e.g. "2026-04-24T16:09:33+08:00") to "yyyy-MM-dd HH:mm:ss"
-    // exactly like the PowerShell script. Best-effort: fall back to the input.
     let trimmed = raw.trim();
+    if let Ok(parsed) = DateTime::parse_from_rfc3339(trimmed) {
+        let beijing_offset = FixedOffset::east_opt(BEIJING_OFFSET_SECONDS)
+            .expect("UTC+08:00 should always be a valid fixed offset");
+        return parsed
+            .with_timezone(&beijing_offset)
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string();
+    }
+
+    // Best-effort fallback for already formatted values without timezone.
     if trimmed.len() < 19 {
         return trimmed.to_string();
     }
@@ -2346,6 +2588,14 @@ mod tests {
         assert_eq!(
             format_timestamp("2026-04-24T16:09:33+08:00"),
             "2026-04-24 16:09:33"
+        );
+    }
+
+    #[test]
+    fn format_timestamp_utc_converts_to_beijing_time() {
+        assert_eq!(
+            format_timestamp("2026-06-14T05:13:25+00:00"),
+            "2026-06-14 13:13:25"
         );
     }
 

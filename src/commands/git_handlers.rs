@@ -13,7 +13,7 @@ use std::os::unix::process::CommandExt;
 use std::os::unix::process::ExitStatusExt;
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
-use std::process::Command;
+use std::process::{Command, Stdio};
 #[cfg(unix)]
 use std::sync::atomic::{AtomicI32, Ordering};
 
@@ -23,6 +23,9 @@ static CHILD_PGID: AtomicI32 = AtomicI32::new(0);
 fn should_run_post_commit_followups(parsed: &ParsedGitInvocation, command_succeeded: bool) -> bool {
     command_succeeded && parsed.command.as_deref() == Some("commit")
 }
+
+const FALLBACK_UPLOAD_WAIT_FOR_AUTHORSHIP_NOTE_MS: &str = "5000";
+const FALLBACK_UPLOAD_GUARD_ENV: &str = "GIT_AI_POST_COMMIT_FALLBACK_UPLOAD_SPAWNED";
 
 #[cfg(unix)]
 extern "C" fn forward_signal_handler(sig: libc::c_int) {
@@ -105,6 +108,8 @@ pub fn handle_git(args: &[String]) {
         exit_with_status(exit_status);
     }
 
+    let repository = find_repository(&parsed.global_args).ok();
+
     // Initialize the daemon telemetry handle so we can send wrapper state.
     // If the daemon isn't available, fall back to a plain passthrough proxy
     // (no invocation_id, no wrapper state, no extra GIT_* env vars).
@@ -117,11 +122,11 @@ pub fn handle_git(args: &[String]) {
         let exit_status = proxy_to_git(args, false, None);
         if should_run_post_commit_followups(&parsed, exit_status.success()) {
             crate::commands::upgrade::maybe_schedule_background_update_check_after_commit();
+            maybe_spawn_post_commit_fallback_upload(repository.as_ref(), "wrapper_no_daemon");
         }
         exit_with_status(exit_status);
     }
 
-    let repository = find_repository(&parsed.global_args).ok();
     let worktree = repository.as_ref().and_then(|r| r.workdir().ok());
 
     let pre_state = worktree
@@ -148,6 +153,7 @@ pub fn handle_git(args: &[String]) {
         if let Some(repo) = repository.as_ref() {
             maybe_show_async_post_commit_stats(&parsed, repo);
         }
+        maybe_spawn_post_commit_fallback_upload(repository.as_ref(), "wrapper_post_commit");
     }
 
     exit_with_status(exit_status);
@@ -357,6 +363,95 @@ fn maybe_show_async_post_commit_stats(parsed: &ParsedGitInvocation, repo: &Repos
     // Compute and display the full stats.
     if let Ok(stats) = stats_for_commit_stats(repo, &commit_sha, &ignore_patterns) {
         write_stats_to_terminal(&stats, true);
+    }
+}
+
+fn should_spawn_post_commit_fallback_upload() -> bool {
+    if std::env::var(FALLBACK_UPLOAD_GUARD_ENV).as_deref() == Ok("1") {
+        return false;
+    }
+
+    config::Config::fresh().feature_flags().auto_upload_ai_stats
+}
+
+fn maybe_spawn_post_commit_fallback_upload(repo: Option<&Repository>, source: &str) {
+    if !should_spawn_post_commit_fallback_upload() {
+        return;
+    }
+
+    let Some(repo) = repo else {
+        return;
+    };
+    let Some(commit_sha) = repo.head().ok().and_then(|head| head.target().ok()) else {
+        return;
+    };
+    let workdir = repo.canonical_workdir().to_path_buf();
+    let commit_sha = commit_sha.to_string();
+    let commit_short = if commit_sha.len() > 7 {
+        commit_sha[..7].to_string()
+    } else {
+        commit_sha.clone()
+    };
+
+    let Ok(exe) = crate::utils::current_git_ai_exe() else {
+        crate::diagnostics::append_debug_event(
+            "post_commit_fallback_upload_spawn_skipped",
+            serde_json::json!({
+                "reason": "git_ai_exe_unavailable",
+                "source": source,
+                "repo": workdir.to_string_lossy().to_string(),
+                "commitSha": commit_sha,
+                "commitShort": commit_short,
+            }),
+        );
+        return;
+    };
+
+    let mut cmd = Command::new(exe);
+    cmd.current_dir(&workdir)
+        .arg("upload-stats")
+        .arg(&commit_sha)
+        .arg("--source")
+        .arg(source)
+        .arg("--wait-for-authorship-note-ms")
+        .arg(FALLBACK_UPLOAD_WAIT_FOR_AUTHORSHIP_NOTE_MS)
+        .arg("--skip-if-authorship-note-found")
+        .env(crate::commands::git_hook_handlers::ENV_SKIP_ALL_HOOKS, "1")
+        .env(FALLBACK_UPLOAD_GUARD_ENV, "1")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+
+    #[cfg(windows)]
+    {
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    match cmd.spawn() {
+        Ok(child) => {
+            crate::diagnostics::append_debug_event(
+                "post_commit_fallback_upload_spawned",
+                serde_json::json!({
+                    "source": source,
+                    "repo": workdir.to_string_lossy().to_string(),
+                    "commitSha": commit_sha,
+                    "commitShort": commit_short,
+                    "waitForAuthorshipNoteMs": FALLBACK_UPLOAD_WAIT_FOR_AUTHORSHIP_NOTE_MS,
+                    "processId": child.id(),
+                }),
+            );
+        }
+        Err(error) => {
+            crate::diagnostics::append_debug_event(
+                "post_commit_fallback_upload_spawn_failed",
+                serde_json::json!({
+                    "source": source,
+                    "repo": workdir.to_string_lossy().to_string(),
+                    "commitSha": commit_sha,
+                    "commitShort": commit_short,
+                    "error": error.to_string(),
+                }),
+            );
+        }
     }
 }
 

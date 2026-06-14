@@ -965,6 +965,8 @@ struct UploadStatsArgs {
     dry_run: bool,
     source: String,
     ignore_patterns: Vec<String>,
+    wait_for_authorship_note_ms: Option<u64>,
+    skip_if_authorship_note_found: bool,
 }
 
 fn handle_upload_stats(args: &[String]) {
@@ -1008,6 +1010,30 @@ fn handle_upload_stats(args: &[String]) {
                 continue;
             }
         };
+
+        if let Some(wait_ms) = parsed.wait_for_authorship_note_ms {
+            let found_note =
+                wait_for_authorship_note(&repo, &resolved_commit, wait_ms, &parsed.source);
+            if found_note && parsed.skip_if_authorship_note_found {
+                crate::diagnostics::append_debug_event(
+                    "upload_stats_skipped",
+                    serde_json::json!({
+                        "reason": "authorship_note_found",
+                        "commitSha": resolved_commit,
+                        "commitShort": short_commit_sha(&resolved_commit),
+                        "source": parsed.source,
+                        "repo": repo.canonical_workdir().to_string_lossy().to_string(),
+                    }),
+                );
+                skipped_count += 1;
+                println!(
+                    "[git-ai] upload-stats: skipped {} source={} reason=authorship_note_found",
+                    short_commit_sha(&resolved_commit),
+                    parsed.source
+                );
+                continue;
+            }
+        }
 
         match crate::integration::upload_stats::upload_local_commit_stats(
             &repo,
@@ -1084,6 +1110,8 @@ fn parse_upload_stats_args(args: &[String]) -> Result<UploadStatsArgs, String> {
     let mut dry_run = false;
     let mut source = "manual".to_string();
     let mut ignore_patterns = Vec::new();
+    let mut wait_for_authorship_note_ms = None;
+    let mut skip_if_authorship_note_found = false;
     let mut commit_revs = Vec::new();
 
     let mut i = 0;
@@ -1111,6 +1139,21 @@ fn parse_upload_stats_args(args: &[String]) -> Result<UploadStatsArgs, String> {
                 ignore_patterns.push(value.clone());
                 i += 2;
             }
+            "--wait-for-authorship-note-ms" => {
+                let Some(value) = args.get(i + 1) else {
+                    return Err("--wait-for-authorship-note-ms requires a value".to_string());
+                };
+                let wait_ms = value.parse::<u64>().map_err(|_| {
+                    "--wait-for-authorship-note-ms requires an integer millisecond value"
+                        .to_string()
+                })?;
+                wait_for_authorship_note_ms = Some(wait_ms);
+                i += 2;
+            }
+            "--skip-if-authorship-note-found" => {
+                skip_if_authorship_note_found = true;
+                i += 1;
+            }
             value if value.starts_with("--") => {
                 return Err(format!("unknown upload-stats flag: {}", value));
             }
@@ -1130,7 +1173,55 @@ fn parse_upload_stats_args(args: &[String]) -> Result<UploadStatsArgs, String> {
         dry_run,
         source,
         ignore_patterns,
+        wait_for_authorship_note_ms,
+        skip_if_authorship_note_found,
     })
+}
+
+fn wait_for_authorship_note(
+    repo: &Repository,
+    commit_sha: &str,
+    wait_ms: u64,
+    source: &str,
+) -> bool {
+    let commit_short = short_commit_sha(commit_sha).to_string();
+    crate::diagnostics::append_debug_event(
+        "upload_stats_wait_for_authorship_note_started",
+        serde_json::json!({
+            "commitSha": commit_sha,
+            "commitShort": commit_short,
+            "source": source,
+            "repo": repo.canonical_workdir().to_string_lossy().to_string(),
+            "waitMs": wait_ms,
+        }),
+    );
+
+    let started_at = std::time::Instant::now();
+    let timeout = std::time::Duration::from_millis(wait_ms);
+    let poll_interval = std::time::Duration::from_millis(100);
+    let mut found = crate::git::refs::show_authorship_note(repo, commit_sha).is_some();
+
+    while !found && started_at.elapsed() < timeout {
+        let remaining = timeout.saturating_sub(started_at.elapsed());
+        std::thread::sleep(std::cmp::min(poll_interval, remaining));
+        found = crate::git::refs::show_authorship_note(repo, commit_sha).is_some();
+    }
+
+    let waited_ms = started_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+    crate::diagnostics::append_debug_event(
+        "upload_stats_wait_for_authorship_note_finished",
+        serde_json::json!({
+            "commitSha": commit_sha,
+            "commitShort": commit_short,
+            "source": source,
+            "repo": repo.canonical_workdir().to_string_lossy().to_string(),
+            "waitMs": wait_ms,
+            "waitedMs": waited_ms,
+            "foundAuthorshipNote": found,
+        }),
+    );
+
+    found
 }
 
 fn short_commit_sha(commit_sha: &str) -> &str {
@@ -1385,6 +1476,8 @@ mod tests {
         assert_eq!(parsed.source, "manual");
         assert!(!parsed.dry_run);
         assert!(parsed.ignore_patterns.is_empty());
+        assert_eq!(parsed.wait_for_authorship_note_ms, None);
+        assert!(!parsed.skip_if_authorship_note_found);
     }
 
     #[test]
@@ -1395,6 +1488,9 @@ mod tests {
             "review".to_string(),
             "--ignore".to_string(),
             "Cargo.lock".to_string(),
+            "--wait-for-authorship-note-ms".to_string(),
+            "1234".to_string(),
+            "--skip-if-authorship-note-found".to_string(),
             "head~1".to_string(),
             "abc1234".to_string(),
         ];
@@ -1403,6 +1499,8 @@ mod tests {
         assert!(parsed.dry_run);
         assert_eq!(parsed.source, "review");
         assert_eq!(parsed.ignore_patterns, vec!["Cargo.lock"]);
+        assert_eq!(parsed.wait_for_authorship_note_ms, Some(1234));
+        assert!(parsed.skip_if_authorship_note_found);
         assert_eq!(parsed.commit_revs, vec!["HEAD~1", "abc1234"]);
     }
 
