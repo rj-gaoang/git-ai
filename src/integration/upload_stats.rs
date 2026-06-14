@@ -2339,7 +2339,7 @@ fn build_file_stats(
                             normalize_tool_model(Some(split_tool.as_str()), split_model.as_deref());
                         json!({
                             "tool": tool,
-                            "model": model,
+                            "model": model_or_unknown(model),
                             "aiAdditions": *count,
                         })
                     })
@@ -3162,6 +3162,45 @@ mod tests {
     }
 
     #[test]
+    fn build_file_stats_defaults_missing_tool_model_to_unknown() {
+        let _g = EnvGuard::new();
+        unsafe {
+            std::env::set_var("GIT_AI_AUTO_UPLOAD_AI_STATS", "false");
+        }
+
+        let tmp_repo = TmpRepo::new().expect("tmp repo");
+
+        tmp_repo
+            .write_file("test.txt", "seed\n", true)
+            .expect("seed file");
+        tmp_repo
+            .trigger_checkpoint_with_author("test_user")
+            .expect("seed checkpoint");
+        tmp_repo
+            .commit_with_message("seed commit")
+            .expect("seed commit");
+
+        tmp_repo
+            .write_file("test.txt", "seed\nai line\n", true)
+            .expect("write ai file");
+        tmp_repo
+            .trigger_checkpoint_with_ai("Codex", Some("   "), Some("codex"))
+            .expect("ai checkpoint");
+        let authorship_log = tmp_repo
+            .commit_with_message("ai without model")
+            .expect("ai commit");
+        let head_sha = tmp_repo.get_head_commit_sha().expect("head sha");
+
+        let file_stats = build_file_stats(tmp_repo.gitai_repo(), &head_sha, &authorship_log);
+
+        assert_eq!(file_stats.len(), 1);
+        assert_eq!(file_stats[0]["filePath"], "test.txt");
+        assert_eq!(file_stats[0]["aiAdditions"], 1);
+        assert_eq!(file_stats[0]["toolModelBreakdown"][0]["tool"], "codex");
+        assert_eq!(file_stats[0]["toolModelBreakdown"][0]["model"], "unknown");
+    }
+
+    #[test]
     fn build_payload_includes_client_context() {
         let _g = EnvGuard::new();
         unsafe {
@@ -3252,6 +3291,7 @@ mod tests {
         ide_name: Option<String>,
         ide_version: Option<String>,
         plugin_version: Option<String>,
+        auto_upload_ai_stats: Option<String>,
         term_program: Option<String>,
         term_program_version: Option<String>,
     }
@@ -3267,6 +3307,7 @@ mod tests {
                 ide_name: std::env::var("GIT_AI_REPORT_IDE_NAME").ok(),
                 ide_version: std::env::var("GIT_AI_REPORT_IDE_VERSION").ok(),
                 plugin_version: std::env::var("GIT_AI_REPORT_PLUGIN_VERSION").ok(),
+                auto_upload_ai_stats: std::env::var("GIT_AI_AUTO_UPLOAD_AI_STATS").ok(),
                 term_program: std::env::var("TERM_PROGRAM").ok(),
                 term_program_version: std::env::var("TERM_PROGRAM_VERSION").ok(),
             }
@@ -3299,6 +3340,10 @@ mod tests {
                 match &self.plugin_version {
                     Some(v) => std::env::set_var("GIT_AI_REPORT_PLUGIN_VERSION", v),
                     None => std::env::remove_var("GIT_AI_REPORT_PLUGIN_VERSION"),
+                }
+                match &self.auto_upload_ai_stats {
+                    Some(v) => std::env::set_var("GIT_AI_AUTO_UPLOAD_AI_STATS", v),
+                    None => std::env::remove_var("GIT_AI_AUTO_UPLOAD_AI_STATS"),
                 }
                 match &self.term_program {
                     Some(v) => std::env::set_var("TERM_PROGRAM", v),
