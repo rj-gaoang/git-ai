@@ -43,6 +43,8 @@ Speckit 是团队使用的「规范驱动开发」框架，通过 `.specify/` �
 
 > **实施补充（2026-06-14，张一峰 op-api 归因误判 / 漏判修复）**：针对 `logs/zyf-20260614.jsonl` 中两条已确认“实际均为 AI 生成”的异常提交补齐根因和修复。其一，`2026-06-01 15:19:37` 左右的 `op-api` 提交 `e2cc766`，日志显示 `promptCount=0`、`sessionCount=0`、`checkpointCount=1`，最终却得到 `humanAdditions=346`、`aiAdditions=0`、`unknownAdditions=7`；根因是缺少真实 AI checkpoint / prompt 时，IDE 自动保存类的弱 `KnownHuman` 事件被当成强人工 attestation 写入 `h_*`，把整块新增代码误报成人工。现在 `KnownHuman` 必须带有效 `kh_editor` 元数据才保留强人工语义；缺少编辑器元数据时降级为普通 `Human` checkpoint，不再产生 `h_*` 归因，也不会凭空把未知新增行算成人工。其二，`2026-06-11 13:58:10` 左右的 `op-api` 提交 `991aca4`，`src/main/java/com/ruijie/op/api/controller/JobTask.java` 实际为 AI 生成，但统计只覆盖了约 150 行 AI，其余落到 unknown；根因是 Copilot terminal / bash 工具调用在缺失 pre snapshot、snapshot 失败或 hook 超时时，旧链路直接放弃 post checkpoint，导致部分 AI 改动没有落入 authorship note。现在 `PostBashCall` 会在 `MissingPreSnapshot` / `SnapshotFailed` / `HookTimeout` / post-hook error 时回退到 `git_status_fallback` 提取实际变更文件，并继续发送 AI checkpoint。新增诊断事件 `bash_post_checkpoint_resolved`、`checkpoint_request_send`、`checkpoint_request_started`、`checkpoint_request_finished`，用于确认路径解析、daemon 接收和 checkpoint 落盘是否完整。对应回归测试包括 `weak_known_human_without_ai_checkpoint_does_not_claim_human_additions` 与 `test_run_in_terminal_missing_pre_snapshot_uses_git_status_fallback`。
 
+> **实施补充（2026-06-15，op-return-exchange 非 UTF-8 Java 文件漏归因修复）**：针对 `D:\rj-op\op-return-exchange` 最新提交 `cf060485afcfdacc4d0c85b0ee9902e08798fa3e` 中 `OpReturnExchangeApplicationTests.java`、`SplitTests.java`、`MailTest.java` 等文件实际由 Copilot 追加测试方法但统计落入 `unknownAdditions` 的问题，日志确认不是 Copilot 未检测到路径：`bash_post_checkpoint_resolved` 已检测 90 个文件，`daemon_checkpoint_request_resolved_files` 却只解析出 79 个文件，差集中的 11 个 Java 源文件每个本次提交正好新增 5 行，用户点名的 3 个文件均在差集中。根因是 checkpoint 构造阶段使用 `fs::read_to_string(...).ok()` 读取整文件；这些历史 Java 文件包含非 UTF-8 字节，读取失败后 `CheckpointFile.content=None`，daemon 侧旧逻辑又只保留带 `content` 的文件，导致“路径已发现但内容快照为空”的显式 AI 编辑被静默过滤，最终 post-commit note 缺少这些文件的 attestation。修复方案是把 checkpoint 文件读取改为字节读取并排除 NUL 二进制文件，文本内容用 `String::from_utf8_lossy` 形成稳定快照；daemon 解析请求时也增加 workdir 兜底读取，避免旧客户端或其他插件传入 `content=None` 时再次丢文件。新增回归测试 `test_run_in_terminal_non_utf8_existing_file_is_attributed`，模拟含非法 UTF-8 字节的既有 Java 文件经 Copilot terminal fallback 追加 5 行测试方法，提交后断言 `unknown_additions=0`、`ai_additions=5`。
+
 > **实施补充（2026-04-26）**：当前实现又追加了 4 个关键约束。
 > 1. 服务端 `GitAiStatsServiceImpl.create()` 会先按 `git_ai_commit_stats.commit_code` 过滤重复 commit；同一 commit 被重复上传时，不再重复创建 summary/commit/file/tool/prompt 记录。
 > 2. `git_ai_tool_stats` 一直都是 `tool` / `model` 分列存储；之前“看不到验证记录”的根因不是表结构，而是部分上传链路没有提交 `prompts[]`，而 commit 级 `toolModelBreakdown` 又可能为空。现在三条上传链路都会上传 `prompts[]`，服务端也会根据 prompt 明细回填提交级工具统计。
@@ -2452,6 +2454,7 @@ GitHub Copilot VS Code native hook 的补充说明：当 hook payload 因为脱�
 | 2.27 | 弱 KnownHuman 不再把无 AI checkpoint 的新增代码强归人工 | `git-ai/src/daemon/checkpoint.rs`、`git-ai/src/authorship/stats.rs`、`git-ai/src/commands/checkpoint_agent/presets/mock_known_human.rs` | 缺少有效 `kh_editor` 的 `KnownHuman` 降级为普通 `Human`，不再写入 `h_*` 强人工 attestation；覆盖 `e2cc766` 这类 `promptCount=0` 却把 346 行 AI 误报成人工的场景 |
 | 2.28 | Copilot terminal / bash post checkpoint 缺失时用 git status 兜底 | `git-ai/src/commands/checkpoint_agent/orchestrator.rs`、`git-ai/src/daemon.rs`、`git-ai/src/commands/git_ai_handlers.rs`、`git-ai/tests/integration/github_copilot_tools.rs` | `MissingPreSnapshot` / `SnapshotFailed` / `HookTimeout` / post-hook error 不再静默丢失 AI 改动，回退到 `git_status_fallback` 后继续发送 AI checkpoint；新增 `bash_post_checkpoint_resolved`、`checkpoint_request_send`、`checkpoint_request_started`、`checkpoint_request_finished` debug 事件 |
 | 2.29 | Windows 安装器遇到 busy `git-ai.exe` 时退休旧文件并替换稳定路径 | `git-ai/install.ps1`、`git-ai/tests/windows_script_checks.rs` | 不再要求运行中的 exe 必须能打开独占写句柄；覆盖失败时先杀同安装目录进程树，再将旧 `git-ai.exe` 重命名为 `git-ai.exe.retired-*`，新二进制立即落回原路径；`GIT_AI_DEFER_IF_BUSY=1` passive update 下旧 daemon 仍运行也能完成安装 |
+| 2.30 | Copilot checkpoint 兼容非 UTF-8 历史文本文件 | `git-ai/src/commands/checkpoint_agent/orchestrator.rs`、`git-ai/src/daemon.rs`、`git-ai/tests/integration/github_copilot_tools.rs` | `fs::read_to_string` 失败不再让显式 AI 编辑路径被 daemon 过滤；checkpoint 文件快照改为字节读取 + NUL 二进制排除 + UTF-8 lossy 文本化，daemon 端对 `content=None` 增加 workdir 兜底读取；覆盖 `op-return-exchange` 这类非 UTF-8 Java 文件追加测试方法后落入 unknown 的场景 |
 
 ### Phase 3（2-3 天）：Code Review 自动上传
 
@@ -2733,6 +2736,29 @@ env:
 - `cargo test -q weak_known_human_without_ai_checkpoint_does_not_claim_human_additions --lib` 通过。
 - `cargo test -q --test integration test_run_in_terminal_missing_pre_snapshot_uses_git_status_fallback` 通过。
 - Windows 下直接跑未限定 harness 的过滤测试时，Cargo 还会尝试启动 `commit_tree_update_ref` 测试二进制，可能报 OS error 740 需要提权；该问题与本次归因逻辑无关，针对性使用 `--lib` / `--test integration` 可正常验证。
+
+### 2026-06-15：op-return-exchange 非 UTF-8 Java 文件漏归因修复
+
+**变更原因：**
+
+`D:\rj-op\op-return-exchange` 最新提交 `cf060485afcfdacc4d0c85b0ee9902e08798fa3e` 中，用户点名的 `src/test/java/com/ruijie/opreturnexchange/OpReturnExchangeApplicationTests.java`、`src/test/java/com/ruijie/opreturnexchange/SplitTests.java`、`src/test/java/com/ruijie/opreturnexchange/service/MailTest.java` 每个都新增了 `copilotAddedSimpleTest2` 的 5 行测试方法，但最终 authorship note 没有这些文件，`git-ai stats HEAD --json` 显示 `unknown_additions=75`。`debug.jsonl` 里同一 trace 的 `bash_post_checkpoint_resolved` 已检测到 90 个文件，`daemon_checkpoint_request_resolved_files` 却只解析出 79 个文件，差集里的 11 个 Java 源文件每个新增 5 行，正好解释 55 行漏归因；再叠加未归因的 class / workspace 等非源码改动形成最终 unknown。对用户点名的 3 个文件做严格 UTF-8 读取均失败，说明它们是含非 UTF-8 字节的历史文本文件。
+
+根因不是 Copilot 没有识别文件，而是 `build_checkpoint_files(...)` 用 `fs::read_to_string(path).ok()` 读取整文件；遇到非 UTF-8 字节时 content 变成 `None`。daemon 侧旧实现又只把 `file.content=Some(...)` 的路径加入 `resolved.files` 和 `dirty_files`，导致“路径已发现、但内容读取失败”的显式 AI 编辑被静默过滤，post-commit 只能把这些新增行记为 unknown。
+
+**本次代码级修改：**
+
+| 文件 | 修改点 | 影响 |
+|------|--------|------|
+| `git-ai/src/commands/checkpoint_agent/orchestrator.rs` | 新增 `read_checkpoint_file_content(...)`，从 `read_to_string` 改为 `fs::read` 字节读取；包含 NUL 字节时视为二进制跳过，否则用 `String::from_utf8_lossy` 生成文本快照 | 非 UTF-8 但仍是文本的 Java / legacy 文件可以进入 checkpoint，不再因为 UTF-8 解码失败变成 `content=None` |
+| `git-ai/src/daemon.rs` | `resolve_checkpoint_request(...)` 在请求 content 缺失时调用 `read_checkpoint_content_from_workdir(...)` 兜底读取工作区文件 | 旧 hook / 其他插件即使发来 `content=None`，daemon 也会尽力保留显式路径，避免请求解析阶段再次静默丢文件 |
+| `git-ai/tests/integration/github_copilot_tools.rs` | 新增 `test_run_in_terminal_non_utf8_existing_file_is_attributed` | 复现“既有非 UTF-8 Java 文件 + Copilot terminal fallback 追加 5 行测试方法”，验证提交后 `unknown_additions=0`、`ai_additions=5` |
+| `git-ai/tests/integration/performance.rs` | `FeatureFlags` 测试构造补 `..FeatureFlags::default()` | 避免新增 feature flag 字段后 integration harness 编译被无关测试字面量阻断 |
+
+**验证结论：**
+
+- `cargo fmt` 通过。
+- `cargo test --test integration github_copilot_tools::test_run_in_terminal_non_utf8_existing_file_is_attributed -- --nocapture` 通过。
+- `cargo test --test integration github_copilot_tools::test_run_in_terminal -- --nocapture` 通过，覆盖 no changes、正常 bash checkpoint、missing pre snapshot fallback、非 UTF-8 既有文件四个同组场景。
 
 ### 2026-06-14：安装测试上传、无 note 兜底上传、北京时间和 hooksPath 根因修复
 

@@ -1520,7 +1520,11 @@ fn resolve_checkpoint_request(
             continue;
         }
 
-        if let Some(content) = &file.content
+        let content = file
+            .content
+            .clone()
+            .or_else(|| read_checkpoint_content_from_workdir(&abs_path));
+        if let Some(content) = content
             && !content.chars().any(|c| c == '\0')
         {
             dirty_files.insert(relative_path.clone(), content.clone());
@@ -1553,6 +1557,18 @@ fn resolve_checkpoint_request(
             dirty_files,
         },
     ))
+}
+
+fn read_checkpoint_content_from_workdir(path: &std::path::Path) -> Option<String> {
+    if path.exists() {
+        let bytes = std::fs::read(path).ok()?;
+        if bytes.iter().any(|byte| *byte == 0) {
+            return None;
+        }
+        Some(String::from_utf8_lossy(&bytes).into_owned())
+    } else {
+        Some(String::new())
+    }
 }
 
 fn append_checkpoint_request_resolution_debug_event(

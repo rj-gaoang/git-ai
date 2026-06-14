@@ -60,6 +60,18 @@ struct RepoContext {
 
 const MAX_CHECKPOINT_FILES: usize = 1000;
 
+fn read_checkpoint_file_content(path: &Path) -> Option<String> {
+    if path.exists() {
+        let bytes = fs::read(path).ok()?;
+        if bytes.iter().any(|byte| *byte == 0) {
+            return None;
+        }
+        Some(String::from_utf8_lossy(&bytes).into_owned())
+    } else {
+        Some(String::new())
+    }
+}
+
 fn has_active_merge_state(git_dir: &Path) -> bool {
     git_dir.join("MERGE_HEAD").exists()
         || git_dir.join("CHERRY_PICK_HEAD").exists()
@@ -168,11 +180,7 @@ fn build_checkpoint_files(file_paths: &[PathBuf]) -> Result<Vec<CheckpointFile>,
         }
 
         let t_read = std::time::Instant::now();
-        let content = if path.exists() {
-            fs::read_to_string(path).ok()
-        } else {
-            Some(String::new())
-        };
+        let content = read_checkpoint_file_content(path);
         if perf {
             eprintln!(
                 "[perf] build_checkpoint_files: read_file={:.1}ms (path={}, size={})",
