@@ -264,10 +264,11 @@ fn execute_resolved_checkpoint(
     );
 
     let trace_id = checkpoint_request.trace_id.clone();
+    let effective_kind = effective_checkpoint_kind(kind, &checkpoint_request);
 
     let entries_start = Instant::now();
     let (entries, file_stats) = smol::block_on(get_checkpoint_entries(
-        kind,
+        effective_kind,
         author,
         repo,
         &working_log,
@@ -288,7 +289,7 @@ fn execute_resolved_checkpoint(
     if !entries.is_empty() {
         let checkpoint_create_start = Instant::now();
         let mut checkpoint = Checkpoint::new(
-            kind,
+            effective_kind,
             combined_hash.clone(),
             author.to_string(),
             entries.clone(),
@@ -297,14 +298,16 @@ fn execute_resolved_checkpoint(
         checkpoint.line_stats = compute_line_stats(&file_stats)?;
         checkpoint.trace_id = Some(trace_id.clone());
 
-        if kind.is_ai() {
+        if effective_kind.is_ai() {
             checkpoint.agent_id = checkpoint_request.agent_id.clone();
             checkpoint.agent_metadata = if checkpoint_request.metadata.is_empty() {
                 None
             } else {
                 Some(checkpoint_request.metadata.clone())
             };
-        } else if kind == CheckpointKind::KnownHuman && !checkpoint_request.metadata.is_empty() {
+        } else if effective_kind == CheckpointKind::KnownHuman
+            && !checkpoint_request.metadata.is_empty()
+        {
             let editor = checkpoint_request
                 .metadata
                 .get("kh_editor")
@@ -378,7 +381,7 @@ fn execute_resolved_checkpoint(
         }
     }
 
-    let agent_tool = if kind.is_ai() {
+    let agent_tool = if effective_kind.is_ai() {
         checkpoint_request
             .agent_id
             .as_ref()
@@ -401,7 +404,7 @@ fn execute_resolved_checkpoint(
         if files_with_entries == total_uncommitted_files {
             eprintln!(
                 "{} {} changed {} file(s) that have changed since the last {}",
-                kind.to_str(),
+                effective_kind.to_str(),
                 log_author,
                 files_with_entries,
                 label
@@ -409,7 +412,7 @@ fn execute_resolved_checkpoint(
         } else {
             eprintln!(
                 "{} {} changed {} of the {} file(s) that have changed since the last {} ({} already checkpointed)",
-                kind.to_str(),
+                effective_kind.to_str(),
                 log_author,
                 files_with_entries,
                 total_uncommitted_files,
@@ -539,6 +542,17 @@ fn has_known_human_editor_metadata(request: &CheckpointRequest) -> bool {
         .metadata
         .get("kh_editor")
         .is_some_and(|value| !value.trim().is_empty() && !value.eq_ignore_ascii_case("unknown"))
+}
+
+fn effective_checkpoint_kind(
+    kind: CheckpointKind,
+    checkpoint_request: &CheckpointRequest,
+) -> CheckpointKind {
+    if kind == CheckpointKind::KnownHuman && !has_known_human_editor_metadata(checkpoint_request) {
+        CheckpointKind::Human
+    } else {
+        kind
+    }
 }
 
 fn build_previous_file_state_maps(

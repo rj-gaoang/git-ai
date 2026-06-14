@@ -27,7 +27,7 @@ Speckit 是团队使用的「规范驱动开发」框架，通过 `.specify/` �
 **需求 1：** 团队成员安装或更新 Speckit 时，自动安装或更新 git-ai 到目标最新版本，并配置好 hooks。  
 **需求 2：** 提供一套完整的 AI 统计上传能力：
 - 2A. `git-ai` 在 `post_commit` 里原生、可选地即时上传当前 commit，并自动携带本地失败 / 未上传的 note 记录一起补传
-- 2B. `git-ai upload-stats` 提供原生主动上传入口，显式上传本地已有 note/stat 的 commit
+- 2B. `git-ai upload-stats` 提供原生主动上传入口，显式上传本地已有 note/stat 的 commit；如果 commit 缺失 authorship note，也按 metadata-only 口径上传未知归因记录
 - 2C. Speckit 继续提供 `upload-ai-stats.ps1` 做手动批量 / 回补上传
 - 2D. Code Review 时继续自动补传并在审查报告中展示
 
@@ -36,6 +36,10 @@ Speckit 是团队使用的「规范驱动开发」框架，通过 `.specify/` �
 > **实施补充（2026-06-12，大提交自动上传补算 stats）**：针对 `debug.jsonl` 中 `post_commit_stats_skipped(reason=expensive_commit)` 后又出现 `upload_stats_skipped(reason=stats_unavailable)` 的链路，`git-ai` 自动上传不再因为 post-commit 快路径未携带 `CommitStats` 而直接跳过。大提交仍然保留提交钩子内的昂贵统计保护，但 `post_commit` 会把同一份 ignore patterns 和“允许补算”标记传给上传模块；上传任务在构建 payload 时重新调用 `stats_for_commit_stats(...)` 补齐统计后再上传。merge commit 的 stats 缺失仍保持跳过，避免把合并提交误上传为 0 行统计。新增诊断字段 `statsSource=background_recompute`、`willRecomputeStats=true`、`willRecomputeMissingStatsForUpload=true` 用于确认该路径已经进入补算。
 
 > **实施补充（2026-06-13，弱 KnownHuman 保存不再强归人工）**：针对王治尧机器 `2026-06-12T10:38:52` 提交 `cabbb35a` 中 `gitDiffAddedLines=1576`、`humanAdditions=900`，但现场确认代码全部由 AI 编写的误归因链路，`git-ai` 已调整 checkpoint 处理：当同一 base commit 的 working log 中已经存在 AI checkpoint / 非人工归因，而后续 `KnownHuman` 保存事件缺少明确编辑器元数据（例如没有 `kh_editor`，常见于 AI 工具调用后 IDE 自动保存或弱来源保存事件）时，不再把它作为强人工 attestation 写入 `h_*`，而是降级为普通 `Human` checkpoint。这样它不会覆盖已有 AI 归因，也不会把不确定的大块新增代码误报成人工；真实带编辑器元数据的 KnownHuman 仍保持原有人工归因语义。新增回归测试 `weak_known_human_save_after_ai_does_not_create_human_additions`，同时保留 `test_stats_for_mixed_commit` 验证真实人工追加仍能计入 `humanAdditions`。另 `2026-06-12T14:29:56` 提交 `750ef1d` 属于大提交 `expensive_commit -> stats_unavailable` 链路，已由前述“大提交自动上传补算 stats”修复覆盖。
+
+> **实施补充（2026-06-14，安装测试上传、无 note 兜底、北京时间与安装生效闭环）**：本轮现场把“源码已修”和“用户机器真实生效”拆成独立闭环处理。上传协议层面，安装成功后的测试上传、commit 后自动上传、手动 `upload-stats` 回补共用同一套远程看板 schema，并都写入 `~/.git-ai/logs/debug.jsonl`。安装测试上传不能因为 MCP `X-USER-ID` 缺失而跳过，身份顺序为 MCP / 环境用户 ID、Git 邮箱、IP 地址，且不得伪造测试用户；payload 至少包含 git-ai 版本、Git 版本、操作系统和版本，并补齐后端必填的 `model=unknown`。自动 / 手动上传遇到没有 `refs/notes/ai` 的 commit 时，不再跳过，而是发送 `hasAuthorshipNote=false` 的 metadata-only payload，把新增行计入 `unknownAdditions`，不凭空制造 AI 或人工归因。所有上传时间统一先解析原始 `%aI` 时区，再转换为北京时间 `yyyy-MM-dd HH:mm:ss`，不能上传 RFC3339 纳秒格式，也不能只截字符串导致 `05:13` 误报成北京时间。现场 `bfd32c8` 未自动上传的直接根因最终确认为全局 `core.hooksPath` 指向不存在的旧 `yoavlax.ai-contribution-tracker\git-hooks` 目录，Git 提交阶段根本没有进入 post-commit hook；修复后 `install-hooks` 会自动清理失效的历史 hooksPath，并在 Windows 下重启 daemon 前兜底清理同安装目录残留的 `git-ai.exe bg run`，即使 `daemon.pid.json` 缺失也不能让旧进程继续接收 Trace2 / wrapper 事件。现场验证要求同步检查源码、release 构建、`%USERPROFILE%\.git-ai\bin\git-ai.exe`、`git.exe` 哈希、Trace2 pipe、`core.hooksPath` 和 daemon 进程，避免再次出现“安装了新版本但旧进程还在跑”的误判。
+
+> **实施补充（2026-06-14，张一峰 op-api 归因误判 / 漏判修复）**：针对 `logs/zyf-20260614.jsonl` 中两条已确认“实际均为 AI 生成”的异常提交补齐根因和修复。其一，`2026-06-01 15:19:37` 左右的 `op-api` 提交 `e2cc766`，日志显示 `promptCount=0`、`sessionCount=0`、`checkpointCount=1`，最终却得到 `humanAdditions=346`、`aiAdditions=0`、`unknownAdditions=7`；根因是缺少真实 AI checkpoint / prompt 时，IDE 自动保存类的弱 `KnownHuman` 事件被当成强人工 attestation 写入 `h_*`，把整块新增代码误报成人工。现在 `KnownHuman` 必须带有效 `kh_editor` 元数据才保留强人工语义；缺少编辑器元数据时降级为普通 `Human` checkpoint，不再产生 `h_*` 归因，也不会凭空把未知新增行算成人工。其二，`2026-06-11 13:58:10` 左右的 `op-api` 提交 `991aca4`，`src/main/java/com/ruijie/op/api/controller/JobTask.java` 实际为 AI 生成，但统计只覆盖了约 150 行 AI，其余落到 unknown；根因是 Copilot terminal / bash 工具调用在缺失 pre snapshot、snapshot 失败或 hook 超时时，旧链路直接放弃 post checkpoint，导致部分 AI 改动没有落入 authorship note。现在 `PostBashCall` 会在 `MissingPreSnapshot` / `SnapshotFailed` / `HookTimeout` / post-hook error 时回退到 `git_status_fallback` 提取实际变更文件，并继续发送 AI checkpoint。新增诊断事件 `bash_post_checkpoint_resolved`、`checkpoint_request_send`、`checkpoint_request_started`、`checkpoint_request_finished`，用于确认路径解析、daemon 接收和 checkpoint 落盘是否完整。对应回归测试包括 `weak_known_human_without_ai_checkpoint_does_not_claim_human_additions` 与 `test_run_in_terminal_missing_pre_snapshot_uses_git_status_fallback`。
 
 > **实施补充（2026-04-26）**：当前实现又追加了 4 个关键约束。
 > 1. 服务端 `GitAiStatsServiceImpl.create()` 会先按 `git_ai_commit_stats.commit_code` 过滤重复 commit；同一 commit 被重复上传时，不再重复创建 summary/commit/file/tool/prompt 记录。
@@ -2439,6 +2443,12 @@ GitHub Copilot VS Code native hook 的补充说明：当 hook payload 因为脱�
 | 2.20 | 修复 session/trace checkpoint 只落 `sessions` 不落 `prompts` | `git-ai/src/authorship/virtual_attribution.rs` | session/trace 形态提交后的 authorship note 会同时包含 `metadata.sessions` 与 `metadata.prompts`；`cargo test record_checkpoint_agent_metadata_for_session_format_creates_prompt_and_session --lib` 与 `cargo test calculate_and_update_prompt_metrics_supports_session_trace_prompt_ids --lib` 均通过 |
 | 2.21 | Windows 现场切换 Copilot native hook 到目标新版 binary，避免旧安装版重新拉起旧 daemon | 用户机 `~/.copilot/hooks/git-ai.json` + 目标 `git-ai.exe` | 当旧安装版 `git-ai.exe` 被锁、replacement runtime 已接管 trace2 后，下一次 Copilot AI 编辑与 commit 仍会由 hook JSON 指向的 binary 决定；将 hook 命令切到目标新版 binary 后，`debug.jsonl` 中 `post_commit_*` 的 `processId` 应对应目标 binary 路径 |
 | 2.22 | 自动上传遇到 `upload_activity.lock` 超时时继续 best-effort 发送 HTTP | `git-ai/src/integration/upload_stats.rs`、`git-ai/docs/design-doc/git-ai看板方案.md` | 黄芳 `debug(11).jsonl` 这类“payload 已生成但 HTTP 前卡在 activity lock”的场景下，自动上传会写入 `upload_stats_activity_lock_bypassed` 并继续发送；手动 `upload-stats` 仍严格等待锁 |
+| 2.23 | 安装成功后发送远程看板测试数据，且不能因 MCP 用户 ID 缺失跳过 | `git-ai/src/integration/install_test_upload.rs`、`git-ai/src/integration/mod.rs`、`git-ai/src/commands/install_hooks.rs` | `install-hooks` / 安装成功后写入 `install_test_upload_*` debug 事件；身份按 MCP / 环境用户 ID、Git 邮箱、IP 地址兜底；payload 包含 git-ai 版本、Git 版本、操作系统和版本，且所有 tool/prompt 明细补齐 `model=unknown` |
+| 2.24 | 无 authorship note 的 commit 不再跳过上传 | `git-ai/src/integration/upload_stats.rs`、`git-ai/src/commands/git_ai_handlers.rs`、`git-ai/src/commands/git_handlers.rs` | `git-ai upload-stats <sha>` 对无 note commit 构造 `hasAuthorshipNote=false`、`prompts=[]`、`unknownAdditions=gitDiffAddedLines` 的 metadata-only payload；commit wrapper 会等待 note，超时仍无 note 时后台触发兜底上传 |
+| 2.25 | 远程 payload 时间统一转换为北京时间 | `git-ai/src/integration/upload_stats.rs`、`git-ai/src/integration/install_test_upload.rs` | `%aI` 先按原始时区解析，再转 `UTC+08` 并格式化为 `yyyy-MM-dd HH:mm:ss`；后端不再收到 RFC3339 纳秒格式，也不会把 `2026-06-14T05:13:25+00:00` 误传成 `2026-06-14 05:13:25` |
+| 2.26 | `install-hooks` 自动修复失效全局 `core.hooksPath` 并清理旧 daemon | `git-ai/src/commands/install_hooks.rs` | 如果全局 `core.hooksPath` 指向不存在的历史托管目录，如 `ai-contribution-tracker` / `.git-ai` / `.git/ai/hooks`，安装时自动删除；Windows 重启 daemon 前按安装目录兜底清理旧 `git-ai.exe bg run`，避免旧进程继续处理 Trace2 / post-commit |
+| 2.27 | 弱 KnownHuman 不再把无 AI checkpoint 的新增代码强归人工 | `git-ai/src/daemon/checkpoint.rs`、`git-ai/src/authorship/stats.rs`、`git-ai/src/commands/checkpoint_agent/presets/mock_known_human.rs` | 缺少有效 `kh_editor` 的 `KnownHuman` 降级为普通 `Human`，不再写入 `h_*` 强人工 attestation；覆盖 `e2cc766` 这类 `promptCount=0` 却把 346 行 AI 误报成人工的场景 |
+| 2.28 | Copilot terminal / bash post checkpoint 缺失时用 git status 兜底 | `git-ai/src/commands/checkpoint_agent/orchestrator.rs`、`git-ai/src/daemon.rs`、`git-ai/src/commands/git_ai_handlers.rs`、`git-ai/tests/integration/github_copilot_tools.rs` | `MissingPreSnapshot` / `SnapshotFailed` / `HookTimeout` / post-hook error 不再静默丢失 AI 改动，回退到 `git_status_fallback` 后继续发送 AI checkpoint；新增 `bash_post_checkpoint_resolved`、`checkpoint_request_send`、`checkpoint_request_started`、`checkpoint_request_finished` debug 事件 |
 
 ### Phase 3（2-3 天）：Code Review 自动上传
 
@@ -2483,9 +2493,13 @@ GitHub Copilot VS Code native hook 的补充说明：当 hook payload 因为脱�
 | **git-ai 安装失败**（网络问题、权限问题） | `post-init.ps1` 打印 Warning 但不报错退出，Speckit 其他功能正常使用 | git-ai 是"锦上添花"，不是 Speckit 的核心依赖，安装失败不应阻塞开发 |
 | **git-ai 原生自动上传失败 / 超时** | `post_commit` 里的原生上传只做 best-effort；payload 组装失败、网络错误、非 2xx 响应都只记 debug 日志并跳过，不中断 commit | 即时上传是增强能力，不能为了网络成功率牺牲 commit 成功率 |
 | **git-ai background service 启动被锁阻塞**（旧版常见：`daemon startup blocked: lock held at ...daemon.lock`；新版恢复失败时可能带 `failed to recover unhealthy daemon pid ... taskkill ... 拒绝访问`） | 这是本机 daemon 连接 / 启动问题，不是远程 API 上传失败。报错 1 表示旧版看到锁后直接失败；报错 2 表示新版已经识别出旧 daemon 不健康并尝试 `taskkill`，但 Windows 权限拒绝结束旧进程。最快恢复仍是执行 `git-ai bg restart --hard`；当前实现不会再在 `taskkill` 被拒绝时自动切换 replacement runtime，而是保留 blocked startup 错误，避免继续制造新的 `bg run` 进程去争用全局上传锁 | `daemon.lock` 是进程级互斥锁，不能靠手动删除文件安全恢复；Windows 权限拒绝时也不能继续靠“换 runtime”掩盖问题，否则会把一个坏 daemon 扩散成多套 daemon runtime |
+| **全局 `core.hooksPath` 指向不存在目录** | `install-hooks` 必须自动检测并清理失效的历史 hooksPath；现场排查时执行 `git config --global --show-origin --get core.hooksPath`，若路径不存在，先清理再重新安装 hooks | Git 会按 `core.hooksPath` 查找 hook；路径不存在时，commit 后不会进入 post-commit，表现为 commit 没 note、`debug.jsonl` 没有该 commit |
+| **安装了新版但旧 daemon 还在跑** | 替换 `%USERPROFILE%\.git-ai\bin\git-ai.exe` / `git.exe` 后必须确认旧 `git-ai.exe bg run` 已退出；`install-hooks` 在 Windows 下会按安装目录兜底清理残留后台进程，再启动新 daemon | Windows 上磁盘文件更新不会替换旧内存镜像；如果旧 daemon 继续接收 Trace2，真实 commit 仍会走旧逻辑 |
 | **upload-ai-stats.ps1 上传失败**（API 不可达） | 一次批量请求失败时整批标记失败；若服务端返回 `results[]`，则按 commit 维度展示"N 成功, M 失败" | 降低请求次数，同时保留按 commit 追踪失败的能力 |
 | **Code Review 时 git-ai 未安装** | 步骤 8.3 检测到 `git-ai --version` 失败后，直接跳到步骤 9，审查报告正常生成但没有 AI 统计表格 | 审查报告的核心价值是代码质量问题，AI 统计是附加信息 |
 | **某个 commit 没有 AI authorship note** | 仍然调用 `git-ai stats <sha> --json`，但将 `hasAuthorshipNote=false` 且把该 commit 归到 `unknownAdditions` 视图 | 最新 `stats` 已能表达“没有归因 note，但有新增行”的情况，直接跳过会丢失有效数据 |
+| **后端报 `Field 'model' doesn't have a default value`** | 客户端三条上传链路都必须补齐 `model`，无法解析时写 `unknown` | 后端表字段无默认值，客户端要提交稳定 schema，不能依赖数据库默认值 |
+| **后端无法解析 timestamp / 看板时间差 8 小时** | 上传 payload 的 commit 时间先解析原始时区，再转换为北京时间 `yyyy-MM-dd HH:mm:ss` | Java `Date` 不接受 RFC3339 纳秒格式；团队看板按北京时间展示，不能只截 `%aI` 字符串 |
 | **API Key 泄露** | API Key 只存在本机环境变量或 CI Secret，不进入仓库文件 | 密钥不进 git，即使 `.specify/` 被提交也不含敏感信息 |
 | **网络超时** | 上传请求设置 10 秒 timeout | 防止长时间挂起，影响开发体验 |
 | **代码内容泄露** | 只上传统计数据（行数、比例、工具名），**从不上传代码内容** | 隐私第一：统计数据足够做管理决策，不需要源代码 |
@@ -2521,8 +2535,10 @@ $env:GIT_AI_DEBUG = "1" 临时排查
 **当前行为要点：**
 - `GIT_AI_AUTO_UPLOAD_AI_STATS` 默认已开启；如需关闭，设置为 `false`。如需显式覆盖，请使用 `true` / `false`，不要使用 `1` / `0`。
 - `GIT_AI_REPORT_REMOTE_URL`、`GIT_AI_REPORT_REMOTE_ENDPOINT`、`GIT_AI_REPORT_REMOTE_PATH` 都没配时，会回退到内置默认地址。
-- `GIT_AI_REPORT_REMOTE_USER_ID` 没配时，会复用 `resolve_x_user_id(...)` 从 MCP 配置中继续找 `X-USER-ID`。
-- 如果当前 commit 没算出 `stats`，这次 commit 不会上传，但 note 仍然照常写入。
+- `GIT_AI_REPORT_REMOTE_USER_ID` 没配时，普通统计上传会复用 `resolve_x_user_id(...)` 从 MCP 配置中继续找 `X-USER-ID`；安装成功测试上传还会按 MCP / 环境用户 ID、Git 邮箱、IP 地址兜底，不能因为 MCP 用户 ID 缺失跳过，也不能伪造测试用户。
+- 正常 commit 链路会在 `post_commit` 写出 authorship note 并算出 stats 后即时上传；若大提交在 post-commit 快路径跳过昂贵 stats，上传任务会按允许补算标记后台补算后再上传。
+- 如果 commit 没有 `refs/notes/ai` authorship note，自动 / 手动上传都不再直接跳过；上传 `hasAuthorshipNote=false` 的 metadata-only payload，并把新增行计入 `unknownAdditions`。
+- 所有上传 payload 都必须补齐后端必填字段，尤其是 `model` 缺失时填 `unknown`；commit 时间必须先解析原始时区，再转换为北京时间 `yyyy-MM-dd HH:mm:ss`。
 - `GIT_AI_DEBUG` 打开后，除了 stderr，还会写入本地 `~/.git-ai/logs/debug.jsonl`，用于排查“这次 checkpoint 到底被判成 AI 还是人工”以及“本次统计为什么没有上传到远程服务”。
 
 ### 当前项目默认安装 / 更新来源
@@ -2664,6 +2680,69 @@ env:
 ---
 
 ## 变更日志
+
+### 2026-06-14：张一峰 op-api 弱 KnownHuman 误归人工与 bash checkpoint 漏归因修复
+
+**变更原因：**
+
+`logs/zyf-20260614.jsonl` 暴露出两类独立归因问题。`2026-06-01 15:19:37` 左右的 `op-api` 提交 `e2cc766` 中，实际 346 行为 AI 生成，但日志显示 `promptCount=0`、`sessionCount=0`、`aiAdditions=0`、`humanAdditions=346`、`unknownAdditions=7`。这是弱 `KnownHuman` 自动保存事件在没有 AI checkpoint / prompt 证据时被强行写成 `h_*` 人工 attestation 导致的误判。`2026-06-11 13:58:10` 左右的 `op-api` 提交 `991aca4` 中，`src/main/java/com/ruijie/op/api/controller/JobTask.java` 实际为 AI 生成，但只识别出约 150 行 AI，其余落到 unknown。这里不是服务端映射错误，而是 terminal / bash 类 Copilot 调用缺少 pre snapshot 或 post checkpoint 失败后，旧链路没有把实际变更文件补送给 daemon，导致部分新增行没有归因记录。
+
+**本次代码级修改：**
+
+| 文件 | 修改点 | 影响 |
+|------|--------|------|
+| `git-ai/src/daemon/checkpoint.rs` | 新增 `effective_checkpoint_kind(...)`，缺少有效 `kh_editor` 的 `KnownHuman` 降级为普通 `Human` | 弱 IDE 自动保存不再生成 `h_*` 强人工归因，避免把无 AI checkpoint 的新增代码误报成人工 |
+| `git-ai/src/commands/checkpoint_agent/presets/mock_known_human.rs` | 测试 mock 的真实 KnownHuman 补齐 `kh_editor` / editor version 元数据 | 保留“明确人工编辑器事件”仍可归人工的测试语义 |
+| `git-ai/src/authorship/stats.rs` | 新增 `weak_known_human_without_ai_checkpoint_does_not_claim_human_additions` 回归测试 | 锁定 `e2cc766` 这类“弱 KnownHuman + 无 AI checkpoint”不能产生人工新增行 |
+| `git-ai/src/commands/checkpoint_agent/orchestrator.rs` | `PostBashCall` 在 `MissingPreSnapshot` / `SnapshotFailed` / `HookTimeout` / error 时调用 `git_status_fallback` | Copilot terminal / bash 修改文件后，即使前置快照缺失也能把实际变更文件作为 AI checkpoint 发送 |
+| `git-ai/src/commands/checkpoint_agent/orchestrator.rs` | 新增 `bash_post_checkpoint_resolved` debug 事件 | 能直接看到 bash post hook 的 action、fallback reason、检测文件数和最终发送文件数 |
+| `git-ai/src/daemon.rs`、`git-ai/src/commands/git_ai_handlers.rs` | 新增 `checkpoint_request_send`、`checkpoint_request_started`、`checkpoint_request_finished` debug 事件 | 排查时可区分“客户端没发出”、“daemon 没收到”和“daemon 处理失败” |
+| `git-ai/tests/integration/github_copilot_tools.rs` | 新增 `test_run_in_terminal_missing_pre_snapshot_uses_git_status_fallback` | 覆盖缺少 bash pre snapshot 时仍能把 terminal 生成文件归为 AI |
+
+**验证结论：**
+
+- `cargo fmt` 通过。
+- `cargo check -q` 通过。
+- `cargo test -q weak_known_human_without_ai_checkpoint_does_not_claim_human_additions --lib` 通过。
+- `cargo test -q --test integration test_run_in_terminal_missing_pre_snapshot_uses_git_status_fallback` 通过。
+- Windows 下直接跑未限定 harness 的过滤测试时，Cargo 还会尝试启动 `commit_tree_update_ref` 测试二进制，可能报 OS error 740 需要提权；该问题与本次归因逻辑无关，针对性使用 `--lib` / `--test integration` 可正常验证。
+
+### 2026-06-14：安装测试上传、无 note 兜底上传、北京时间和 hooksPath 根因修复
+
+**变更原因：**
+
+本轮现场问题集中暴露出“上传协议失败”和“安装生效失败”两类问题混在一起。服务端曾因 payload 缺少 `model` 报 `Field 'model' doesn't have a default value`，也曾因收到 RFC3339 纳秒 timestamp 而无法反序列化 `java.util.Date`。同时，`op-return-exchange` 的 `bfd32c8` 没有自动上传，最终根因不是远程接口，也不是 AI 归因计算，而是全局 `core.hooksPath` 指向已经不存在的旧 `yoavlax.ai-contribution-tracker\git-hooks` 目录，Git 提交阶段根本没有执行 post-commit；再叠加旧 `git-ai.exe bg run` 进程仍在跑，导致“安装了新版但真实提交仍可能不生效”。
+
+**本次代码级修改：**
+
+| 文件 | 修改点 | 影响 |
+|------|--------|------|
+| `git-ai/src/integration/install_test_upload.rs` | 安装成功后发送远程看板测试数据，且身份解析顺序改为 MCP / 环境用户 ID、Git 邮箱、IP 地址 | 安装成功后一定有可审计的测试上传尝试；没有 MCP `X-USER-ID` 时不再跳过，也不伪造测试用户 |
+| `git-ai/src/integration/upload_stats.rs` | 所有 tool / prompt / breakdown 明细补齐 `model`，缺失时写 `unknown` | 避免后端 `git_ai_tool_stats.model` 无默认值导致整批上传回滚 |
+| `git-ai/src/integration/upload_stats.rs` | commit timestamp 先解析 `%aI` 原始时区，再转北京时间 `yyyy-MM-dd HH:mm:ss` | 避免后端无法解析 RFC3339 纳秒时间，也避免 UTC 时间被直接截成错误的北京时间 |
+| `git-ai/src/integration/upload_stats.rs` | 无 authorship note 的 commit 不再跳过，构造 `hasAuthorshipNote=false` 的 metadata-only payload | 历史 / 异常 commit 仍能上报项目、作者、时间、文件数和新增行，新增行进入 `unknownAdditions`，不制造 AI / 人工归因 |
+| `git-ai/src/commands/git_ai_handlers.rs` | `upload-stats` 增加等待 authorship note / note 出现则跳过的内部参数和 debug 事件 | wrapper 兜底路径能先给 daemon 写 note 留时间，正常 note 出现时避免重复 metadata-only 上传 |
+| `git-ai/src/commands/git_handlers.rs` | `git commit` 成功后后台启动兜底 `git-ai upload-stats <sha>` | 如果 post-commit / daemon 没及时写 note，仍能在等待超时后上传 metadata-only 记录，避免完全漏报 |
+| `git-ai/src/commands/install_hooks.rs` | `install-hooks` 自动检测并清理失效的全局 `core.hooksPath` | 修复 `core.hooksPath` 指向不存在旧 hook 目录时 Git 完全不执行 post-commit 的根因 |
+| `git-ai/src/commands/install_hooks.rs` | Windows 下重启 daemon 前按当前安装目录清理残留 `git-ai.exe bg run` | 即使 `daemon.pid.json` 缺失，也不会让旧后台进程继续接收 Trace2 / wrapper 事件 |
+| `git-ai/docs/design-doc/git-ai看板方案.md` | 回填本轮根因、代码修改、现场恢复和验证要求 | 后续排查不再只看源码或版本号，必须同时核对安装版哈希、Trace2、hooksPath、daemon 与 debug 日志 |
+
+**现场恢复步骤：**
+
+1. 清理坏的全局 hooksPath：`git config --global --unset-all core.hooksPath`，或运行新版 `git-ai install-hooks` 自动清理。
+2. 停掉旧后台进程：优先 `git-ai bg shutdown --hard`；如果 `daemon.pid.json` 缺失或仍有旧 `git-ai.exe bg run`，按进程路径清理同安装目录的后台进程。
+3. rebuild release 后替换 `%USERPROFILE%\.git-ai\bin\git-ai.exe` 与 `%USERPROFILE%\.git-ai\bin\git.exe`，并用文件哈希确认两者与 `target/release/git-ai.exe` 一致。
+4. 重新执行 `git-ai install-hooks`，确认 `core.hooksPath` 为空或指向存在目录，`trace2.eventTarget` 指向当前 git-ai pipe。
+5. 确认只剩一个当前安装目录下的新 `git-ai.exe bg run`，再进行真实 commit 或 `upload-stats --dry-run` 验证。
+
+**验证结论：**
+
+- `cargo fmt --check` 通过。
+- `cargo check --lib` 通过。
+- `cargo test repair_stale_global_hooks_path --lib` 通过，覆盖缺失 hooksPath 会清理、存在 hooksPath 不误删。
+- 现场安装版 `git-ai.exe` / `git.exe` 的 SHA256 已与 `target/release/git-ai.exe` 一致。
+- 模拟坏 `core.hooksPath=...\yoavlax.ai-contribution-tracker\git-hooks` 后，安装版 `git-ai install-hooks` 输出 `Removed stale global core.hooksPath...`，最终 `core.hooksPath=<unset>`、Trace2 pipe 保留、只剩一个新 `git-ai.exe bg run`。
+- `bfd32c8` 这类历史无 note commit 不补造 note；已按 `source=repair-missing-note` 上传 `hasAuthorshipNote=false` / `unknownAdditions=32` 的 metadata-only 记录，远程返回 200。
 
 ### 2026-05-10：补充 Windows 真机验证结论与 GitHub latest / asset 修正流程
 
@@ -2884,7 +2963,8 @@ git-ai upload-ai-stats [<commit>...] [--dry-run] [--source <name>] [--ignore <pa
 
 **使用前提：**
 
-- 本地目标 commit 已经有 authorship note；如果没有 note，命令会跳过该 commit，不会伪造上传数据。
+- 本地目标 commit 有 authorship note 时，会上传真实 note / stats / prompt 归因。
+- 如果目标 commit 没有 authorship note，命令不会伪造 AI 或人工归因，也不会跳过；它会基于 Git diff 构造 metadata-only payload：`hasAuthorshipNote=false`、`prompts=[]`、`aiAdditions=0`、`humanAdditions=0`、`unknownAdditions=gitDiffAddedLines`。
 - 上传目标仍沿用现有远程配置：`GIT_AI_REPORT_REMOTE_URL`，或 `GIT_AI_REPORT_REMOTE_ENDPOINT` + `GIT_AI_REPORT_REMOTE_PATH`。
 - 鉴权仍沿用现有配置：`GIT_AI_REPORT_REMOTE_API_KEY`，以及 `GIT_AI_REPORT_REMOTE_USER_ID` 或 MCP 解析出的用户 ID。
 
@@ -2920,7 +3000,8 @@ git-ai upload-stats --dry-run --ignore '*.md' --ignore 'src/generated/**' HEAD
 
 - 出现 `dry-run ... completed source=manual uploaded=0 dry_run=1 skipped=0 failed=0` 表示本地统计和配置可被正确解析，但这次没有真正发请求。
 - 出现 `uploaded ... status=200` 表示对应 commit 已完成上传。
-- 出现 `skipped ... reason=no_authorship_note` 表示该 commit 本地没有 authorship note，命令按设计跳过。
+- 出现 `upload_stats_manual_missing_authorship_note` / `hasAuthorshipNote=false` 表示该 commit 本地没有 authorship note，命令按 metadata-only 口径上传未知归因记录。
+- 出现 `upload_stats_wait_for_authorship_note_*` 表示 wrapper 兜底路径正在等待 daemon 写 note；如果等待结束仍没有 note，会继续走 metadata-only 上传。
 - 最后一行 `completed source=... uploaded=<n> dry_run=<n> skipped=<n> failed=<n>` 是整次命令汇总；只要 `failed>0`，命令会以非 0 退出码结束，方便脚本或 CI 判断失败。
 
 **何时用原生命令，何时用脚本：**

@@ -1584,6 +1584,67 @@ fn append_checkpoint_request_resolution_debug_event(
     );
 }
 
+fn append_checkpoint_lifecycle_debug_event(
+    event: &str,
+    request: &CheckpointRequest,
+    repo_work_dir: &str,
+    family: Option<&str>,
+    status: &str,
+    duration_ms: Option<u128>,
+    error: Option<&GitAiError>,
+) {
+    let requested_filepaths = request
+        .files
+        .iter()
+        .map(|file| file.path.to_string_lossy().replace('\\', "/"))
+        .collect::<Vec<_>>();
+
+    crate::diagnostics::append_debug_event(
+        event,
+        json!({
+            "repo": repo_work_dir.replace('\\', "/"),
+            "family": family,
+            "traceId": request.trace_id,
+            "checkpointKind": request.checkpoint_kind.to_str(),
+            "pathRole": format!("{:?}", request.path_role),
+            "toolUseId": request.metadata.get("tool_use_id"),
+            "requestFileCount": requested_filepaths.len(),
+            "requestFilepaths": requested_filepaths,
+            "status": status,
+            "durationMs": duration_ms,
+            "error": error.map(|err| err.to_string()),
+        }),
+    );
+}
+
+pub(crate) fn append_checkpoint_send_debug_event(
+    request: &CheckpointRequest,
+    control_socket_path: &std::path::Path,
+    sent: bool,
+    error: Option<&GitAiError>,
+) {
+    let repo_work_dir = request
+        .files
+        .first()
+        .map(|file| file.repo_work_dir.to_string_lossy().to_string())
+        .unwrap_or_default();
+
+    crate::diagnostics::append_debug_event(
+        "checkpoint_request_send",
+        json!({
+            "repo": repo_work_dir.replace('\\', "/"),
+            "controlSocket": control_socket_path.to_string_lossy().replace('\\', "/"),
+            "traceId": request.trace_id,
+            "checkpointKind": request.checkpoint_kind.to_str(),
+            "pathRole": format!("{:?}", request.path_role),
+            "toolUseId": request.metadata.get("tool_use_id"),
+            "requestFileCount": request.files.len(),
+            "sent": sent,
+            "error": error.map(|err| err.to_string()),
+        }),
+    );
+}
+
 fn compute_watermarks_from_stat(
     repo_working_dir: &str,
     file_paths: &[String],
@@ -5938,6 +5999,7 @@ impl ActorDaemonCoordinator {
                     let checkpoint_has_agent = request.agent_id.is_some();
                     let checkpoint_kind_str = format!("{:?}", checkpoint_kind);
                     let is_human_checkpoint = checkpoint_kind == CheckpointKind::Human;
+                    let request_debug = (*request).clone();
 
                     // Register pending AI edit state when an AI agent fires its
                     // pre-edit snapshot. This signals that an AI edit is in-flight.
@@ -5996,6 +6058,15 @@ impl ActorDaemonCoordinator {
 
                     let should_log_completion = true; // Always log for test sync
                     tracing::info!(kind = %checkpoint_kind_str, repo = %repo_wd, "checkpoint start");
+                    append_checkpoint_lifecycle_debug_event(
+                        "checkpoint_request_started",
+                        &request_debug,
+                        &repo_wd,
+                        Some(family),
+                        "started",
+                        None,
+                        None,
+                    );
                     let checkpoint_start = std::time::Instant::now();
                     let checkpoint_request = {
                         let future = async {
@@ -6049,12 +6120,30 @@ impl ActorDaemonCoordinator {
                             duration_ms = checkpoint_duration_ms as u64,
                             "checkpoint done"
                         );
+                        append_checkpoint_lifecycle_debug_event(
+                            "checkpoint_request_finished",
+                            &request_debug,
+                            &repo_wd,
+                            Some(family),
+                            "succeeded",
+                            Some(checkpoint_duration_ms),
+                            None,
+                        );
                     } else {
                         tracing::warn!(
                             kind = %checkpoint_kind_str,
                             repo = %repo_wd,
                             duration_ms = checkpoint_duration_ms as u64,
                             "checkpoint failed"
+                        );
+                        append_checkpoint_lifecycle_debug_event(
+                            "checkpoint_request_finished",
+                            &request_debug,
+                            &repo_wd,
+                            Some(family),
+                            "failed",
+                            Some(checkpoint_duration_ms),
+                            result.as_ref().err(),
                         );
                     }
                     if result.is_ok() {

@@ -521,8 +521,24 @@ fn handle_checkpoint(args: &[String]) {
             );
         }
         if let Err(e) = send_result {
+            if let ControlRequest::CheckpointRun { request } = &control_request {
+                crate::daemon::append_checkpoint_send_debug_event(
+                    request,
+                    &config.control_socket_path,
+                    false,
+                    Some(&e),
+                );
+            }
             eprintln!("Failed to send checkpoint to background worker: {}", e);
             std::process::exit(0);
+        }
+        if let ControlRequest::CheckpointRun { request } = &control_request {
+            crate::daemon::append_checkpoint_send_debug_event(
+                request,
+                &config.control_socket_path,
+                true,
+                None,
+            );
         }
         sent_count += 1;
     }

@@ -398,6 +398,10 @@ fn execute_post_bash_call(e: PostBashCall) -> Result<Vec<CheckpointRequest>, Git
 
     let repo = discover_repository_in_path_no_git_exec(e.context.cwd.as_path())?;
     let repo_work_dir = repo.workdir()?;
+    let session_id = e.context.external_session_id.clone();
+    let tool_use_id = e.tool_use_id.clone();
+    let agent_tool = e.context.agent_id.tool.clone();
+    let trace_id = e.context.trace_id.clone();
 
     let bash_result = bash_tool::handle_bash_post_tool_use(
         &repo_work_dir,
@@ -405,22 +409,96 @@ fn execute_post_bash_call(e: PostBashCall) -> Result<Vec<CheckpointRequest>, Git
         &e.tool_use_id,
     );
 
+    let mut action_name = "error";
+    let mut detected_paths: Vec<String> = Vec::new();
+    let mut fallback_reason: Option<&'static str> = None;
+    let mut error_message: Option<String> = None;
     let file_paths: Vec<PathBuf> = match &bash_result {
-        Ok(result) => match &result.action {
-            bash_tool::BashCheckpointAction::Checkpoint(paths) => paths
-                .iter()
-                .map(|p| {
-                    let joined = repo_work_dir.join(p);
-                    fs::canonicalize(&joined).unwrap_or(joined)
-                })
-                .collect(),
-            _ => vec![],
-        },
+        Ok(result) => {
+            action_name = match &result.action {
+                bash_tool::BashCheckpointAction::Checkpoint(_) => "checkpoint",
+                bash_tool::BashCheckpointAction::NoChanges => "no_changes",
+                bash_tool::BashCheckpointAction::HookTimeout => "hook_timeout",
+                bash_tool::BashCheckpointAction::SnapshotFailed => "snapshot_failed",
+                bash_tool::BashCheckpointAction::MissingPreSnapshot => "missing_pre_snapshot",
+            };
+
+            match &result.action {
+                bash_tool::BashCheckpointAction::Checkpoint(paths) => {
+                    detected_paths = paths.clone();
+                    paths
+                        .iter()
+                        .map(|p| {
+                            let joined = repo_work_dir.join(p);
+                            fs::canonicalize(&joined).unwrap_or(joined)
+                        })
+                        .collect()
+                }
+                bash_tool::BashCheckpointAction::NoChanges => vec![],
+                bash_tool::BashCheckpointAction::HookTimeout
+                | bash_tool::BashCheckpointAction::SnapshotFailed
+                | bash_tool::BashCheckpointAction::MissingPreSnapshot => {
+                    match bash_tool::git_status_fallback(&repo_work_dir) {
+                        Ok(paths) if !paths.is_empty() => {
+                            fallback_reason = Some("git_status_fallback");
+                            detected_paths = paths.clone();
+                            paths
+                                .into_iter()
+                                .map(|p| {
+                                    let joined = repo_work_dir.join(p);
+                                    fs::canonicalize(&joined).unwrap_or(joined)
+                                })
+                                .collect()
+                        }
+                        Ok(_) => vec![],
+                        Err(err) => {
+                            error_message = Some(err.to_string());
+                            vec![]
+                        }
+                    }
+                }
+            }
+        }
         Err(err) => {
             tracing::debug!("Bash tool post-hook error: {}", err);
-            vec![]
+            error_message = Some(err.to_string());
+            match bash_tool::git_status_fallback(&repo_work_dir) {
+                Ok(paths) if !paths.is_empty() => {
+                    fallback_reason = Some("git_status_fallback_after_error");
+                    detected_paths = paths.clone();
+                    paths
+                        .into_iter()
+                        .map(|p| {
+                            let joined = repo_work_dir.join(p);
+                            fs::canonicalize(&joined).unwrap_or(joined)
+                        })
+                        .collect()
+                }
+                Ok(_) => vec![],
+                Err(fallback_err) => {
+                    error_message = Some(format!("{}; fallback: {}", err, fallback_err));
+                    vec![]
+                }
+            }
         }
     };
+
+    crate::diagnostics::append_debug_event(
+        "bash_post_checkpoint_resolved",
+        serde_json::json!({
+            "repo": repo_work_dir.to_string_lossy().replace('\\', "/"),
+            "traceId": trace_id,
+            "tool": agent_tool,
+            "sessionId": session_id,
+            "toolUseId": tool_use_id,
+            "action": action_name,
+            "fallbackReason": fallback_reason,
+            "detectedPathCount": detected_paths.len(),
+            "detectedPaths": detected_paths,
+            "finalFileCount": file_paths.len(),
+            "error": error_message,
+        }),
+    );
 
     let files = build_checkpoint_files(&file_paths)?;
     let mut metadata = e.context.metadata;

@@ -35,12 +35,17 @@ impl AgentPreset for MockKnownHumanPreset {
             (paths, cwd)
         };
 
+        let mut editor_metadata = HashMap::new();
+        editor_metadata.insert("kh_editor".to_string(), "mock-test-editor".to_string());
+        editor_metadata.insert("kh_editor_version".to_string(), "1.0.0".to_string());
+        editor_metadata.insert("kh_extension_version".to_string(), "1.0.0".to_string());
+
         Ok(vec![ParsedHookEvent::KnownHumanEdit(KnownHumanEdit {
             trace_id: trace_id.to_string(),
             cwd,
             file_paths,
             dirty_files: None,
-            editor_metadata: HashMap::new(),
+            editor_metadata,
         })])
     }
 }

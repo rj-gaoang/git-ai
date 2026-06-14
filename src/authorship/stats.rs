@@ -1275,6 +1275,57 @@ mod tests {
     }
 
     #[test]
+    fn weak_known_human_without_ai_checkpoint_does_not_claim_human_additions() {
+        let tmp_repo = TmpRepo::new().unwrap();
+
+        tmp_repo
+            .write_file("test.txt", "Base line\n", true)
+            .unwrap();
+        tmp_repo
+            .trigger_checkpoint_with_author("test_user")
+            .unwrap();
+        tmp_repo.commit_with_message("Initial commit").unwrap();
+
+        tmp_repo
+            .write_file(
+                "test.txt",
+                "Base line\nAI line 1\nAI line 2\nAI line 3\n",
+                true,
+            )
+            .unwrap();
+
+        tmp_repo
+            .trigger_checkpoint_with_weak_known_human("test_user")
+            .unwrap();
+
+        let authorship_log = tmp_repo
+            .commit_with_message("Weak save without AI checkpoint")
+            .unwrap();
+
+        let head_sha = tmp_repo.get_head_commit_sha().unwrap();
+        let stats = stats_for_commit_stats(tmp_repo.gitai_repo(), &head_sha, &[]).unwrap();
+
+        assert_eq!(stats.git_diff_added_lines, 3);
+        assert_eq!(stats.ai_additions, 0);
+        assert_eq!(stats.human_additions, 0);
+        assert_eq!(stats.unknown_additions, 3);
+
+        let attestation_hashes: Vec<&str> = authorship_log
+            .attestations
+            .iter()
+            .flat_map(|file| file.entries.iter())
+            .map(|entry| entry.hash.as_str())
+            .collect();
+        assert!(
+            attestation_hashes
+                .iter()
+                .all(|hash| !hash.starts_with("h_")),
+            "weak KnownHuman without AI checkpoint must not create h_* human attestations: {:?}",
+            attestation_hashes
+        );
+    }
+
+    #[test]
     fn weak_known_human_save_on_ai_content_preserves_ai_additions() {
         let tmp_repo = TmpRepo::new().unwrap();
 

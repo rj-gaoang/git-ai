@@ -16,6 +16,7 @@ use std::process::{Command, Stdio};
 const TRACE2_EVENT_TARGET_KEY: &str = "trace2.eventTarget";
 const TRACE2_EVENT_NESTING_KEY: &str = "trace2.eventNesting";
 const TRACE2_EVENT_NESTING_VALUE: &str = "10";
+const CORE_HOOKS_PATH_KEY: &str = "core.hooksPath";
 
 /// Installation status for a tool
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -277,6 +278,67 @@ fn configure_daemon_trace2(dry_run: bool) -> Result<(), GitAiError> {
     configure_async_mode_daemon_trace2_for_config(&daemon_config)
 }
 
+fn expanded_hooks_path(value: &str) -> PathBuf {
+    let trimmed = value.trim();
+    if let Some(rest) = trimmed
+        .strip_prefix("~/")
+        .or_else(|| trimmed.strip_prefix("~\\"))
+        && let Some(home) = dirs::home_dir()
+    {
+        return home.join(rest);
+    }
+    PathBuf::from(trimmed)
+}
+
+fn stale_global_hooks_path_should_be_removed(value: &str) -> bool {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    let candidate = expanded_hooks_path(trimmed);
+    if candidate.exists() || candidate.symlink_metadata().is_ok() {
+        return false;
+    }
+
+    let normalized = trimmed.replace('/', "\\").to_ascii_lowercase();
+    let known_managed_legacy_path = normalized.contains("ai-contribution-tracker")
+        || normalized.contains("\\.git-ai\\")
+        || normalized.contains("\\.git\\ai\\hooks");
+
+    candidate.is_absolute() || known_managed_legacy_path
+}
+
+fn repair_stale_global_hooks_path(dry_run: bool) -> Result<Option<String>, GitAiError> {
+    let config_path = global_git_config_path();
+    if !config_path.exists() {
+        return Ok(None);
+    }
+
+    let mut cfg = load_global_git_config(&config_path)?;
+    let current = cfg
+        .string(CORE_HOOKS_PATH_KEY)
+        .map(|value| value.to_string())
+        .filter(|value| !value.trim().is_empty());
+
+    let Some(current) = current else {
+        return Ok(None);
+    };
+
+    if !stale_global_hooks_path_should_be_removed(&current) {
+        return Ok(None);
+    }
+
+    if !dry_run {
+        if let Ok(mut hooks_path_values) = cfg.raw_values_mut_by("core", None, "hooksPath") {
+            hooks_path_values.delete_all();
+        }
+        write_global_git_config(&config_path, &cfg)?;
+    }
+
+    Ok(Some(current))
+}
+
 pub(crate) fn configure_async_mode_daemon_trace2_for_config(
     daemon_config: &DaemonConfig,
 ) -> Result<(), GitAiError> {
@@ -305,6 +367,8 @@ fn ensure_daemon(dry_run: bool) {
         return;
     };
 
+    stop_orphaned_managed_daemon_processes();
+
     // Restart daemon so it picks up the freshly-written trace2 config.
     // Uses soft shutdown → hard kill escalation if needed.
     if let Err(e) = crate::commands::daemon::restart_daemon(&daemon_config) {
@@ -314,6 +378,48 @@ fn ensure_daemon(dry_run: bool) {
         );
     }
 }
+
+#[cfg(windows)]
+fn stop_orphaned_managed_daemon_processes() {
+    let Ok(current_exe) = std::env::current_exe() else {
+        return;
+    };
+
+    let script = r#"
+$target = [Environment]::GetEnvironmentVariable('GIT_AI_INSTALL_HOOKS_CURRENT_EXE')
+if ([string]::IsNullOrWhiteSpace($target)) { exit 0 }
+try {
+  $target = [IO.Path]::GetFullPath($target).TrimEnd('\').ToLowerInvariant()
+} catch {
+  $target = $target.TrimEnd('\').ToLowerInvariant()
+}
+Get-CimInstance Win32_Process -Filter "name = 'git-ai.exe'" -ErrorAction SilentlyContinue |
+  Where-Object {
+    $_.CommandLine -match '\bbg\s+run\b' -and
+    $_.ExecutablePath -and
+    ([IO.Path]::GetFullPath($_.ExecutablePath).TrimEnd('\').ToLowerInvariant() -eq $target)
+  } |
+  ForEach-Object {
+    try { Stop-Process -Id $_.ProcessId -Force -ErrorAction Stop } catch { }
+  }
+"#;
+
+    let _ = Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            script,
+        ])
+        .env("GIT_AI_INSTALL_HOOKS_CURRENT_EXE", current_exe)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
+#[cfg(not(windows))]
+fn stop_orphaned_managed_daemon_processes() {}
 
 /// Main entry point for install-hooks command
 pub fn run(args: &[String]) -> Result<HashMap<String, String>, GitAiError> {
@@ -337,6 +443,18 @@ pub fn run(args: &[String]) -> Result<HashMap<String, String>, GitAiError> {
     // Non-fatal: the global git config may be read-only (e.g. Nix store symlink).
     if let Err(e) = configure_daemon_trace2(dry_run) {
         eprintln!("Warning: could not configure trace2 (non-fatal): {e}");
+    }
+    match repair_stale_global_hooks_path(dry_run) {
+        Ok(Some(path)) if dry_run => {
+            println!("Would remove stale global core.hooksPath: {}", path);
+        }
+        Ok(Some(path)) => {
+            println!("Removed stale global core.hooksPath: {}", path);
+        }
+        Ok(None) => {}
+        Err(e) => {
+            eprintln!("Warning: could not repair core.hooksPath (non-fatal): {e}");
+        }
     }
     ensure_daemon(dry_run);
 
@@ -1173,6 +1291,66 @@ mod tests {
             Some(TRACE2_EVENT_NESTING_VALUE.to_string())
         );
         assert!(cfg.string("trace2.normalTarget").is_none());
+    }
+
+    #[test]
+    #[serial]
+    fn repair_stale_global_hooks_path_removes_missing_absolute_path() {
+        let temp = tempdir().unwrap();
+        let config_path = temp.path().join(".gitconfig");
+        let missing_hooks = temp.path().join("missing-hooks");
+        fs::write(
+            &config_path,
+            format!(
+                "[core]\n\thooksPath = {}\n[user]\n\tname = Test User\n",
+                missing_hooks.to_string_lossy().replace('\\', "/")
+            ),
+        )
+        .unwrap();
+
+        let _global_config = EnvVarGuard::set("GIT_CONFIG_GLOBAL", config_path.to_str().unwrap());
+
+        let removed = repair_stale_global_hooks_path(false).unwrap();
+
+        assert_eq!(
+            removed.as_deref(),
+            Some(missing_hooks.to_string_lossy().replace('\\', "/").as_str())
+        );
+        let cfg = load_global_git_config(&config_path).unwrap();
+        assert!(cfg.string(CORE_HOOKS_PATH_KEY).is_none());
+        assert_eq!(
+            cfg.string("user.name").map(|value| value.to_string()),
+            Some("Test User".to_string())
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn repair_stale_global_hooks_path_preserves_existing_path() {
+        let temp = tempdir().unwrap();
+        let config_path = temp.path().join(".gitconfig");
+        let hooks_dir = temp.path().join("hooks");
+        fs::create_dir_all(&hooks_dir).unwrap();
+        fs::write(
+            &config_path,
+            format!(
+                "[core]\n\thooksPath = {}\n",
+                hooks_dir.to_string_lossy().replace('\\', "/")
+            ),
+        )
+        .unwrap();
+
+        let _global_config = EnvVarGuard::set("GIT_CONFIG_GLOBAL", config_path.to_str().unwrap());
+
+        let removed = repair_stale_global_hooks_path(false).unwrap();
+
+        assert!(removed.is_none());
+        let cfg = load_global_git_config(&config_path).unwrap();
+        assert_eq!(
+            cfg.string(CORE_HOOKS_PATH_KEY)
+                .map(|value| value.to_string()),
+            Some(hooks_dir.to_string_lossy().replace('\\', "/"))
+        );
     }
 
     #[test]
