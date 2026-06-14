@@ -105,12 +105,8 @@ pub fn build_agent_usage_attrs(
         .custom_attributes_map(crate::config::Config::fresh().custom_attributes());
 
     if let Some(repo) = repo {
-        if let Ok(Some(remote_name)) = repo.get_default_remote()
-            && let Ok(remotes) = repo.remotes_with_urls()
-            && let Some((_, url)) = remotes.into_iter().find(|(n, _)| n == &remote_name)
-            && let Ok(normalized) = crate::repo_url::normalize_repo_url(&url)
-        {
-            attrs = attrs.repo_url(normalized);
+        if let Some(url) = crate::repo_url::resolve_repo_url_from_repo(repo) {
+            attrs = attrs.repo_url(url);
         }
 
         if let Ok(head_ref) = repo.head()
@@ -152,12 +148,8 @@ fn build_checkpoint_attrs(
     attrs = attrs.custom_attributes_map(crate::config::Config::fresh().custom_attributes());
 
     // Add repo URL
-    if let Ok(Some(remote_name)) = repo.get_default_remote()
-        && let Ok(remotes) = repo.remotes_with_urls()
-        && let Some((_, url)) = remotes.into_iter().find(|(n, _)| n == &remote_name)
-        && let Ok(normalized) = crate::repo_url::normalize_repo_url(&url)
-    {
-        attrs = attrs.repo_url(normalized);
+    if let Some(url) = crate::repo_url::resolve_repo_url_from_repo(repo) {
+        attrs = attrs.repo_url(url);
     }
 
     // Add branch
@@ -200,6 +192,12 @@ fn execute_resolved_checkpoint(
     resolved: ResolvedCheckpointExecution,
     checkpoint_start: Instant,
 ) -> Result<(usize, usize, usize), GitAiError> {
+    if kind.is_ai() && checkpoint_request.agent_id.is_none() {
+        return Err(GitAiError::Generic(
+            "AI checkpoint is missing agent_id".to_string(),
+        ));
+    }
+
     let mut working_log = repo
         .storage
         .working_log_for_base_commit(&resolved.base_commit)?;
@@ -361,6 +359,11 @@ fn execute_resolved_checkpoint(
             .get("tool_use_id")
             .map(|s| s.as_str());
 
+        let edit_kind = checkpoint_request
+            .metadata
+            .get("edit_kind")
+            .map(|s| s.as_str());
+
         for (entry, file_stat) in entries.iter().zip(file_stats.iter()) {
             let mut values = crate::metrics::CheckpointValues::new()
                 .checkpoint_ts(checkpoint.timestamp)
@@ -371,9 +374,11 @@ fn execute_resolved_checkpoint(
                 .lines_added_sloc(file_stat.additions_sloc)
                 .lines_deleted_sloc(file_stat.deletions_sloc);
 
-            // Add tool_use_id if available
             if let Some(tuid) = tool_use_id {
                 values = values.external_tool_use_id(tuid);
+            }
+            if let Some(ek) = edit_kind {
+                values = values.edit_kind(ek);
             }
 
             let file_attrs = attrs.clone().author(&checkpoint.author);

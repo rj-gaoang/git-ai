@@ -1,7 +1,7 @@
 use crate::daemon::daemon_log_file_path;
 use crate::daemon::{
     ControlRequest, DaemonConfig, local_socket_connects_with_timeout, read_daemon_pid,
-    send_control_request,
+    remove_stale_daemon_files, send_control_request,
 };
 use crate::utils::LockFile;
 #[cfg(windows)]
@@ -94,16 +94,6 @@ fn daemon_startup_timeout() -> Duration {
     }
 }
 
-fn blocked_daemon_missing_pid_grace() -> Duration {
-    Duration::from_millis(500)
-}
-
-enum BlockedDaemonWaitResult {
-    BecameHealthy,
-    TimedOutWithPid(u32),
-    MissingPidMetadata,
-}
-
 /// Spawn a daemon and wait for it to become healthy. Used by explicit CLI
 /// commands (`bg start`, `bg restart`) — NOT guarded for test builds.
 ///
@@ -116,10 +106,13 @@ fn ensure_daemon_running_attached(timeout: Duration) -> Result<DaemonConfig, Str
         return Ok(config);
     }
 
-    if daemon_startup_is_blocked(&config)
-        && let Some(config) = recover_blocked_daemon_startup(&config, timeout)?
-    {
-        return Ok(config);
+    remove_stale_daemon_files(&config);
+
+    if daemon_startup_is_blocked(&config) {
+        return Err(format!(
+            "daemon startup blocked: lock held at {}",
+            config.lock_path.display()
+        ));
     }
 
     #[cfg(not(windows))]
@@ -256,12 +249,6 @@ pub(crate) fn ensure_daemon_running(
             );
         }
 
-        if daemon_startup_is_blocked(&config)
-            && let Some(config) = recover_blocked_daemon_startup(&config, timeout)?
-        {
-            return Ok(config);
-        }
-
         start_daemon_detached_with_config(config, timeout)
     }
 }
@@ -279,112 +266,6 @@ fn daemon_startup_is_blocked(config: &DaemonConfig) -> bool {
             false
         }
         None => true,
-    }
-}
-
-fn recover_blocked_daemon_startup(
-    config: &DaemonConfig,
-    timeout: Duration,
-) -> Result<Option<DaemonConfig>, String> {
-    match wait_for_blocked_daemon(config, timeout) {
-        BlockedDaemonWaitResult::BecameHealthy => Ok(Some(config.clone())),
-        BlockedDaemonWaitResult::MissingPidMetadata => {
-            let reason = format!(
-                "locked daemon at {} has no pid metadata",
-                config.lock_path.display()
-            );
-            activate_replacement_runtime_after_recovery_failure(reason, timeout)
-        }
-        BlockedDaemonWaitResult::TimedOutWithPid(pid) => {
-            if daemon_is_up(config) {
-                return Ok(Some(config.clone()));
-            }
-            if let Err(error) = hard_kill_daemon_pid(config, pid) {
-                let reason = format!(
-                    "failed to recover locked daemon pid {} at {}: {}",
-                    pid,
-                    config.lock_path.display(),
-                    error,
-                );
-                return activate_replacement_runtime_after_recovery_failure(reason, timeout);
-            }
-            if !wait_for_daemon_dead(config, Duration::from_secs(2)) {
-                let reason = format!(
-                    "daemon pid {} did not release lock {} after force kill",
-                    pid,
-                    config.lock_path.display(),
-                );
-                return activate_replacement_runtime_after_recovery_failure(reason, timeout);
-            }
-            Ok(None)
-        }
-    }
-}
-
-#[cfg(not(any(test, feature = "test-support")))]
-fn activate_replacement_runtime_after_recovery_failure(
-    reason: String,
-    timeout: Duration,
-) -> Result<Option<DaemonConfig>, String> {
-    eprintln!(
-        "[git-ai] warning: {}; activating a replacement daemon runtime",
-        reason
-    );
-    let replacement = DaemonConfig::activate_replacement_runtime(&reason)
-        .map_err(|e| format!("failed to activate replacement daemon runtime: {}", e))?;
-
-    if let Err(e) =
-        crate::commands::install_hooks::configure_async_mode_daemon_trace2_for_config(&replacement)
-    {
-        eprintln!(
-            "[git-ai] warning: failed to update trace2 for replacement daemon runtime: {}",
-            e
-        );
-    }
-
-    start_daemon_detached_with_config(replacement, timeout).map(Some)
-}
-
-#[cfg(any(test, feature = "test-support"))]
-fn activate_replacement_runtime_after_recovery_failure(
-    reason: String,
-    _timeout: Duration,
-) -> Result<Option<DaemonConfig>, String> {
-    Err(format!(
-        "daemon startup blocked: {}; replacement daemon runtime disabled in test builds",
-        reason
-    ))
-}
-
-fn wait_for_blocked_daemon(config: &DaemonConfig, timeout: Duration) -> BlockedDaemonWaitResult {
-    let deadline = Instant::now() + timeout;
-    let no_pid_deadline =
-        Instant::now() + std::cmp::min(timeout, blocked_daemon_missing_pid_grace());
-    let mut observed_pid = None;
-
-    loop {
-        if daemon_is_up(config) {
-            return BlockedDaemonWaitResult::BecameHealthy;
-        }
-
-        if observed_pid.is_none()
-            && let Ok(pid) = read_daemon_pid(config)
-        {
-            observed_pid = Some(pid);
-        }
-
-        let now = Instant::now();
-        if observed_pid.is_none() && now >= no_pid_deadline {
-            return BlockedDaemonWaitResult::MissingPidMetadata;
-        }
-        if now >= deadline {
-            return match observed_pid {
-                Some(pid) => BlockedDaemonWaitResult::TimedOutWithPid(pid),
-                None => BlockedDaemonWaitResult::MissingPidMetadata,
-            };
-        }
-
-        thread::sleep(Duration::from_millis(50));
     }
 }
 
@@ -420,6 +301,8 @@ fn start_daemon_detached_with_config(
     if daemon_is_up(&config) {
         return Ok(config);
     }
+
+    remove_stale_daemon_files(&config);
 
     if daemon_startup_is_blocked(&config) {
         return Err(format!(
@@ -700,14 +583,11 @@ fn handle_restart(args: &[String]) -> Result<(), String> {
     // Only attempt shutdown if daemon appears to be running.
     let was_running = daemon_is_up(&config) || daemon_startup_is_blocked(&config);
     if was_running {
+        // Read the PID before shutdown so we can verify the process actually dies.
+        let old_pid = read_daemon_pid(&config).ok();
+
         if hard {
-            if let Err(error) = hard_kill_daemon(&config) {
-                eprintln!(
-                    "[git-ai] warning: hard restart could not kill existing daemon: {}; attempting a fresh daemon start only if the original lock clears",
-                    error
-                );
-                return ensure_daemon_running(daemon_startup_timeout()).map(|_| ());
-            }
+            hard_kill_daemon(&config)?;
         } else {
             // Attempt soft shutdown; escalate to hard kill on timeout.
             let _ = send_control_request(&config.control_socket_path, &ControlRequest::Shutdown);
@@ -715,6 +595,12 @@ fn handle_restart(args: &[String]) -> Result<(), String> {
                 eprintln!("graceful shutdown timed out, force-killing daemon");
                 hard_kill_daemon(&config)?;
             }
+        }
+
+        // Even after lock+sockets are gone, the process may still be alive
+        // (e.g. tokio runtime draining blocking tasks). Verify and force-kill.
+        if let Some(pid) = old_pid {
+            wait_for_process_exit(pid, Duration::from_secs(2));
         }
     }
 
@@ -735,11 +621,6 @@ fn soft_shutdown_daemon(config: &DaemonConfig) -> Result<(), String> {
 #[cfg(unix)]
 fn hard_kill_daemon(config: &DaemonConfig) -> Result<(), String> {
     let pid = read_daemon_pid(config).map_err(|e| format!("cannot read daemon pid: {}", e))?;
-    hard_kill_daemon_pid(config, pid)
-}
-
-#[cfg(unix)]
-fn hard_kill_daemon_pid(config: &DaemonConfig, pid: u32) -> Result<(), String> {
     let ret = unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
     if ret != 0 {
         let err = std::io::Error::last_os_error();
@@ -757,11 +638,6 @@ fn hard_kill_daemon_pid(config: &DaemonConfig, pid: u32) -> Result<(), String> {
 #[cfg(windows)]
 fn hard_kill_daemon(config: &DaemonConfig) -> Result<(), String> {
     let pid = read_daemon_pid(config).map_err(|e| format!("cannot read daemon pid: {}", e))?;
-    hard_kill_daemon_pid(config, pid)
-}
-
-#[cfg(windows)]
-fn hard_kill_daemon_pid(config: &DaemonConfig, pid: u32) -> Result<(), String> {
     let output = Command::new("taskkill")
         .args(["/F", "/T", "/PID", &pid.to_string()])
         .output()
@@ -801,6 +677,35 @@ fn wait_for_daemon_dead(config: &DaemonConfig, timeout: Duration) -> bool {
     }
 }
 
+/// Wait for a process to exit, force-killing it if it doesn't die within timeout.
+/// This handles the case where the daemon lock/sockets are gone but the process
+/// is still alive (e.g. tokio runtime draining blocking tasks).
+///
+/// Note: relies on PID liveness only. Theoretically susceptible to PID reuse if
+/// the process is reaped and the PID recycled within the timeout window, but on
+/// macOS/Linux with ~100k PID space this is not a realistic concern.
+#[cfg(unix)]
+fn wait_for_process_exit(pid: u32, timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let ret = unsafe { libc::kill(pid as libc::pid_t, 0) };
+        if ret != 0 {
+            return; // Process is dead
+        }
+        if Instant::now() >= deadline {
+            // Process still alive after timeout — force kill
+            unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+            return;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+#[cfg(windows)]
+fn wait_for_process_exit(_pid: u32, _timeout: Duration) {
+    // On Windows, hard_kill_daemon uses taskkill /F which is synchronous.
+}
+
 /// Shut down the running daemon (soft then hard) and wait for it to fully exit.
 /// Used by internal callers (install-hooks, upgrade) that need the daemon stopped
 /// before proceeding.
@@ -829,11 +734,8 @@ pub(crate) fn stop_daemon(config: &DaemonConfig, timeout: Duration) -> Result<()
 /// if the soft shutdown doesn't complete within GRACEFUL_SHUTDOWN_TIMEOUT.
 pub(crate) fn restart_daemon(config: &DaemonConfig) -> Result<(), String> {
     let was_running = daemon_is_up(config) || daemon_startup_is_blocked(config);
-    if was_running && let Err(error) = stop_daemon(config, GRACEFUL_SHUTDOWN_TIMEOUT) {
-        eprintln!(
-            "[git-ai] warning: failed to stop existing background service before restart: {}; attempting a fresh daemon start only if the original lock clears",
-            error
-        );
+    if was_running {
+        stop_daemon(config, GRACEFUL_SHUTDOWN_TIMEOUT)?;
     }
     ensure_daemon_running(Duration::from_secs(5)).map(|_| ())
 }

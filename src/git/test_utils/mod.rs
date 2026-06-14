@@ -233,6 +233,20 @@ impl TmpRepo {
         Ok(result.1)
     }
 
+    /// Stage all changes and create a plain git commit without running git-ai post-commit.
+    pub fn commit_all(&self, message: &str) -> Result<String, GitAiError> {
+        self.run_git(&["add", "-A"])?;
+        self.run_git_with_env(
+            &["commit", "--allow-empty", "-m", message, "--no-verify"],
+            &[
+                ("GIT_AUTHOR_DATE", "2023-01-01T12:00:00Z"),
+                ("GIT_COMMITTER_DATE", "2023-01-01T12:00:00Z"),
+                ("GIT_EDITOR", "true"),
+            ],
+        )?;
+        self.get_head_commit_sha()
+    }
+
     pub fn create_branch(&self, branch_name: &str) -> Result<(), GitAiError> {
         self.run_git(&["checkout", "-q", "-b", branch_name])?;
         Ok(())
@@ -241,6 +255,10 @@ impl TmpRepo {
     pub fn switch_branch(&self, branch_name: &str) -> Result<(), GitAiError> {
         self.run_git(&["checkout", "-q", branch_name])?;
         Ok(())
+    }
+
+    pub fn rebase_onto(&self, _feature_branch: &str, onto: &str) -> Result<(), GitAiError> {
+        self.run_git(&["rebase", onto])
     }
 
     pub fn merge_branch(&self, branch_name: &str, message: &str) -> Result<(), GitAiError> {
@@ -344,7 +362,7 @@ impl TmpRepo {
             agent_id,
             files: checkpoint_files,
             path_role,
-            transcript_source: None,
+            stream_source: None,
             metadata,
         };
         let resolved = ResolvedCheckpointExecution {

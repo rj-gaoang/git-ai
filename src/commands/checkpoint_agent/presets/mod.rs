@@ -58,7 +58,7 @@ pub struct PostFileEdit {
     pub context: PresetContext,
     pub file_paths: Vec<PathBuf>,
     pub dirty_files: Option<HashMap<PathBuf, String>>,
-    pub transcript_source: Option<TranscriptSource>,
+    pub stream_source: Option<StreamSource>,
     #[serde(default)]
     pub tool_use_id: Option<String>,
 }
@@ -89,13 +89,13 @@ pub struct PreBashCall {
 pub struct PostBashCall {
     pub context: PresetContext,
     pub tool_use_id: String,
-    pub transcript_source: Option<TranscriptSource>,
+    pub stream_source: Option<StreamSource>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TranscriptSource {
+pub struct StreamSource {
     pub path: PathBuf,
-    pub format: TranscriptFormat,
+    pub format: StreamFormat,
     /// Session ID for this transcript (used to query/create session in DB).
     pub session_id: String,
     /// External thread/conversation ID (agent-specific identifier).
@@ -106,7 +106,7 @@ pub struct TranscriptSource {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum TranscriptFormat {
+pub enum StreamFormat {
     ClaudeJsonl,
     ContinueJson,
     GeminiJsonl,
@@ -121,9 +121,9 @@ pub enum TranscriptFormat {
     PiJsonl,
 }
 
-impl TranscriptFormat {
-    pub fn watermark_type(self) -> crate::transcripts::watermark::WatermarkType {
-        use crate::transcripts::watermark::WatermarkType;
+impl StreamFormat {
+    pub fn watermark_type(self) -> crate::streams::watermark::WatermarkType {
+        use crate::streams::watermark::WatermarkType;
         match self {
             Self::ClaudeJsonl
             | Self::CursorJsonl

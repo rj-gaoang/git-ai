@@ -225,13 +225,13 @@ impl AgentPreset for FirebenderPreset {
             (_, true) => ParsedHookEvent::PostBashCall(PostBashCall {
                 context,
                 tool_use_id: tool_use_id_str,
-                transcript_source: None,
+                stream_source: None,
             }),
             (_, false) => ParsedHookEvent::PostFileEdit(PostFileEdit {
                 context,
                 file_paths,
                 dirty_files: dirty,
-                transcript_source: None,
+                stream_source: None,
                 tool_use_id: Some(tool_use_id_str),
             }),
         };
@@ -288,7 +288,7 @@ mod tests {
         match &events[0] {
             ParsedHookEvent::PostFileEdit(e) => {
                 assert_eq!(e.context.agent_id.tool, "firebender");
-                assert!(e.transcript_source.is_none());
+                assert!(e.stream_source.is_none());
             }
             _ => panic!("Expected PostFileEdit"),
         }
@@ -331,7 +331,7 @@ mod tests {
             ParsedHookEvent::PostBashCall(e) => {
                 assert_eq!(e.context.agent_id.tool, "firebender");
                 assert_eq!(e.tool_use_id, "bash");
-                assert!(e.transcript_source.is_none());
+                assert!(e.stream_source.is_none());
             }
             _ => panic!("Expected PostBashCall"),
         }

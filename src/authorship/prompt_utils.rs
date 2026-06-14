@@ -1,7 +1,7 @@
 use crate::authorship::authorship_log::PromptRecord;
 use crate::authorship::transcript::{AiTranscript, Message};
 use crate::error::GitAiError;
-use crate::git::refs::{get_authorship, grep_ai_notes};
+use crate::git::notes_api::{read_authorship as get_authorship, search_notes as grep_ai_notes};
 use crate::git::repository::Repository;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -91,15 +91,15 @@ fn latest_model_from_transcript(tool: &str, transcript_path: &Path, current_mode
                 .and_then(|ext| ext.to_str())
                 .is_some_and(|ext| ext.eq_ignore_ascii_case("jsonl"))
             {
-                crate::transcripts::sweep::TranscriptFormat::CopilotEventStreamJsonl
+                crate::streams::sweep::StreamFormat::CopilotEventStreamJsonl
             } else {
-                crate::transcripts::sweep::TranscriptFormat::CopilotSessionJson
+                crate::streams::sweep::StreamFormat::CopilotSessionJson
             }
         }
         _ => return current_model.to_string(),
     };
 
-    crate::transcripts::model_extraction::extract_model(transcript_path, inferred_format, None)
+    crate::streams::model_extraction::extract_model(transcript_path, inferred_format, None)
         .ok()
         .flatten()
         .filter(|model| !model.trim().is_empty())

@@ -9,6 +9,8 @@ use std::collections::{HashMap, HashSet};
 
 // Modern refspecs without force to enable proper merging
 pub const AI_AUTHORSHIP_REFNAME: &str = "ai";
+pub const AI_AUTHORSHIP_FULL_REF: &str = "refs/notes/ai";
+pub const AI_AUTHORSHIP_FORK_TRACKING_REF: &str = "refs/notes/ai-remote/fork";
 pub const AI_AUTHORSHIP_PUSH_REFSPEC: &str = "refs/notes/ai:refs/notes/ai";
 
 pub fn notes_add(
@@ -34,12 +36,22 @@ pub fn notes_path_for_object(oid: &str) -> String {
 
 #[doc(hidden)]
 pub fn flat_note_pathspec_for_commit(commit_sha: &str) -> String {
-    format!("refs/notes/ai:{}", commit_sha)
+    flat_note_pathspec_for_ref(AI_AUTHORSHIP_FULL_REF, commit_sha)
 }
 
 #[doc(hidden)]
 pub fn fanout_note_pathspec_for_commit(commit_sha: &str) -> String {
-    format!("refs/notes/ai:{}", notes_path_for_object(commit_sha))
+    fanout_note_pathspec_for_ref(AI_AUTHORSHIP_FULL_REF, commit_sha)
+}
+
+#[doc(hidden)]
+pub fn flat_note_pathspec_for_ref(notes_ref: &str, commit_sha: &str) -> String {
+    format!("{}:{}", notes_ref, commit_sha)
+}
+
+#[doc(hidden)]
+pub fn fanout_note_pathspec_for_ref(notes_ref: &str, commit_sha: &str) -> String {
+    format!("{}:{}", notes_ref, notes_path_for_object(commit_sha))
 }
 
 #[doc(hidden)]
@@ -136,6 +148,18 @@ pub fn note_blob_oids_for_commits(
     repo: &Repository,
     commit_shas: &[String],
 ) -> Result<HashMap<String, String>, GitAiError> {
+    note_blob_oids_for_commits_from_ref(repo, AI_AUTHORSHIP_FULL_REF, commit_shas)
+}
+
+/// Resolve authorship note blob OIDs for a set of commits from a specific notes ref.
+///
+/// Returns a map of commit SHA -> note blob SHA for commits that have notes on
+/// `notes_ref`. The destination `refs/notes/ai` is not consulted.
+pub fn note_blob_oids_for_commits_from_ref(
+    repo: &Repository,
+    notes_ref: &str,
+    commit_shas: &[String],
+) -> Result<HashMap<String, String>, GitAiError> {
     if commit_shas.is_empty() {
         return Ok(HashMap::new());
     }
@@ -148,9 +172,9 @@ pub fn note_blob_oids_for_commits(
     for commit_sha in commit_shas {
         // Notes can be stored with either flat paths (<sha>) or fanout paths (<aa>/<bb...>).
         // Query both forms so this works regardless of repository note fanout state.
-        stdin_data.push_str(&flat_note_pathspec_for_commit(commit_sha));
+        stdin_data.push_str(&flat_note_pathspec_for_ref(notes_ref, commit_sha));
         stdin_data.push('\n');
-        stdin_data.push_str(&fanout_note_pathspec_for_commit(commit_sha));
+        stdin_data.push_str(&fanout_note_pathspec_for_ref(notes_ref, commit_sha));
         stdin_data.push('\n');
     }
 
@@ -173,6 +197,43 @@ pub fn note_blob_oids_for_commits(
     }
 
     Ok(result)
+}
+
+/// Copy missing notes for a bounded commit set from `source_ref` into `refs/notes/ai`.
+///
+/// This deliberately does not merge `source_ref` wholesale. The source ref may
+/// contain untrusted notes from a fork, so callers must pass the exact commits
+/// whose notes are allowed to enter the local authorship ref. Existing local
+/// notes win on conflicts, matching the `git notes merge -s ours` behavior used
+/// for trusted tracking refs.
+pub fn copy_missing_notes_for_commits_from_ref(
+    repo: &Repository,
+    source_ref: &str,
+    commit_shas: &[String],
+) -> Result<usize, GitAiError> {
+    if commit_shas.is_empty() || !ref_exists(repo, source_ref) {
+        return Ok(0);
+    }
+
+    let source_note_oids = note_blob_oids_for_commits_from_ref(repo, source_ref, commit_shas)?;
+    if source_note_oids.is_empty() {
+        return Ok(0);
+    }
+
+    let local_note_oids = note_blob_oids_for_commits(repo, commit_shas)?;
+    let entries: Vec<(String, String)> = commit_shas
+        .iter()
+        .filter(|commit_sha| !local_note_oids.contains_key(*commit_sha))
+        .filter_map(|commit_sha| {
+            source_note_oids
+                .get(commit_sha)
+                .map(|blob_oid| (commit_sha.clone(), blob_oid.clone()))
+        })
+        .collect();
+
+    let copied = entries.len();
+    notes_add_blob_batch(repo, &entries)?;
+    Ok(copied)
 }
 
 pub fn notes_add_batch(repo: &Repository, entries: &[(String, String)]) -> Result<(), GitAiError> {

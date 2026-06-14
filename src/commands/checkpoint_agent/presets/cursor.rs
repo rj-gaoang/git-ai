@@ -1,7 +1,7 @@
 use super::parse;
 use super::{
     AgentPreset, ParsedHookEvent, PostBashCall, PostFileEdit, PreBashCall, PreFileEdit,
-    PresetContext, TranscriptFormat, TranscriptSource,
+    PresetContext, StreamFormat, StreamSource,
 };
 use crate::authorship::authorship_log_serialization::generate_session_id;
 use crate::authorship::working_log::AgentId;
@@ -77,13 +77,8 @@ impl AgentPreset for CursorPreset {
             )));
         }
 
-        // Extract file_path from tool_input (file-edit tools only).
-        let file_path = data
-            .get("tool_input")
-            .and_then(|ti| ti.get("file_path"))
-            .and_then(|v| v.as_str())
-            .map(normalize_cursor_path)
-            .unwrap_or_default();
+        // Extract the edited path from Cursor file-edit tool input.
+        let file_path = cursor_file_path_from_tool_input(data.get("tool_input"));
 
         // Resolve cwd: match file_path to workspace root, or fall back to first root.
         // For Shell tools `file_path` is empty, so this returns workspace_roots[0].
@@ -116,9 +111,9 @@ impl AgentPreset for CursorPreset {
             metadata,
         };
 
-        let transcript_source = transcript_path.map(|tp| TranscriptSource {
+        let stream_source = transcript_path.map(|tp| StreamSource {
             path: PathBuf::from(tp),
-            format: TranscriptFormat::CursorJsonl,
+            format: StreamFormat::CursorJsonl,
             session_id: generate_session_id(&conversation_id, "cursor"),
             external_session_id: conversation_id.clone(),
             external_parent_session_id: None,
@@ -137,7 +132,7 @@ impl AgentPreset for CursorPreset {
             (ToolClass::Bash, false) => ParsedHookEvent::PostBashCall(PostBashCall {
                 context,
                 tool_use_id,
-                transcript_source,
+                stream_source,
             }),
             (ToolClass::FileEdit, true) => ParsedHookEvent::PreFileEdit(PreFileEdit {
                 context,
@@ -149,7 +144,7 @@ impl AgentPreset for CursorPreset {
                 context,
                 file_paths,
                 dirty_files: None,
-                transcript_source,
+                stream_source,
                 tool_use_id: Some(tool_use_id),
             }),
             (ToolClass::Skip, _) => unreachable!("Skip handled above"),
@@ -180,6 +175,17 @@ fn normalize_cursor_path(path: &str) -> String {
 #[cfg(not(windows))]
 fn normalize_cursor_path(path: &str) -> String {
     path.to_string()
+}
+
+fn cursor_file_path_from_tool_input(tool_input: Option<&serde_json::Value>) -> String {
+    tool_input
+        .and_then(|ti| {
+            ["file_path", "path", "filePath"]
+                .iter()
+                .find_map(|key| ti.get(key).and_then(|v| v.as_str()))
+        })
+        .map(normalize_cursor_path)
+        .unwrap_or_default()
 }
 
 /// Find the workspace root that matches the given file path.
@@ -259,9 +265,9 @@ mod tests {
                     e.file_paths,
                     vec![PathBuf::from("/home/user/project/src/main.rs")]
                 );
-                assert!(e.transcript_source.is_some());
-                if let Some(ts) = &e.transcript_source {
-                    assert_eq!(ts.format, TranscriptFormat::CursorJsonl);
+                assert!(e.stream_source.is_some());
+                if let Some(ts) = &e.stream_source {
+                    assert_eq!(ts.format, StreamFormat::CursorJsonl);
                     assert_eq!(ts.session_id, generate_session_id("conv-123", "cursor"));
                     assert_eq!(ts.external_session_id, "conv-123");
                 }
@@ -332,6 +338,53 @@ mod tests {
     }
 
     #[test]
+    fn test_cursor_file_edit_accepts_path_field() {
+        let input = json!({
+            "conversation_id": "conv-123",
+            "workspace_roots": ["/home/user/project"],
+            "hook_event_name": "preToolUse",
+            "tool_name": "StrReplace",
+            "tool_input": {"path": "/home/user/project/src/lib.rs"}
+        })
+        .to_string();
+        let events = CursorPreset.parse(&input, "t_test123456789a").unwrap();
+        match &events[0] {
+            ParsedHookEvent::PreFileEdit(e) => {
+                assert_eq!(
+                    e.file_paths,
+                    vec![PathBuf::from("/home/user/project/src/lib.rs")]
+                );
+            }
+            _ => panic!("Expected PreFileEdit"),
+        }
+    }
+
+    #[test]
+    fn test_cursor_file_edit_prefers_file_path_over_path() {
+        let input = json!({
+            "conversation_id": "conv-123",
+            "workspace_roots": ["/home/user/project"],
+            "hook_event_name": "preToolUse",
+            "tool_name": "StrReplace",
+            "tool_input": {
+                "file_path": "src/from_file_path.rs",
+                "path": "src/from_path.rs"
+            }
+        })
+        .to_string();
+        let events = CursorPreset.parse(&input, "t_test123456789a").unwrap();
+        match &events[0] {
+            ParsedHookEvent::PreFileEdit(e) => {
+                assert_eq!(
+                    e.file_paths,
+                    vec![PathBuf::from("/home/user/project/src/from_file_path.rs")]
+                );
+            }
+            _ => panic!("Expected PreFileEdit"),
+        }
+    }
+
+    #[test]
     fn test_cursor_no_transcript_path() {
         let input = json!({
             "conversation_id": "conv-123",
@@ -344,7 +397,7 @@ mod tests {
         let events = CursorPreset.parse(&input, "t_test123456789a").unwrap();
         match &events[0] {
             ParsedHookEvent::PostFileEdit(e) => {
-                assert!(e.transcript_source.is_none());
+                assert!(e.stream_source.is_none());
             }
             _ => panic!("Expected PostFileEdit"),
         }

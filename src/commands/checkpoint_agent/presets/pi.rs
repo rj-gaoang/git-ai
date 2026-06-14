@@ -1,6 +1,6 @@
 use super::{
     AgentPreset, ParsedHookEvent, PostBashCall, PostFileEdit, PreBashCall, PreFileEdit,
-    PresetContext, TranscriptFormat, TranscriptSource,
+    PresetContext, StreamFormat, StreamSource,
 };
 use crate::authorship::authorship_log_serialization::generate_session_id;
 use crate::authorship::working_log::AgentId;
@@ -145,11 +145,11 @@ impl AgentPreset for PiPreset {
             metadata,
         };
 
-        let transcript_source = {
+        let stream_source = {
             let path = PathBuf::from(&session_path);
-            Some(TranscriptSource {
+            Some(StreamSource {
                 path,
-                format: TranscriptFormat::PiJsonl,
+                format: StreamFormat::PiJsonl,
                 session_id: generate_session_id(&context.external_session_id, "pi"),
                 external_session_id: context.external_session_id.clone(),
                 external_parent_session_id: None,
@@ -183,7 +183,7 @@ impl AgentPreset for PiPreset {
                     context,
                     file_paths: edited_filepaths.into_iter().map(PathBuf::from).collect(),
                     dirty_files: dirty,
-                    transcript_source,
+                    stream_source,
                     tool_use_id,
                 })
             }
@@ -194,7 +194,7 @@ impl AgentPreset for PiPreset {
             PiHookEvent::AfterCommand => ParsedHookEvent::PostBashCall(PostBashCall {
                 context,
                 tool_use_id: tool_use_id_str,
-                transcript_source,
+                stream_source,
             }),
         };
 
@@ -278,9 +278,9 @@ mod tests {
                     vec![PathBuf::from("/tmp/project/src/main.rs")]
                 );
                 assert!(matches!(
-                    e.transcript_source,
-                    Some(TranscriptSource {
-                        format: TranscriptFormat::PiJsonl,
+                    e.stream_source,
+                    Some(StreamSource {
+                        format: StreamFormat::PiJsonl,
                         ..
                     })
                 ));
@@ -332,9 +332,9 @@ mod tests {
                 assert_eq!(e.context.agent_id.tool, "pi");
                 assert_eq!(e.tool_use_id, "tu-def456");
                 assert!(matches!(
-                    e.transcript_source,
-                    Some(TranscriptSource {
-                        format: TranscriptFormat::PiJsonl,
+                    e.stream_source,
+                    Some(StreamSource {
+                        format: StreamFormat::PiJsonl,
                         ..
                     })
                 ));

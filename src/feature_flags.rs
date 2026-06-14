@@ -86,7 +86,8 @@ define_feature_flags!(
     format_only_attribution_passthrough: format_passthrough, debug = true, release = true,
     auto_upload_ai_stats: auto_upload_ai_stats, debug = true, release = true,
     transcript_streaming: transcript_streaming, debug = true, release = true,
-    transcript_sweep: transcript_sweep, debug = true, release = false,
+    transcript_sweep: transcript_sweep, debug = true, release = true,
+    checkpoint_debug_log: checkpoint_debug_log, debug = false, release = false,
 );
 
 impl FeatureFlags {
@@ -150,6 +151,7 @@ mod tests {
             assert!(flags.auto_upload_ai_stats);
             assert!(flags.transcript_streaming);
             assert!(flags.transcript_sweep);
+            assert!(!flags.checkpoint_debug_log);
         }
         #[cfg(not(debug_assertions))]
         {
@@ -161,7 +163,8 @@ mod tests {
             assert!(flags.format_only_attribution_passthrough);
             assert!(flags.auto_upload_ai_stats);
             assert!(flags.transcript_streaming);
-            assert!(!flags.transcript_sweep);
+            assert!(flags.transcript_sweep);
+            assert!(!flags.checkpoint_debug_log);
         }
     }
 
@@ -224,6 +227,7 @@ mod tests {
             auto_upload_ai_stats: false,
             transcript_streaming: true,
             transcript_sweep: true,
+            checkpoint_debug_log: false,
         };
 
         let serialized = serde_json::to_string(&flags).unwrap();
@@ -236,6 +240,7 @@ mod tests {
         assert!(serialized.contains("auto_upload_ai_stats"));
         assert!(serialized.contains("transcript_streaming"));
         assert!(serialized.contains("transcript_sweep"));
+        assert!(serialized.contains("checkpoint_debug_log"));
     }
 
     #[test]
@@ -250,6 +255,7 @@ mod tests {
             auto_upload_ai_stats: false,
             transcript_streaming: true,
             transcript_sweep: true,
+            checkpoint_debug_log: true,
         };
         let cloned = flags.clone();
         assert_eq!(cloned.rewrite_stash, flags.rewrite_stash);
@@ -267,6 +273,7 @@ mod tests {
         assert_eq!(cloned.auto_upload_ai_stats, flags.auto_upload_ai_stats);
         assert_eq!(cloned.transcript_streaming, flags.transcript_streaming);
         assert_eq!(cloned.transcript_sweep, flags.transcript_sweep);
+        assert_eq!(cloned.checkpoint_debug_log, flags.checkpoint_debug_log);
     }
 
     #[test]

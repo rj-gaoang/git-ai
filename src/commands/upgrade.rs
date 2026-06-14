@@ -59,6 +59,7 @@ const GITHUB_API_BASE_URL: &str = "https://api.github.com";
 const RAW_GITHUB_CONTENT_BASE_URL: &str = "https://raw.githubusercontent.com";
 #[cfg(windows)]
 const GIT_AI_RESTART_DAEMON_AFTER_INSTALL_ENV: &str = "GIT_AI_RESTART_DAEMON_AFTER_INSTALL";
+const GIT_AI_DAEMON_UPGRADE_ENV: &str = "GIT_AI_DAEMON_UPGRADE";
 const BACKGROUND_SPAWN_THROTTLE_SECS: u64 = 60;
 const ENV_BACKGROUND_UPGRADE_WORKER: &str = "GIT_AI_BACKGROUND_UPGRADE_WORKER";
 const ENV_BACKGROUND_UPGRADE_DELAY_SECS: &str = "GIT_AI_BACKGROUND_UPGRADE_DELAY_SECS";
@@ -790,6 +791,7 @@ fn run_install_script(
             if silent {
                 cmd.env(GIT_AI_DEFER_IF_BUSY_ENV, "1");
                 cmd.env(GIT_AI_RESTART_DAEMON_AFTER_INSTALL_ENV, "1");
+                cmd.env(GIT_AI_DAEMON_UPGRADE_ENV, "1");
                 cmd.stdout(Stdio::null()).stderr(Stdio::null());
             }
 
@@ -850,6 +852,7 @@ fn run_install_script(
             .env(GIT_AI_RELEASE_ENV, tag);
 
         if silent {
+            cmd.env(GIT_AI_DAEMON_UPGRADE_ENV, "1");
             cmd.stdout(Stdio::null()).stderr(Stdio::null());
         }
 

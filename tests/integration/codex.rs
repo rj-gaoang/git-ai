@@ -2,9 +2,9 @@ use crate::repos::test_file::ExpectedLineExt;
 use crate::test_utils::fixture_path;
 use git_ai::commands::checkpoint_agent::presets::{ParsedHookEvent, resolve_preset};
 use git_ai::error::GitAiError;
-use git_ai::transcripts::agent::Agent;
-use git_ai::transcripts::agents::CodexAgent;
-use git_ai::transcripts::watermark::ByteOffsetWatermark;
+use git_ai::streams::agent::Agent;
+use git_ai::streams::agents::CodexAgent;
+use git_ai::streams::watermark::ByteOffsetWatermark;
 use serde_json::json;
 use std::fs;
 
@@ -67,7 +67,7 @@ fn test_codex_preset_structured_hook_input() {
                 e.context.cwd.to_string_lossy(),
                 "/Users/test/projects/git-ai"
             );
-            assert!(e.transcript_source.is_some());
+            assert!(e.stream_source.is_some());
         }
         _ => panic!("Expected PostFileEdit"),
     }
@@ -157,7 +157,7 @@ fn test_codex_preset_bash_post_tool_use_detects_changed_files() {
     assert_eq!(events.len(), 1);
     match &events[0] {
         ParsedHookEvent::PostBashCall(e) => {
-            assert!(e.transcript_source.is_some());
+            assert!(e.stream_source.is_some());
             assert_eq!(e.context.agent_id.tool, "codex");
             assert_eq!(e.context.external_session_id, "session-bash-post");
             assert_eq!(e.tool_use_id, "bash-use-2");

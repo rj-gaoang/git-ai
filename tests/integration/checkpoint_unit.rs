@@ -238,7 +238,7 @@ fn test_checkpoint_base_override_controls_head_context_for_entry_generation() {
             base_commit: BaseCommit::Sha(base_commit.clone()),
         }],
         path_role: PreparedPathRole::Edited,
-        transcript_source: None,
+        stream_source: None,
         metadata: HashMap::new(),
     };
 
@@ -265,6 +265,60 @@ fn test_checkpoint_base_override_controls_head_context_for_entry_generation() {
         resolved,
     )
     .unwrap();
+}
+
+#[test]
+fn test_ai_checkpoint_without_agent_id_is_rejected() {
+    let (repo, lines_file, _) = setup_repo_with_base_commit();
+    let file_path = repo.path().join(&lines_file);
+    let base_commit = repo
+        .git_og(&["rev-parse", "HEAD"])
+        .unwrap()
+        .trim()
+        .to_string();
+
+    let content = "changed without agent identity\n";
+    std::fs::write(&file_path, content).unwrap();
+
+    let checkpoint_request = CheckpointRequest {
+        trace_id: "missing-agent-regression".to_string(),
+        checkpoint_kind: CheckpointKind::AiAgent,
+        agent_id: None,
+        files: vec![CheckpointFile {
+            path: PathBuf::from(&lines_file),
+            content: Some(content.to_string()),
+            repo_work_dir: repo.path().to_path_buf(),
+            base_commit: BaseCommit::Sha(base_commit.clone()),
+        }],
+        path_role: PreparedPathRole::Edited,
+        stream_source: None,
+        metadata: HashMap::new(),
+    };
+
+    let gitai_repo = find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
+    let resolved = ResolvedCheckpointExecution {
+        base_commit,
+        ts: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+        files: vec![lines_file.clone()],
+        dirty_files: HashMap::from([(lines_file, content.to_string())]),
+    };
+
+    let error = execute_resolved_checkpoint_from_daemon(
+        &gitai_repo,
+        "mock-ai",
+        CheckpointKind::AiAgent,
+        checkpoint_request,
+        resolved,
+    )
+    .expect_err("AI checkpoints must carry an agent_id");
+
+    assert!(
+        error.to_string().contains("missing agent_id"),
+        "unexpected error: {error}"
+    );
 }
 
 #[test]
@@ -380,7 +434,7 @@ fn test_checkpoint_with_paths_outside_repo() {
             base_commit: BaseCommit::Sha(base_commit),
         }],
         path_role: PreparedPathRole::Edited,
-        transcript_source: None,
+        stream_source: None,
         metadata: HashMap::new(),
     };
 
@@ -1300,7 +1354,7 @@ fn test_checkpoint_succeeds_with_legacy_initial_missing_blobs() {
             base_commit: BaseCommit::Sha(head_sha),
         }],
         path_role: PreparedPathRole::Edited,
-        transcript_source: None,
+        stream_source: None,
         metadata: HashMap::new(),
     };
 

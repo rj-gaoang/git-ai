@@ -2,7 +2,7 @@ use super::opencode::OpenCodePreset;
 use super::parse;
 use super::{
     AgentPreset, ParsedHookEvent, PostBashCall, PostFileEdit, PreBashCall, PreFileEdit,
-    PresetContext, TranscriptFormat, TranscriptSource,
+    PresetContext, StreamFormat, StreamSource,
 };
 use crate::authorship::authorship_log_serialization::generate_session_id;
 use crate::authorship::working_log::AgentId;
@@ -37,7 +37,7 @@ impl CodexPreset {
         }
 
         let codex_home = dirs::home_dir()?.join(".codex");
-        crate::transcripts::agents::CodexAgent::find_rollout_path_for_session_in_home(
+        crate::streams::agents::CodexAgent::find_rollout_path_for_session_in_home(
             session_id,
             &codex_home,
         )
@@ -130,9 +130,9 @@ impl AgentPreset for CodexPreset {
             metadata,
         };
 
-        let transcript_source = transcript_path.map(|tp| TranscriptSource {
+        let stream_source = transcript_path.map(|tp| StreamSource {
             path: PathBuf::from(tp),
-            format: TranscriptFormat::CodexJsonl,
+            format: StreamFormat::CodexJsonl,
             session_id: generate_session_id(&context.external_session_id, "codex"),
             external_session_id: context.external_session_id.clone(),
             external_parent_session_id: None,
@@ -164,7 +164,7 @@ impl AgentPreset for CodexPreset {
                     ParsedHookEvent::PostBashCall(PostBashCall {
                         context,
                         tool_use_id: tool_use_id.to_string(),
-                        transcript_source,
+                        stream_source,
                     })
                 } else if is_file_edit {
                     let tool_input = data.get("tool_input").or_else(|| data.get("toolInput"));
@@ -179,7 +179,7 @@ impl AgentPreset for CodexPreset {
                         context,
                         file_paths,
                         dirty_files: None,
-                        transcript_source,
+                        stream_source,
                         tool_use_id: Some(tool_use_id.to_string()),
                     })
                 } else {
@@ -249,9 +249,9 @@ mod tests {
             ParsedHookEvent::PostBashCall(e) => {
                 assert_eq!(e.context.agent_id.tool, "codex");
                 assert!(matches!(
-                    e.transcript_source,
-                    Some(TranscriptSource {
-                        format: TranscriptFormat::CodexJsonl,
+                    e.stream_source,
+                    Some(StreamSource {
+                        format: StreamFormat::CodexJsonl,
                         ..
                     })
                 ));
@@ -274,7 +274,7 @@ mod tests {
         match &events[0] {
             ParsedHookEvent::PostBashCall(e) => {
                 assert_eq!(e.context.external_session_id, "thread-abc");
-                assert!(e.transcript_source.is_none());
+                assert!(e.stream_source.is_none());
             }
             _ => panic!("Expected PostBashCall"),
         }
