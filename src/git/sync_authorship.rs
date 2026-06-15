@@ -3,6 +3,10 @@ use crate::git::refs::{
     ref_exists, tracking_ref_for_remote,
 };
 use crate::{
+    authorship::post_commit::post_commit_with_final_state,
+    authorship::rebase_authorship::committed_file_snapshot_between_commits,
+};
+use crate::{
     error::GitAiError,
     git::{cli_parser::ParsedGitInvocation, repository::exec_git},
 };
@@ -232,6 +236,123 @@ fn is_missing_remote_notes_ref_error(error: &GitAiError) -> bool {
 /// On busy monorepos, concurrent pushers can cause non-fast-forward rejections
 /// even after a successful merge, so we retry the full cycle.
 const PUSH_NOTES_MAX_ATTEMPTS: usize = 3;
+const PUSH_BACKFILL_MAX_COMMITS: usize = 32;
+
+/// Best-effort safety net for commits created outside git-ai's normal commit
+/// capture path. If a later push is captured, materialize authorship/stat notes
+/// for the recent first-parent HEAD chain before syncing notes or returning for
+/// the HTTP notes backend.
+pub fn backfill_missing_authorship_before_push(
+    repository: &Repository,
+) -> Result<usize, GitAiError> {
+    let head = match repository.head().and_then(|head| head.target()) {
+        Ok(head) if is_push_backfill_candidate_oid(&head) => head,
+        _ => return Ok(0),
+    };
+
+    let author = repository.git_author_identity().formatted_or_unknown();
+    let mut current = head;
+    let mut materialized = 0usize;
+    let mut inspected = 0usize;
+
+    while inspected < PUSH_BACKFILL_MAX_COMMITS && is_push_backfill_candidate_oid(&current) {
+        inspected += 1;
+
+        if !commit_has_authorship_log(repository, &current) {
+            match materialize_missing_commit_authorship(repository, &current, &author) {
+                Ok(true) => {
+                    materialized += 1;
+                    crate::diagnostics::append_debug_event(
+                        "push_authorship_backfill_materialized",
+                        serde_json::json!({
+                            "repo": repository.canonical_workdir().to_string_lossy().to_string(),
+                            "commitSha": current,
+                            "inspectedCount": inspected,
+                            "maxCommits": PUSH_BACKFILL_MAX_COMMITS,
+                        }),
+                    );
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    crate::diagnostics::append_debug_event(
+                        "push_authorship_backfill_failed",
+                        serde_json::json!({
+                            "repo": repository.canonical_workdir().to_string_lossy().to_string(),
+                            "commitSha": current,
+                            "inspectedCount": inspected,
+                            "maxCommits": PUSH_BACKFILL_MAX_COMMITS,
+                            "error": error.to_string(),
+                        }),
+                    );
+                    return Err(error);
+                }
+            }
+        }
+
+        let commit = repository.find_commit(current.clone())?;
+        if commit.parent_count()? != 1 {
+            break;
+        }
+        current = commit.parent(0)?.id();
+    }
+
+    if materialized > 0 || inspected > 0 {
+        crate::diagnostics::append_debug_event(
+            "push_authorship_backfill_completed",
+            serde_json::json!({
+                "repo": repository.canonical_workdir().to_string_lossy().to_string(),
+                "materializedCount": materialized,
+                "inspectedCount": inspected,
+                "maxCommits": PUSH_BACKFILL_MAX_COMMITS,
+            }),
+        );
+    }
+
+    Ok(materialized)
+}
+
+fn materialize_missing_commit_authorship(
+    repository: &Repository,
+    commit_sha: &str,
+    author: &str,
+) -> Result<bool, GitAiError> {
+    if commit_has_authorship_log(repository, commit_sha) {
+        return Ok(false);
+    }
+
+    let parent_sha = commit_parent(repository, commit_sha)?;
+    let final_state =
+        committed_file_snapshot_between_commits(repository, parent_sha.as_deref(), commit_sha)?;
+
+    post_commit_with_final_state(
+        repository,
+        parent_sha,
+        commit_sha.to_string(),
+        author.to_string(),
+        true,
+        Some(&final_state),
+    )?;
+
+    Ok(true)
+}
+
+fn commit_has_authorship_log(repository: &Repository, commit_sha: &str) -> bool {
+    crate::git::notes_api::read_authorship_v3(repository, commit_sha).is_ok()
+}
+
+fn commit_parent(repository: &Repository, commit_sha: &str) -> Result<Option<String>, GitAiError> {
+    let commit = repository.find_commit(commit_sha.to_string())?;
+    if commit.parent_count()? == 0 {
+        return Ok(None);
+    }
+    Ok(Some(commit.parent(0)?.id()))
+}
+
+fn is_push_backfill_candidate_oid(oid: &str) -> bool {
+    matches!(oid.len(), 40 | 64)
+        && oid.chars().all(|c| c.is_ascii_hexdigit())
+        && oid.chars().any(|c| c != '0')
+}
 
 // for use with post-push hook
 pub fn push_authorship_notes(repository: &Repository, remote_name: &str) -> Result<(), GitAiError> {

@@ -673,6 +673,20 @@ fn windows_install_script_replaces_busy_binary_by_retiring_it() {
         "install.ps1 should explain when it retires an active binary"
     );
     assert!(
+        script.contains("Could not retire active $Description before stopping processes"),
+        "install.ps1 should only stop processes after rename-retire fails"
+    );
+    let retire_before_kill = script
+        .find("Retired active $Description before install")
+        .expect("rename-retire warning should be present");
+    let kill_after_retire_fallback = script
+        .find("Could not retire active $Description before stopping processes")
+        .expect("kill fallback warning should be present");
+    assert!(
+        retire_before_kill < kill_after_retire_fallback,
+        "install.ps1 should try rename-retire before process-kill fallback"
+    );
+    assert!(
         !script.contains("Move-Item -Force -Path $tmpFile -Destination $finalExe"),
         "install.ps1 should not directly overwrite git-ai.exe after waiting for a write handle"
     );
@@ -688,6 +702,14 @@ fn windows_install_script_writes_current_exe_pointer_to_launcher() {
     assert!(
         script.contains("$launcherDir = Join-Path $gitAiRoot 'launcher'"),
         "install.ps1 should install the authoritative launcher entrypoint"
+    );
+    assert!(
+        script.contains("Set-PathEnsureContains -PathToAdd $launcherDir"),
+        "install.ps1 should put the stable launcher entrypoint on PATH"
+    );
+    assert!(
+        !script.contains("Set-PathEnsureContains -PathToAdd $installDir"),
+        "install.ps1 should not prefer the compatibility bin entrypoint on PATH"
     );
     assert!(
         script.contains("$currentExePointer = Join-Path $gitAiRoot 'current-exe'"),

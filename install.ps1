@@ -257,9 +257,19 @@ function Install-BinaryWithRenameFallback {
         return
     } catch { }
 
-    $gitAiExe = Join-Path $InstallDir 'git-ai.exe'
+    $retiredPath = Get-RetiredBinaryPath -Path $Destination -InstallDir $InstallDir
     $passiveAutoUpdate = Test-PassiveAutoUpdateMode
-    if (-not $passiveAutoUpdate) {
+    try {
+        Move-Item -Force -LiteralPath $Destination -Destination $retiredPath -ErrorAction Stop
+        Write-Warning "Retired active $Description before install: $Destination -> $retiredPath"
+    } catch {
+        $retireError = $_.Exception.Message
+        if ($passiveAutoUpdate) {
+            Write-ErrorAndExit "Deferred auto-update because $Destination is still in use and could not be retired. git-ai will retry on a later update check."
+        }
+
+        Write-Warning "Could not retire active $Description before stopping processes: $retireError"
+        $gitAiExe = Join-Path $InstallDir 'git-ai.exe'
         [void](Stop-GitAiBackgroundService -GitAiExe $gitAiExe -Hard)
         [void](Stop-GitAiManagedProcesses -InstallDir $InstallDir)
 
@@ -267,18 +277,13 @@ function Install-BinaryWithRenameFallback {
             Move-Item -Force -LiteralPath $Source -Destination $Destination -ErrorAction Stop
             return
         } catch { }
-    }
 
-    $retiredPath = Get-RetiredBinaryPath -Path $Destination -InstallDir $InstallDir
-    try {
-        Move-Item -Force -LiteralPath $Destination -Destination $retiredPath -ErrorAction Stop
-        Write-Warning "Retired active $Description before install: $Destination -> $retiredPath"
-    } catch {
-        if ($passiveAutoUpdate) {
-            Write-ErrorAndExit "Deferred auto-update because $Destination is still in use and could not be retired. git-ai will retry on a later update check."
+        try {
+            Move-Item -Force -LiteralPath $Destination -Destination $retiredPath -ErrorAction Stop
+            Write-Warning "Retired active $Description after stopping processes: $Destination -> $retiredPath"
+        } catch {
+            Write-ErrorAndExit "Failed to replace $Destination. Please close running git-ai processes and try again. $($_.Exception.Message)"
         }
-
-        Write-ErrorAndExit "Failed to replace $Destination. Please close running git-ai processes and try again. $($_.Exception.Message)"
     }
 
     try {
@@ -993,7 +998,7 @@ if ($skipPathUpdate) {
         UserStatus = 'Skipped'
     }
 } else {
-    $pathUpdate = Set-PathEnsureContains -PathToAdd $installDir
+    $pathUpdate = Set-PathEnsureContains -PathToAdd $launcherDir
 }
 if ($pathUpdate.UserStatus -eq 'Updated') {
     Write-Success 'Successfully added git-ai to the user PATH.'

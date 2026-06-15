@@ -57,7 +57,49 @@ fn push_after_branch_set_upstream_pushes_authorship_notes() {
     );
 }
 
+#[test]
+fn push_backfills_missing_authorship_note_for_uncaptured_commit() {
+    let (local, upstream) = TestRepo::new_with_remote();
+
+    let mut file = local.filename("uncaptured_push_backfill.rs");
+    file.set_contents(vec!["fn generated_by_ai() {}".ai()]);
+
+    local
+        .git_og(&["add", "-A"])
+        .expect("raw git add should succeed");
+    local
+        .git_og(&["commit", "-m", "uncaptured commit"])
+        .expect("raw git commit should succeed");
+    let commit_sha = local
+        .git_og(&["rev-parse", "HEAD"])
+        .expect("rev-parse HEAD should succeed")
+        .trim()
+        .to_string();
+
+    assert!(
+        local.read_authorship_note(&commit_sha).is_none(),
+        "test setup should create a commit without a git-ai authorship note"
+    );
+
+    local
+        .git(&["push", "origin", "HEAD"])
+        .expect("push should succeed");
+
+    let local_note = local.read_authorship_note(&commit_sha);
+    assert!(
+        local_note.is_some(),
+        "push should backfill a missing local authorship note before syncing notes"
+    );
+
+    let remote_note = local.read_authorship_note_in_git_dir(upstream.path(), &commit_sha);
+    assert!(
+        remote_note.is_some(),
+        "push should sync the backfilled authorship note to the remote"
+    );
+}
+
 crate::reuse_tests_in_worktree!(
     push_with_set_upstream_flag_pushes_authorship_notes,
     push_after_branch_set_upstream_pushes_authorship_notes,
+    push_backfills_missing_authorship_note_for_uncaptured_commit,
 );
