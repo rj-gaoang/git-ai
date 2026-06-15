@@ -6,7 +6,10 @@ function Start-DaemonIfRequested {
         return
     }
 
-    $daemonExe = Join-Path $HOME '.git-ai\bin\git-ai.exe'
+    $daemonExe = Join-Path $HOME '.git-ai\launcher\git-ai.exe'
+    if (-not (Test-Path $daemonExe)) {
+        $daemonExe = Join-Path $HOME '.git-ai\bin\git-ai.exe'
+    }
     if (-not (Test-Path $daemonExe)) {
         Write-Warning 'Warning: Failed to locate git-ai.exe for daemon restart after install.'
         return
@@ -386,6 +389,37 @@ function Disable-LegacyGitWrapper {
     Write-Warning "Disabled legacy git.exe wrapper: $GitShim -> $disabledPath"
 }
 
+function Set-CurrentExePointer {
+    param(
+        [Parameter(Mandatory = $true)][string]$PointerPath,
+        [Parameter(Mandatory = $true)][string]$TargetPath
+    )
+
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $PointerPath) | Out-Null
+    $tempPath = "{0}.tmp.{1}" -f $PointerPath, $PID
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($tempPath, $TargetPath, $utf8NoBom)
+    Move-Item -Force -LiteralPath $tempPath -Destination $PointerPath
+}
+
+function Copy-InstalledBinary {
+    param(
+        [Parameter(Mandatory = $true)][string]$Source,
+        [Parameter(Mandatory = $true)][string]$Destination,
+        [Parameter(Mandatory = $true)][string]$InstallDir,
+        [Parameter(Mandatory = $true)][string]$Description
+    )
+
+    $tempCopy = Join-Path $InstallDir ("{0}.tmp.{1}.exe" -f $Description, $PID)
+    try {
+        Copy-Item -Force -LiteralPath $Source -Destination $tempCopy -ErrorAction Stop
+        Install-BinaryWithRenameFallback -Source $tempCopy -Destination $Destination -InstallDir $InstallDir -Description $Description
+    } catch {
+        Remove-Item -Force -ErrorAction SilentlyContinue $tempCopy
+        throw
+    }
+}
+
 function Get-UploadActivityLockPath {
     $internalDir = Join-Path $HOME '.git-ai\internal'
     New-Item -ItemType Directory -Force -Path $internalDir | Out-Null
@@ -745,8 +779,13 @@ if ($isElevated -and $env:GIT_AI_ALLOW_SUPERUSER -ne '1') {
     $env:GIT_AI_ALLOW_SUPERUSER = '1'
 }
 
-# Install directory: %USERPROFILE%\.git-ai\bin
-$installDir = Join-Path $HOME ".git-ai\bin"
+# Install directories:
+# - launcher is the authoritative entrypoint used by the update service and current-exe.
+# - bin remains a compatibility copy for existing PATH and agent hook configurations.
+$gitAiRoot = Join-Path $HOME '.git-ai'
+$launcherDir = Join-Path $gitAiRoot 'launcher'
+$installDir = Join-Path $gitAiRoot 'bin'
+New-Item -ItemType Directory -Force -Path $launcherDir | Out-Null
 New-Item -ItemType Directory -Force -Path $installDir | Out-Null
 
 if ($binaryBaseUrl) {
@@ -754,7 +793,7 @@ if ($binaryBaseUrl) {
 } else {
     Write-Host ("Downloading git-ai (repo: {0}, release: {1})..." -f $Repo, $releaseTag)
 }
-$tmpFile = Join-Path $installDir "git-ai.tmp.$PID.exe"
+$tmpFile = Join-Path $launcherDir "git-ai.tmp.$PID.exe"
 
 function Try-Download {
     param(
@@ -885,10 +924,16 @@ Verify-Checksum -File $tmpFile -BinaryName $downloadedBinaryName
 
 $uploadActivityLock = Acquire-UploadActivityLock
 
+$launcherExe = Join-Path $launcherDir 'git-ai.exe'
 $finalExe = Join-Path $installDir 'git-ai.exe'
 $gitShim = Join-Path $installDir 'git.exe'
+$currentExePointer = Join-Path $gitAiRoot 'current-exe'
 
-Install-BinaryWithRenameFallback -Source $tmpFile -Destination $finalExe -InstallDir $installDir -Description 'git-ai.exe'
+Install-BinaryWithRenameFallback -Source $tmpFile -Destination $launcherExe -InstallDir $launcherDir -Description 'launcher git-ai.exe'
+try { Unblock-File -Path $launcherExe -ErrorAction SilentlyContinue } catch { }
+Set-CurrentExePointer -PointerPath $currentExePointer -TargetPath $launcherExe
+
+Copy-InstalledBinary -Source $launcherExe -Destination $finalExe -InstallDir $installDir -Description 'compatibility git-ai.exe'
 try { Unblock-File -Path $finalExe -ErrorAction SilentlyContinue } catch { }
 
 # Existing Windows users may still have the legacy git.exe wrapper. Disable it
@@ -899,7 +944,7 @@ Disable-LegacyGitWrapper -GitShim $gitShim -InstallDir $installDir
 $needLogin = $false
 if ($env:INSTALL_NONCE -and $env:API_BASE) {
     try {
-        & $finalExe exchange-nonce | Out-Host
+        & $launcherExe exchange-nonce | Out-Host
         if ($LASTEXITCODE -ne 0) {
             $needLogin = $true
         }
@@ -911,7 +956,7 @@ if ($env:INSTALL_NONCE -and $env:API_BASE) {
 # Install hooks
 Write-Host 'Setting up IDE/agent hooks...'
 try {
-    & $finalExe install-hooks | Out-Host
+    & $launcherExe install-hooks | Out-Host
     Write-Success 'Successfully set up IDE/agent hooks'
 } catch {
     Write-Warning "Warning: Failed to set up IDE/agent hooks. Please try running 'git-ai install-hooks' manually."
@@ -937,7 +982,8 @@ if ($pathUpdate.UserStatus -eq 'Updated') {
     Write-Host 'Failed to update the user PATH.' -ForegroundColor Red
 }
 
-Write-Success "Successfully installed git-ai into $installDir"
+Write-Success "Successfully installed git-ai into $launcherDir"
+Write-Success "Synchronized compatibility entrypoint into $installDir"
 Write-Success "You can now run 'git-ai' from your terminal"
 
 # Configure Git Bash shell profiles so git-ai takes precedence over /mingw64/bin/git

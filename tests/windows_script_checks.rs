@@ -33,6 +33,17 @@ fn installed_git_ai_path(repo: &TestRepo) -> PathBuf {
         .join("git-ai.exe")
 }
 
+fn installed_launcher_git_ai_path(repo: &TestRepo) -> PathBuf {
+    repo.test_home_path()
+        .join(".git-ai")
+        .join("launcher")
+        .join("git-ai.exe")
+}
+
+fn installed_current_exe_pointer_path(repo: &TestRepo) -> PathBuf {
+    repo.test_home_path().join(".git-ai").join("current-exe")
+}
+
 fn installed_git_wrapper_path(repo: &TestRepo) -> PathBuf {
     repo.test_home_path()
         .join(".git-ai")
@@ -244,7 +255,16 @@ fn run_install_script_with_extra_env(
 }
 
 fn run_installed_git_ai(repo: &TestRepo, args: &[&str], timeout: Duration) -> CommandResult {
-    let mut command = Command::new(installed_git_ai_path(repo));
+    run_git_ai_at_path(repo, installed_git_ai_path(repo), args, timeout)
+}
+
+fn run_git_ai_at_path(
+    repo: &TestRepo,
+    git_ai_path: PathBuf,
+    args: &[&str],
+    timeout: Duration,
+) -> CommandResult {
+    let mut command = Command::new(git_ai_path);
     command.args(args).current_dir(repo.test_home_path());
     configure_install_env(&mut command, repo);
     run_command_with_timeout(&mut command, timeout)
@@ -263,7 +283,7 @@ fn spawn_installed_daemon(repo: &TestRepo) -> Child {
         .write(true)
         .open(foreground_daemon_stderr_path(repo))
         .expect("failed to create daemon stderr log");
-    let mut command = Command::new(installed_git_ai_path(repo));
+    let mut command = Command::new(installed_launcher_git_ai_path(repo));
     command
         .args(["bg", "run"])
         .current_dir(repo.test_home_path())
@@ -275,11 +295,12 @@ fn spawn_installed_daemon(repo: &TestRepo) -> Child {
 
 fn kill_installed_processes(repo: &TestRepo) {
     let script = format!(
-        "$targets = @('{}','{}'); \
+        "$targets = @('{}','{}','{}'); \
          Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | \
          Where-Object {{ $_.ExecutablePath -and ($targets -contains $_.ExecutablePath) }} | \
          ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }}",
         installed_git_ai_path(repo).display(),
+        installed_launcher_git_ai_path(repo).display(),
         repo.test_home_path()
             .join(".git-ai")
             .join("bin")
@@ -412,8 +433,8 @@ fn windows_install_script_passive_update_retires_busy_exe() {
     assert!(
         reinstall
             .stdout
-            .contains("Retired active git-ai.exe before install"),
-        "installer should retire the busy exe instead of deferring\nstdout:\n{}\nstderr:\n{}",
+            .contains("Retired active launcher git-ai.exe before install"),
+        "installer should retire the busy launcher exe instead of deferring\nstdout:\n{}\nstderr:\n{}",
         reinstall.stdout,
         reinstall.stderr
     );
@@ -453,6 +474,79 @@ fn windows_daemon_creates_log_file() {
 
     kill_installed_processes(&repo);
     let _ = daemon.wait();
+}
+
+#[test]
+#[serial]
+fn windows_install_script_synchronizes_launcher_current_exe_and_compat_bin() {
+    let repo =
+        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::NoDaemon);
+
+    let install = run_install_script(&repo, Duration::from_secs(90));
+    assert!(
+        install.status.success(),
+        "install should succeed\nstdout:\n{}\nstderr:\n{}",
+        install.stdout,
+        install.stderr
+    );
+
+    let launcher = installed_launcher_git_ai_path(&repo);
+    let compat_bin = installed_git_ai_path(&repo);
+    let pointer = installed_current_exe_pointer_path(&repo);
+    assert!(
+        launcher.exists(),
+        "launcher git-ai.exe should be installed at {}",
+        launcher.display()
+    );
+    assert!(
+        compat_bin.exists(),
+        "compatibility git-ai.exe should be installed at {}",
+        compat_bin.display()
+    );
+    assert!(
+        pointer.exists(),
+        "current-exe pointer should be written at {}",
+        pointer.display()
+    );
+
+    let pointer_value = fs::read_to_string(&pointer)
+        .expect("failed to read current-exe pointer")
+        .trim()
+        .to_string();
+    assert_eq!(
+        fs::canonicalize(&pointer_value).expect("current-exe target should exist"),
+        fs::canonicalize(&launcher).expect("launcher should canonicalize"),
+        "current-exe should point at the launcher entrypoint"
+    );
+
+    let launcher_version =
+        run_git_ai_at_path(&repo, launcher, &["--version"], Duration::from_secs(15));
+    let compat_version =
+        run_git_ai_at_path(&repo, compat_bin, &["--version"], Duration::from_secs(15));
+    assert!(
+        launcher_version.status.success(),
+        "launcher --version should succeed\nstdout:\n{}\nstderr:\n{}",
+        launcher_version.stdout,
+        launcher_version.stderr
+    );
+    assert!(
+        compat_version.status.success(),
+        "compatibility bin --version should succeed\nstdout:\n{}\nstderr:\n{}",
+        compat_version.stdout,
+        compat_version.stderr
+    );
+    assert_eq!(
+        launcher_version.stdout.trim(),
+        compat_version.stdout.trim(),
+        "launcher and compatibility bin should report the same version"
+    );
+    assert!(
+        install
+            .stdout
+            .contains("Synchronized compatibility entrypoint into"),
+        "installer should report compatibility entrypoint sync\nstdout:\n{}",
+        install.stdout
+    );
 }
 
 fn seed_existing_wrapper(repo: &TestRepo) {
@@ -565,8 +659,14 @@ fn windows_install_script_replaces_busy_binary_by_retiring_it() {
         "install.ps1 should install through the busy-binary rename fallback"
     );
     assert!(
-        script.contains("Install-BinaryWithRenameFallback -Source $tmpFile -Destination $finalExe"),
-        "install.ps1 should replace git-ai.exe via the rename fallback"
+        script.contains(
+            "Install-BinaryWithRenameFallback -Source $tmpFile -Destination $launcherExe"
+        ),
+        "install.ps1 should replace launcher git-ai.exe via the rename fallback"
+    );
+    assert!(
+        script.contains("Copy-InstalledBinary -Source $launcherExe -Destination $finalExe"),
+        "install.ps1 should synchronize the compatibility bin entrypoint from launcher"
     );
     assert!(
         script.contains("Retired active $Description before install"),
@@ -575,6 +675,29 @@ fn windows_install_script_replaces_busy_binary_by_retiring_it() {
     assert!(
         !script.contains("Move-Item -Force -Path $tmpFile -Destination $finalExe"),
         "install.ps1 should not directly overwrite git-ai.exe after waiting for a write handle"
+    );
+}
+
+#[test]
+fn windows_install_script_writes_current_exe_pointer_to_launcher() {
+    let script = fs::read_to_string(install_script_path()).expect("failed to read install.ps1");
+    assert!(
+        script.contains("function Set-CurrentExePointer"),
+        "install.ps1 should write the current-exe pointer"
+    );
+    assert!(
+        script.contains("$launcherDir = Join-Path $gitAiRoot 'launcher'"),
+        "install.ps1 should install the authoritative launcher entrypoint"
+    );
+    assert!(
+        script.contains("$currentExePointer = Join-Path $gitAiRoot 'current-exe'"),
+        "install.ps1 should maintain the current-exe pointer path"
+    );
+    assert!(
+        script.contains(
+            "Set-CurrentExePointer -PointerPath $currentExePointer -TargetPath $launcherExe"
+        ),
+        "install.ps1 should point current-exe at launcher"
     );
 }
 
