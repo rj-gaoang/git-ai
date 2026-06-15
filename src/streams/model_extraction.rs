@@ -103,6 +103,23 @@ fn extract_model_from_jsonl_line(line: &str) -> Option<String> {
         .get("message")
         .and_then(|m| m.get("model"))
         .and_then(|v| v.as_str())
+        .or_else(|| {
+            json.get("data")
+                .and_then(|d| d.get("modelId"))
+                .and_then(|v| v.as_str())
+        })
+        .or_else(|| {
+            json.get("data")
+                .and_then(|d| d.get("modelID"))
+                .and_then(|v| v.as_str())
+        })
+        .or_else(|| {
+            json.get("data")
+                .and_then(|d| d.get("model"))
+                .and_then(|v| v.as_str())
+        })
+        .or_else(|| json.get("modelId").and_then(|v| v.as_str()))
+        .or_else(|| json.get("modelID").and_then(|v| v.as_str()))
         .or_else(|| json.get("model").and_then(|v| v.as_str()));
 
     if let Some(model) = candidate

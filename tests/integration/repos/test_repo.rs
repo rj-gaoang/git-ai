@@ -489,12 +489,28 @@ fn configure_test_home_env(command: &mut Command, test_home: &Path) {
     // Without this, git internals (which call `git` sub-processes via PATH) will
     // hit the installed release git-ai binary, which spawns a background daemon
     // for every invocation — causing a process storm.
-    #[cfg(not(windows))]
     if let Ok(path) = std::env::var("PATH") {
+        let separator = if cfg!(windows) { ';' } else { ':' };
         let sanitized: Vec<&str> = path
-            .split(':')
+            .split(separator)
             .filter(|dir| {
-                let git_path = std::path::Path::new(dir).join("git");
+                let dir_path = std::path::Path::new(dir);
+                let git_path = dir_path.join(if cfg!(windows) { "git.exe" } else { "git" });
+                let git_ai_path = dir_path.join(if cfg!(windows) {
+                    "git-ai.exe"
+                } else {
+                    "git-ai"
+                });
+                if dir_path
+                    .to_string_lossy()
+                    .to_ascii_lowercase()
+                    .contains("git-ai-test-home-")
+                {
+                    return false;
+                }
+                if git_ai_path.is_file() || git_ai_path.is_symlink() {
+                    return false;
+                }
                 if git_path.is_file() || git_path.is_symlink() {
                     // Shell-script wrapper containing "git-ai"
                     if let Ok(contents) = fs::read_to_string(&git_path)
@@ -518,7 +534,7 @@ fn configure_test_home_env(command: &mut Command, test_home: &Path) {
                 true
             })
             .collect();
-        command.env("PATH", sanitized.join(":"));
+        command.env("PATH", sanitized.join(&separator.to_string()));
     }
     #[cfg(windows)]
     {
@@ -1114,7 +1130,7 @@ impl TestRepo {
         let wt_n: u64 = rng.random_range(0..10_000_000_000);
         let worktree_path = std::env::temp_dir().join(format!("{}-wt", wt_n));
 
-        let output = Command::new(real_git_executable())
+        let mut output = Command::new(real_git_executable())
             .args([
                 "-C",
                 base.path.to_str().unwrap(),
@@ -1125,6 +1141,98 @@ impl TestRepo {
             ])
             .output()
             .expect("failed to add worktree");
+
+        if !output.status.success()
+            && String::from_utf8_lossy(&output.stderr).contains("unknown option `orphan'")
+        {
+            fs::write(base.path.join(".git-ai-worktree-seed"), "seed\n")
+                .expect("failed to write linked worktree seed file");
+            let add_output = Command::new(real_git_executable())
+                .args([
+                    "-C",
+                    base.path.to_str().unwrap(),
+                    "add",
+                    ".git-ai-worktree-seed",
+                ])
+                .output()
+                .expect("failed to stage linked worktree seed file");
+            if !add_output.status.success() {
+                panic!(
+                    "failed to stage linked worktree seed file:\nstdout: {}\nstderr: {}",
+                    String::from_utf8_lossy(&add_output.stdout),
+                    String::from_utf8_lossy(&add_output.stderr)
+                );
+            }
+            let commit_output = Command::new(real_git_executable())
+                .args([
+                    "-C",
+                    base.path.to_str().unwrap(),
+                    "commit",
+                    "-m",
+                    "linked worktree seed",
+                ])
+                .output()
+                .expect("failed to commit linked worktree seed file");
+            if !commit_output.status.success() {
+                panic!(
+                    "failed to commit linked worktree seed file:\nstdout: {}\nstderr: {}",
+                    String::from_utf8_lossy(&commit_output.stdout),
+                    String::from_utf8_lossy(&commit_output.stderr)
+                );
+            }
+
+            let fallback_branch = format!("{}-fallback-{}", default_branch, wt_n);
+            output = Command::new(real_git_executable())
+                .args([
+                    "-C",
+                    base.path.to_str().unwrap(),
+                    "worktree",
+                    "add",
+                    "-b",
+                    fallback_branch.as_str(),
+                    worktree_path.to_str().unwrap(),
+                ])
+                .output()
+                .expect("failed to add fallback worktree");
+
+            if output.status.success() {
+                let orphan_output = Command::new(real_git_executable())
+                    .args([
+                        "-C",
+                        worktree_path.to_str().unwrap(),
+                        "checkout",
+                        "--orphan",
+                        default_branch,
+                    ])
+                    .output()
+                    .expect("failed to switch fallback worktree to orphan branch");
+                if !orphan_output.status.success() {
+                    panic!(
+                        "failed to switch fallback worktree to orphan branch:\nstdout: {}\nstderr: {}",
+                        String::from_utf8_lossy(&orphan_output.stdout),
+                        String::from_utf8_lossy(&orphan_output.stderr)
+                    );
+                }
+
+                let cleanup_output = Command::new(real_git_executable())
+                    .args([
+                        "-C",
+                        worktree_path.to_str().unwrap(),
+                        "rm",
+                        "-f",
+                        ".git-ai-worktree-seed",
+                    ])
+                    .output()
+                    .expect("failed to clean fallback worktree seed file");
+                if !cleanup_output.status.success() {
+                    panic!(
+                        "failed to clean fallback worktree seed file:\nstdout: {}\nstderr: {}",
+                        String::from_utf8_lossy(&cleanup_output.stdout),
+                        String::from_utf8_lossy(&cleanup_output.stderr)
+                    );
+                }
+            }
+        }
 
         if !output.status.success() {
             panic!(
@@ -3233,12 +3341,28 @@ fn ensure_isolated_process_home() {
             // (e.g., template repo init, bare repo init, worktree setup), preventing
             // git internals from resolving `git` via PATH to the installed git-ai
             // release binary (which would spawn daemons).
-            #[cfg(not(windows))]
             if let Ok(path) = std::env::var("PATH") {
+                let separator = if cfg!(windows) { ';' } else { ':' };
                 let sanitized = path
-                    .split(':')
+                    .split(separator)
                     .filter(|dir| {
-                        let git_path = std::path::Path::new(dir).join("git");
+                        let dir_path = std::path::Path::new(dir);
+                        let git_path = dir_path.join(if cfg!(windows) { "git.exe" } else { "git" });
+                        let git_ai_path = dir_path.join(if cfg!(windows) {
+                            "git-ai.exe"
+                        } else {
+                            "git-ai"
+                        });
+                        if dir_path
+                            .to_string_lossy()
+                            .to_ascii_lowercase()
+                            .contains("git-ai-test-home-")
+                        {
+                            return false;
+                        }
+                        if git_ai_path.is_file() || git_ai_path.is_symlink() {
+                            return false;
+                        }
                         if git_path.is_file() || git_path.is_symlink() {
                             if let Ok(contents) = fs::read_to_string(&git_path)
                                 && contents.contains("git-ai")
@@ -3259,7 +3383,7 @@ fn ensure_isolated_process_home() {
                         true
                     })
                     .collect::<Vec<_>>()
-                    .join(":");
+                    .join(&separator.to_string());
                 std::env::set_var("PATH", sanitized);
             }
         }

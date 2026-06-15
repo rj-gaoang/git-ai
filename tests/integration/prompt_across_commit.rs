@@ -64,10 +64,9 @@ fn test_change_across_commits() {
     assert_ne!(second_ai_entry.hash, initial_ai_entry.hash);
 }
 
-/// Variant of test_change_across_commits using unattributed (legacy) human checkpoints.
-/// Assertions match origin/main: with empty attribution, the file has only 1 attestation
-/// entry (the second AI commit's entry only) because the first commit's attribution is
-/// subsumed into the working log without creating a separate attestation entry.
+/// Variant of test_change_across_commits using legacy human checkpoints.
+/// Legacy Human checkpoints now materialize h_* attestations for committed
+/// human lines, so the note includes both the human insertion and the AI edit.
 #[test]
 fn test_change_across_commits_standard_human() {
     let repo = TestRepo::new();
@@ -102,7 +101,7 @@ fn test_change_across_commits_standard_human() {
     let commit = repo.stage_all_and_commit("add more AI").unwrap();
 
     let file_attestation = commit.authorship_log.attestations.first().unwrap();
-    assert_eq!(file_attestation.entries.len(), 1);
+    assert_eq!(file_attestation.entries.len(), 2);
 
     let second_ai_session_hash = commit
         .authorship_log
@@ -113,7 +112,18 @@ fn test_change_across_commits_standard_human() {
         .unwrap();
     assert_ne!(*second_ai_session_hash, initial_ai_entry.hash);
 
-    let second_ai_entry = file_attestation.entries.first().unwrap();
+    let human_entry = file_attestation
+        .entries
+        .iter()
+        .find(|entry| entry.hash.starts_with("h_"))
+        .expect("legacy Human checkpoint should create an h_* attestation");
+    assert_eq!(human_entry.line_ranges, vec![LineRange::Single(5)]);
+
+    let second_ai_entry = file_attestation
+        .entries
+        .iter()
+        .find(|entry| !entry.hash.starts_with("h_"))
+        .expect("second AI line should still be attested");
     assert_eq!(second_ai_entry.line_ranges, vec![LineRange::Single(6)]);
     assert_ne!(second_ai_entry.hash, initial_ai_entry.hash);
 }

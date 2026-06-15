@@ -4,9 +4,10 @@ use crate::mdm::hook_installer::{
 };
 use crate::mdm::utils::{
     MIN_CODE_VERSION, get_editor_version, home_dir, install_vsc_editor_extension,
-    is_github_codespaces, is_vsc_editor_extension_installed, parse_version, resolve_editor_cli,
-    settings_paths_for_products, should_process_settings_target, update_vscode_chat_hook_settings,
-    version_meets_requirement,
+    is_github_codespaces, is_vsc_editor_extension_installed, parse_version,
+    repair_vscode_git_path_settings, resolve_editor_cli, settings_paths_for_products,
+    should_process_settings_target, update_vscode_chat_hook_settings,
+    update_vscode_copilot_hook_locations_settings, version_meets_requirement,
 };
 use std::path::PathBuf;
 
@@ -188,6 +189,27 @@ impl HookInstaller for VSCodeInstaller {
                 continue;
             }
 
+            match repair_vscode_git_path_settings(&settings_path, dry_run) {
+                Ok(Some(diff)) => {
+                    results.push(InstallResult {
+                        changed: true,
+                        diff: Some(diff),
+                        message: format!(
+                            "VS Code: stale git.path removed from {}",
+                            settings_path.display()
+                        ),
+                    });
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    results.push(InstallResult {
+                        changed: false,
+                        diff: None,
+                        message: format!("VS Code: Failed to repair git.path settings: {}", e),
+                    });
+                }
+            }
+
             match update_vscode_chat_hook_settings(&settings_path, dry_run) {
                 Ok(Some(diff)) => {
                     results.push(InstallResult {
@@ -214,6 +236,30 @@ impl HookInstaller for VSCodeInstaller {
                         changed: false,
                         diff: None,
                         message: format!("VS Code: Failed to configure chat hook settings: {}", e),
+                    });
+                }
+            }
+
+            match update_vscode_copilot_hook_locations_settings(&settings_path, dry_run) {
+                Ok(Some(diff)) => {
+                    results.push(InstallResult {
+                        changed: true,
+                        diff: Some(diff),
+                        message: format!(
+                            "VS Code: Copilot hook location settings updated in {}",
+                            settings_path.display()
+                        ),
+                    });
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    results.push(InstallResult {
+                        changed: false,
+                        diff: None,
+                        message: format!(
+                            "VS Code: Failed to configure Copilot hook locations: {}",
+                            e
+                        ),
                     });
                 }
             }

@@ -1,5 +1,6 @@
 ---
 source: src/authorship/authorship_log_serialization.rs
+assertion_line: 876
 expression: deserialized
 ---
 AuthorshipLogV3 {
@@ -62,6 +63,5 @@ AuthorshipLogV3 {
         base_commit_sha: "abc123",
         prompts: {},
         humans: {},
-        sessions: {},
     },
 }

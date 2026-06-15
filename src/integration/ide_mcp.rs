@@ -11,11 +11,13 @@ const VSCODE_MCP_PATH_ENV_VAR: &str = "GIT_AI_VSCODE_MCP_CONFIG_PATH";
 const IDEA_MCP_PATH_ENV_VAR: &str = "GIT_AI_IDEA_MCP_CONFIG_PATH";
 
 pub fn resolve_x_user_id(repo_workdir: Option<&Path>) -> Option<String> {
-    env_var_non_empty(USER_ID_ENV_VAR).or_else(|| {
-        candidate_paths(repo_workdir)
-            .into_iter()
-            .find_map(|path| read_x_user_id_from_file(&path))
-    })
+    env_var_non_empty(USER_ID_ENV_VAR).or_else(|| resolve_x_user_id_from_mcp_config(repo_workdir))
+}
+
+pub(crate) fn resolve_x_user_id_from_mcp_config(repo_workdir: Option<&Path>) -> Option<String> {
+    candidate_paths(repo_workdir)
+        .into_iter()
+        .find_map(|path| read_x_user_id_from_file(&path))
 }
 
 fn candidate_paths(repo_workdir: Option<&Path>) -> Vec<PathBuf> {

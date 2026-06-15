@@ -270,6 +270,7 @@ fn daemon_startup_is_blocked(config: &DaemonConfig) -> bool {
 }
 
 pub(crate) fn daemon_is_up(config: &DaemonConfig) -> bool {
+    #[cfg(not(windows))]
     if !config.control_socket_path.exists() || !config.trace_socket_path.exists() {
         return false;
     }

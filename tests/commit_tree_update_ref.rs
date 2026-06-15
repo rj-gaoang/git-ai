@@ -125,6 +125,47 @@ fn graphite_style_restack_child_branch(
     new_head
 }
 
+fn merge_tree_for_replayed_commit(
+    repo: &TestRepo,
+    old_parent: &str,
+    new_parent: &str,
+    feature_sha: &str,
+) -> String {
+    match repo.git(&[
+        "merge-tree",
+        "--write-tree",
+        "--merge-base",
+        old_parent,
+        new_parent,
+        feature_sha,
+    ]) {
+        Ok(output) => output.trim().lines().next().unwrap().to_string(),
+        Err(error) if error.contains("unknown option") && error.contains("merge-base") => {
+            let index_path = repo
+                .path()
+                .join(".git")
+                .join("git-ai-merge-tree-test.index");
+            let index_path_str = index_path.to_string_lossy().to_string();
+            let index_env = [("GIT_INDEX_FILE", index_path_str.as_str())];
+            let _ = std::fs::remove_file(&index_path);
+            repo.git_with_env(
+                &["read-tree", "-m", old_parent, new_parent, feature_sha],
+                &index_env,
+                None,
+            )
+            .expect("read-tree merge fallback should succeed");
+            let tree = repo
+                .git_with_env(&["write-tree"], &index_env, None)
+                .expect("write-tree fallback should succeed")
+                .trim()
+                .to_string();
+            let _ = std::fs::remove_file(index_path);
+            tree
+        }
+        Err(error) => panic!("merge-tree: {:?}", error),
+    }
+}
+
 #[test]
 fn test_commit_tree_update_ref_preserves_authorship_notes_on_reparent() {
     let repo = TestRepo::new();
@@ -443,22 +484,8 @@ fn test_graphite_style_multi_commit_single_update_ref() {
             .trim()
             .to_string();
 
-        let merged_tree_output = repo
-            .git(&[
-                "merge-tree",
-                "--write-tree",
-                "--merge-base",
-                &old_parent,
-                &new_parent,
-                feature_sha,
-            ])
-            .expect("merge-tree");
-        let merged_tree = merged_tree_output
-            .trim()
-            .lines()
-            .next()
-            .unwrap()
-            .to_string();
+        let merged_tree =
+            merge_tree_for_replayed_commit(&repo, &old_parent, &new_parent, feature_sha);
 
         let message = repo
             .git(&["log", "-1", "--format=%s", feature_sha])

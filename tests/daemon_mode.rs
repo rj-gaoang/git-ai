@@ -354,13 +354,30 @@ fn configure_test_home_env(command: &mut Command, test_home: &Path) {
     // pointing to the test home it starts a background daemon at
     // the test socket path, poisoning the test environment.
     if let Ok(path) = std::env::var("PATH") {
+        let separator = if cfg!(windows) { ';' } else { ':' };
         let sanitized: Vec<&str> = path
-            .split(':')
+            .split(separator)
             .filter(|dir| {
                 // Keep only dirs that do NOT contain a git-ai wrapper
                 // (heuristic: skip dirs where the `git` binary is a
                 //  shell-script wrapper for git-ai, or a symlink to git-ai).
-                let git_path = std::path::Path::new(dir).join("git");
+                let dir_path = std::path::Path::new(dir);
+                let git_path = dir_path.join(if cfg!(windows) { "git.exe" } else { "git" });
+                let git_ai_path = dir_path.join(if cfg!(windows) {
+                    "git-ai.exe"
+                } else {
+                    "git-ai"
+                });
+                if dir_path
+                    .to_string_lossy()
+                    .to_ascii_lowercase()
+                    .contains("git-ai-test-home-")
+                {
+                    return false;
+                }
+                if git_ai_path.is_file() || git_ai_path.is_symlink() {
+                    return false;
+                }
                 if git_path.is_file() || git_path.is_symlink() {
                     if let Ok(contents) = std::fs::read_to_string(&git_path)
                         && contents.contains("git-ai")
@@ -381,7 +398,7 @@ fn configure_test_home_env(command: &mut Command, test_home: &Path) {
                 true
             })
             .collect();
-        command.env("PATH", sanitized.join(":"));
+        command.env("PATH", sanitized.join(&separator.to_string()));
     }
     #[cfg(windows)]
     {
@@ -1074,6 +1091,61 @@ fn daemon_windows_stalled_checkpoint_clients_do_not_block_later_control_requests
         response.ok,
         "later control request should return an ok response: {:?}",
         response
+    );
+    daemon.shutdown();
+}
+
+#[test]
+#[serial]
+fn checkpoint_hook_stdin_times_out_when_host_keeps_pipe_open() {
+    let repo =
+        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::NoDaemon);
+    let mut daemon = DaemonGuard::start_with_env(
+        &repo,
+        &[
+            ("GIT_AI_DAEMON_UPDATE_CHECK_INTERVAL", "86400"),
+            ("GIT_AI_DAEMON_MAX_UPTIME_SECS", "86400"),
+        ],
+    );
+
+    let mut command = Command::new(get_binary_path());
+    command
+        .args(["checkpoint", "codex", "--hook-input", "stdin"])
+        .current_dir(repo.path())
+        .env("GIT_AI_TEST_DB_PATH", repo.test_db_path())
+        .env("GITAI_TEST_DB_PATH", repo.test_db_path())
+        .env("GIT_AI_HOOK_STDIN_TIMEOUT_MS", "200")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    configure_test_home_env(&mut command, repo.test_home_path());
+    configure_test_daemon_env(
+        &mut command,
+        &repo.daemon_home_path(),
+        &daemon_control_socket_path(&repo),
+        &daemon_trace_socket_path(&repo),
+    );
+
+    let mut child = command.spawn().expect("failed to spawn checkpoint");
+    let mut stdin_guard = child.stdin.take();
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("failed to poll checkpoint") {
+            break status;
+        }
+        if std::time::Instant::now() >= deadline {
+            drop(stdin_guard.take());
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("checkpoint did not exit after hook stdin timeout");
+        }
+        thread::sleep(Duration::from_millis(25));
+    };
+    drop(stdin_guard.take());
+
+    assert!(
+        status.success(),
+        "hook stdin timeout should skip checkpoint without failing the host: {status}"
     );
     daemon.shutdown();
 }
@@ -3311,6 +3383,13 @@ fn daemon_pure_trace_socket_concurrent_worktree_burst_preserves_exact_line_attri
     let worker_b_dir = unique_worktree_path(&repo, "daemon-race-worker-b");
     let worker_b_dir_str = worker_b_dir.to_string_lossy().to_string();
 
+    fs::write(repo.path().join("daemon-race-seed.txt"), "seed\n")
+        .expect("failed to write worktree seed file");
+    repo.git_og_with_env(&["add", "daemon-race-seed.txt"], &env_refs)
+        .expect("staging worktree seed file should succeed");
+    repo.git_og_with_env(&["commit", "-m", "worktree seed"], &env_refs)
+        .expect("worktree seed commit should succeed");
+
     repo.git_og_with_env(&["checkout", "-b", "daemon-race-worker-a"], &env_refs)
         .expect("checkout worker-a branch should succeed");
     repo.git_og_with_env(
@@ -3324,7 +3403,7 @@ fn daemon_pure_trace_socket_concurrent_worktree_burst_preserves_exact_line_attri
         &env_refs,
     )
     .expect("worktree add worker-b should succeed");
-    wait_for_expected_top_level_completions(&repo, 0, 2);
+    wait_for_expected_top_level_completions(&repo, 0, 4);
 
     let file_count = 10usize;
     let completion_baseline = repo.daemon_total_completion_count();
@@ -3465,6 +3544,13 @@ fn daemon_pure_trace_socket_parallel_worktree_streams_preserve_exact_line_attrib
     let worker_b_dir = unique_worktree_path(&repo, "daemon-race-worker-b-parallel");
     let worker_b_dir_str = worker_b_dir.to_string_lossy().to_string();
 
+    fs::write(repo.path().join("daemon-race-parallel-seed.txt"), "seed\n")
+        .expect("failed to write parallel worktree seed file");
+    repo.git_og_with_env(&["add", "daemon-race-parallel-seed.txt"], &env_refs)
+        .expect("staging parallel worktree seed file should succeed");
+    repo.git_og_with_env(&["commit", "-m", "parallel worktree seed"], &env_refs)
+        .expect("parallel worktree seed commit should succeed");
+
     repo.git_og_with_env(
         &["checkout", "-b", "daemon-race-parallel-worker-a"],
         &env_refs,
@@ -3481,7 +3567,7 @@ fn daemon_pure_trace_socket_parallel_worktree_streams_preserve_exact_line_attrib
         &env_refs,
     )
     .expect("worktree add parallel worker-b should succeed");
-    wait_for_expected_top_level_completions(&repo, 0, 2);
+    wait_for_expected_top_level_completions(&repo, 0, 4);
 
     let file_count = 8usize;
     let completion_baseline = repo.daemon_total_completion_count();
@@ -3895,9 +3981,8 @@ fn daemon_start_refuses_replacement_runtime_when_blocked_pid_cannot_be_killed() 
         "bg start should fail when the blocked daemon PID cannot be recovered"
     );
     assert!(
-        stderr.contains("failed to recover unhealthy daemon pid 4")
-            && stderr.contains("refusing to activate a replacement runtime"),
-        "bg start should explain that replacement runtimes are refused while the original daemon still owns the lock: {}",
+        stderr.contains("daemon startup blocked: lock held"),
+        "bg start should explain that startup is blocked while the original daemon still owns the lock: {}",
         stderr
     );
     assert!(

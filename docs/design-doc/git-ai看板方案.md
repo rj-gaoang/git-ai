@@ -43,7 +43,17 @@ Speckit 是团队使用的「规范驱动开发」框架，通过 `.specify/` �
 
 > **实施补充（2026-06-14，张一峰 op-api 归因误判 / 漏判修复）**：针对 `logs/zyf-20260614.jsonl` 中两条已确认“实际均为 AI 生成”的异常提交补齐根因和修复。其一，`2026-06-01 15:19:37` 左右的 `op-api` 提交 `e2cc766`，日志显示 `promptCount=0`、`sessionCount=0`、`checkpointCount=1`，最终却得到 `humanAdditions=346`、`aiAdditions=0`、`unknownAdditions=7`；根因是缺少真实 AI checkpoint / prompt 时，IDE 自动保存类的弱 `KnownHuman` 事件被当成强人工 attestation 写入 `h_*`，把整块新增代码误报成人工。现在 `KnownHuman` 必须带有效 `kh_editor` 元数据才保留强人工语义；缺少编辑器元数据时降级为普通 `Human` checkpoint，不再产生 `h_*` 归因，也不会凭空把未知新增行算成人工。其二，`2026-06-11 13:58:10` 左右的 `op-api` 提交 `991aca4`，`src/main/java/com/ruijie/op/api/controller/JobTask.java` 实际为 AI 生成，但统计只覆盖了约 150 行 AI，其余落到 unknown；根因是 Copilot terminal / bash 工具调用在缺失 pre snapshot、snapshot 失败或 hook 超时时，旧链路直接放弃 post checkpoint，导致部分 AI 改动没有落入 authorship note。现在 `PostBashCall` 会在 `MissingPreSnapshot` / `SnapshotFailed` / `HookTimeout` / post-hook error 时回退到 `git_status_fallback` 提取实际变更文件，并继续发送 AI checkpoint。新增诊断事件 `bash_post_checkpoint_resolved`、`checkpoint_request_send`、`checkpoint_request_started`、`checkpoint_request_finished`，用于确认路径解析、daemon 接收和 checkpoint 落盘是否完整。对应回归测试包括 `weak_known_human_without_ai_checkpoint_does_not_claim_human_additions` 与 `test_run_in_terminal_missing_pre_snapshot_uses_git_status_fallback`。
 
-> **实施补充（2026-06-15，op-return-exchange 非 UTF-8 Java 文件漏归因修复）**：针对 `D:\rj-op\op-return-exchange` 最新提交 `cf060485afcfdacc4d0c85b0ee9902e08798fa3e` 中 `OpReturnExchangeApplicationTests.java`、`SplitTests.java`、`MailTest.java` 等文件实际由 Copilot 追加测试方法但统计落入 `unknownAdditions` 的问题，日志确认不是 Copilot 未检测到路径：`bash_post_checkpoint_resolved` 已检测 90 个文件，`daemon_checkpoint_request_resolved_files` 却只解析出 79 个文件，差集中的 11 个 Java 源文件每个本次提交正好新增 5 行，用户点名的 3 个文件均在差集中。根因是 checkpoint 构造阶段使用 `fs::read_to_string(...).ok()` 读取整文件；这些历史 Java 文件包含非 UTF-8 字节，读取失败后 `CheckpointFile.content=None`，daemon 侧旧逻辑又只保留带 `content` 的文件，导致“路径已发现但内容快照为空”的显式 AI 编辑被静默过滤，最终 post-commit note 缺少这些文件的 attestation。修复方案是把 checkpoint 文件读取改为字节读取并排除 NUL 二进制文件，文本内容用 `String::from_utf8_lossy` 形成稳定快照；daemon 解析请求时也增加 workdir 兜底读取，避免旧客户端或其他插件传入 `content=None` 时再次丢文件。新增回归测试 `test_run_in_terminal_non_utf8_existing_file_is_attributed`，模拟含非法 UTF-8 字节的既有 Java 文件经 Copilot terminal fallback 追加 5 行测试方法，提交后断言 `unknown_additions=0`、`ai_additions=5`。
+> **实施补充（2026-06-15，op-return-exchange 非 UTF-8 文本文件漏归因修复）**：针对 `D:\rj-op\op-return-exchange` 最新提交 `cf060485afcfdacc4d0c85b0ee9902e08798fa3e` 中 `OpReturnExchangeApplicationTests.java`、`SplitTests.java`、`MailTest.java` 等文件实际由 Copilot 追加测试方法但统计落入 `unknownAdditions` 的问题，日志确认不是 Copilot 未检测到路径：`bash_post_checkpoint_resolved` 已检测 90 个文件，`daemon_checkpoint_request_resolved_files` 却只解析出 79 个文件，差集中的 11 个 Java 源文件每个本次提交正好新增 5 行，用户点名的 3 个文件均在差集中。根因是 checkpoint 构造阶段使用 `fs::read_to_string(...).ok()` 读取整文件；这些历史文本文件包含非 UTF-8 字节，读取失败后 `CheckpointFile.content=None`，daemon 侧旧逻辑又只保留带 `content` 的文件，导致“路径已发现但内容快照为空”的显式 AI 编辑被静默过滤，最终 post-commit note 缺少这些文件的 attestation。修复方案是把 checkpoint 文件读取改为字节读取并排除 NUL 二进制文件，文本内容用 `String::from_utf8_lossy` 形成稳定快照；daemon 解析请求时也增加 workdir 兜底读取，避免旧客户端或其他插件传入 `content=None` 时再次丢文件。该修复位于通用 checkpoint 文件读取链路，不依赖 Java 扩展名；新增回归测试 `test_run_in_terminal_non_utf8_existing_text_files_are_attributed`，同时模拟含非法 UTF-8 字节的 `.java` 与 `.properties` 既有文本文件经 Copilot terminal fallback 追加内容，提交后断言新增行全部计入 AI 且 `unknown_additions=0`。
+
+> **实施补充（2026-06-15，Windows busy exe 方案缺口与运行时收敛修复）**：`2.29` 的 retired binary 替换策略是必要兜底，但它只能解决“安装器能否替换被占用的 `git-ai.exe`”，不能解释也不能根治“为什么持续出现很多 `git-ai.exe`、为什么提交后 70 多秒才进入 `post_commit_started`”。本轮从 `C:\Users\admin\.git-ai\logs` 与真实进程状态确认，最新提交上传本身约 2.7 秒完成，HTTP 约 108ms，慢点发生在 post-commit 事件到达前；同时 Windows 上 `daemon_is_up(...)` 对 `\\.\pipe\...` named pipe 先做 `.exists()` 判断会恒为 false，导致健康 daemon 被误判为离线，从而重复尝试启动；`checkpoint ... --hook-input stdin` 在宿主未关闭 stdin 时会无限等待，形成持有旧 exe 镜像的残留进程；`active-runtime.json` 指向的 replacement runtime 如果已经失效，客户端仍可能继续路由到废弃 runtime；测试隔离还曾把 `git-ai-test-home-*` 临时 bin 目录泄露到真实 PATH，放大进程风暴。修复方案不是在每次用户命令里全系统扫描 / 杀进程，而是分层收敛：Windows daemon 健康检查对 named pipe 直接做 100ms 连接探测，不再用文件存在性误判；hook stdin 默认 5 秒超时，可用 `GIT_AI_HOOK_STDIN_TIMEOUT_MS` 调整，超时后以 0 退出跳过 checkpoint，避免卡住 IDE/Agent；`active-runtime.json` 只在 control/trace socket 可连接或 runtime lock 仍被持有时保留，否则自动移除并回到稳定默认 runtime；测试 harness 在 Windows 也会剔除 `git-ai-test-home-*` 和含 `git-ai.exe` 的临时 PATH。性能边界是：不做高频全进程枚举，不在普通命令路径按进程名扫机器；只在已有 active runtime 元数据时做轻量 socket/lock 探测、只在 `--hook-input stdin` 时启用超时、只在测试环境设置时清理 PATH。
+
+> **实施补充（2026-06-15，Windows Update Service 旧探活污染隔离）**：针对看板出现 `author=-BestEffort`、`customAttributes.source=-GitPath`、`installerScript=upload-install-test.ps1`、版本仍是 `2.2.24` 的“安装成功测试”记录，本轮确认它不是当前 git-ai Rust 探活产生的记录，而是旧 `windows-update-service` 下载并执行 `upload-install-test.ps1` 后直接 POST 到同一个远程看板接口。service wrapper 曾把 `GIT_AI_SKIP_INSTALL_TEST_UPLOAD=1` 传给安装脚本，跳过 git-ai 内置探活，再以 `@('-GitAiExe', $GitAiExe, '-Source', 'installTest', '-BestEffort', '-GitPath', ...)` 调外部 PowerShell 脚本；历史版本一旦发生参数绑定 / 位置错位，PowerShell 开关就会被写入业务字段，形成 `UserId=-BestEffort`、`Source=-GitPath`、甚至 `RemoteUrl=-Source`。所以 git-ai 运行时是正常的，但它仍会“被影响”：远程看板接收的是同一套 upload schema，旧外部 producer 绕过 git-ai 直连接口，污染了共享统计数据，而不是改坏了 git-ai 的归因逻辑。git-ai 侧修复是把 Rust 内置安装探活打上不可混淆的一手标识：payload、`clientContext`、prompt `customAttributes` 和 HTTP header 均写入 `installTestProducer=git-ai-rust`、`installerScript=git-ai-rust-install-test`；身份解析链路拒绝形如 PowerShell 参数的用户值，环境变量或 MCP 中出现 `-BestEffort` / `-GitPath` / `-Source` 时写入 `install_test_identity_rejected`，无效环境变量不会遮住真实 MCP 配置，之后继续回退 Git 邮箱 / IP。看板侧应只信任 `installTestProducer=git-ai-rust` 的新探活，并隔离 `installerScript=upload-install-test.ps1` 或 `author/source` 以 `-` 开头的历史脏数据；旧 Windows Update Service 必须停止外部脚本直连，改为让 git-ai 自己发送探活，才能从源头消除外部 producer。
+
+> **实施补充（2026-06-15，席正浩 ibs-ecp-service 10:22 归因缺失与重复探活修复）**：针对 `logs/席正浩.jsonl` 中 `ibs-ecp-service` 在 `2026-06-15 10:22:19` 左右“代码无法识别”的现场，本轮确认它不是提交统计未上传：commit `4cf9b083b3cce5d57fd572a2f4fa194fc32c0752` 已在 `10:22:30` 上传成功，HTTP `200` 且后端返回 `git-ai记录创建成功`；真正的问题是该 payload 的 `promptCount=0`、`sessionCount=0`、`attestationFileCount=0`、`aiCheckpointCount=0`，本次新增 1 行只能落入 `unknownAdditions=1`。同一用户 `10:05` 的上一笔 commit `1563dba853c31d607da7081e2d42abaa12eb08b9` 仍有 `aiCheckpointCount=2`、`promptCount=2`、`aiAdditions=24`，说明归因引擎本身能工作；断档发生在 `10:07` 自动安装 / `install-hooks` / daemon 重启 / `git-ai install success test (2.2.32)` 之后，到 `10:20-10:21` 期间只有 `git-ai blame --json --contents`，没有新的 `checkpoint github-copilot`。git-ai 不能在没有 AI checkpoint / prompt 的情况下把 unknown 硬归为 AI。第一轮修复只收敛“重复安装探活 / 自动更新扰动 / debug JSONL 坏行”这些排查噪音：`install-hooks` 的安装成功测试增加 `~/.git-ai/internal/install_test_uploads.json` 成功 marker，同一版本、同一身份、同一 endpoint 只上传一次；marker 通过 `install_test_uploads.lock` 跨进程序列化，避免并发安装重复探活；after-commit 自动更新不再无条件绕过新鲜 no-update cache，只有缓存已确认存在可用更新时才在提交后推进安装；`debug.jsonl` 写入增加 `debug.lock`，避免多个 git-ai 进程并发写入导致 JSONL 行交错，后续排查不会再被坏日志误导。这一轮不能直接恢复缺失的 AI checkpoint，直接修复见下一条。
+
+> **实施补充（2026-06-15，Copilot checkpoint 采集前置设置自愈）**：针对“working log 没有任何 AI checkpoint / prompt，只有 human checkpoint，所以新增 1 行只能进入 `unknownAdditions=1`”这一核心问题，本轮把修复落到安装 / 自动更新后的 Copilot 采集前置条件，而不是在 post-commit 阶段篡改归因。根因边界是：`~/.copilot/hooks/git-ai.json` 只说明 hook 文件存在，不保证 VS Code 会加载；如果用户或工作区把 `chat.useHooks` 关掉，或配置了 `chat.hookFilesLocations` 但没有包含 `~/.copilot/hooks`，Copilot 编辑就不会触发 `git-ai checkpoint github-copilot --hook-input stdin`。同时，Windows 当前安装器已经不再给新用户创建 `~/.git-ai/bin/git.exe` legacy wrapper，残留的 VS Code `git.path` 如果指向不存在的 `.git-ai\bin\git(.exe)`、`git-ai-test-home-*` 临时目录或已禁用旧 shim，会让 VS Code / Git 链路命中坏路径，出现 `Cannot Run Git: No such file: C:\Users\admin\.git-ai\bin\git.exe` 一类错误，并进一步干扰真实提交链路。修复方案是让 `install-hooks` 在 VS Code 和 GitHub Copilot 安装器中都执行同一套自愈：强制把用户 settings 里的 `chat.useHooks` 设为 `true`；当 `chat.hookFilesLocations` 已存在时补齐或重新启用 `~/.copilot/hooks`；对明确属于 git-ai 且已经坏掉的 `git.path` 只做删除，让 VS Code 回到系统 Git，而不是无脑写回不存在的 wrapper。对应修改位于 `git-ai/src/mdm/utils.rs`、`git-ai/src/mdm/agents/vscode.rs`、`git-ai/src/mdm/agents/github_copilot.rs`，新增回归覆盖 Copilot hook 文件存在但 VS Code settings 关闭 / 漏配 hook 加载路径 / 残留测试 HOME `git.path` 的场景。这样后续自动安装或用户手动 `git-ai install-hooks` 后，Copilot AI 编辑会重新进入 `checkpoint github-copilot` 链路；但历史上已经提交且没有 AI checkpoint 的 commit 仍不会被事后硬判为 AI。
+
+> **纠偏补充（2026-06-15，legacy Human checkpoint 不再落入 unknownAdditions）**：上一条说明把两个问题混在了一起，需要纠正。`Human checkpoint` 在旧实现里不是“已确认人工新增行”的强归因，而是一个 legacy baseline / sentinel；当它没有 `h_*` KnownHuman attestation 时，`VirtualAttributions` 会跳过空 entry 或剥离 `"human"` sentinel，`stats` 只能看到 git diff 新增行，却看不到任何可计入 `humanAdditions` 的 attestation，于是人工新增 1 行也会进入 `unknownAdditions=1`。这不是“没有检测到 human checkpoint”，而是检测到了以后被统计链路主动丢弃。Copilot settings 自愈只能修未来 AI checkpoint 不触发的问题，不能修复这条人工行归因。真正修复是：显式 legacy `git-ai checkpoint -- <file>` / 提交重放产生的普通 `Human` checkpoint，在没有 AI agent / 工具元数据、且不是弱 `KnownHuman` 降级时，会为本次实际新增/改写行生成 commit author 的 `h_*` 人工 attestation；AI pre-edit baseline、bash pre-hook、缺少 `kh_editor` 的弱 KnownHuman 仍不会被强归人工。新增回归 `legacy_human_checkpoint_counts_as_human_additions` 锁定 `humanAdditions=1, unknownAdditions=0`，并保留弱 KnownHuman 回归，避免再次把不确定 AI 代码误报成人工。
 
 > **实施补充（2026-04-26）**：当前实现又追加了 4 个关键约束。
 > 1. 服务端 `GitAiStatsServiceImpl.create()` 会先按 `git_ai_commit_stats.commit_code` 过滤重复 commit；同一 commit 被重复上传时，不再重复创建 summary/commit/file/tool/prompt 记录。
@@ -2454,7 +2464,12 @@ GitHub Copilot VS Code native hook 的补充说明：当 hook payload 因为脱�
 | 2.27 | 弱 KnownHuman 不再把无 AI checkpoint 的新增代码强归人工 | `git-ai/src/daemon/checkpoint.rs`、`git-ai/src/authorship/stats.rs`、`git-ai/src/commands/checkpoint_agent/presets/mock_known_human.rs` | 缺少有效 `kh_editor` 的 `KnownHuman` 降级为普通 `Human`，不再写入 `h_*` 强人工 attestation；覆盖 `e2cc766` 这类 `promptCount=0` 却把 346 行 AI 误报成人工的场景 |
 | 2.28 | Copilot terminal / bash post checkpoint 缺失时用 git status 兜底 | `git-ai/src/commands/checkpoint_agent/orchestrator.rs`、`git-ai/src/daemon.rs`、`git-ai/src/commands/git_ai_handlers.rs`、`git-ai/tests/integration/github_copilot_tools.rs` | `MissingPreSnapshot` / `SnapshotFailed` / `HookTimeout` / post-hook error 不再静默丢失 AI 改动，回退到 `git_status_fallback` 后继续发送 AI checkpoint；新增 `bash_post_checkpoint_resolved`、`checkpoint_request_send`、`checkpoint_request_started`、`checkpoint_request_finished` debug 事件 |
 | 2.29 | Windows 安装器遇到 busy `git-ai.exe` 时退休旧文件并替换稳定路径 | `git-ai/install.ps1`、`git-ai/tests/windows_script_checks.rs` | 不再要求运行中的 exe 必须能打开独占写句柄；覆盖失败时先杀同安装目录进程树，再将旧 `git-ai.exe` 重命名为 `git-ai.exe.retired-*`，新二进制立即落回原路径；`GIT_AI_DEFER_IF_BUSY=1` passive update 下旧 daemon 仍运行也能完成安装 |
-| 2.30 | Copilot checkpoint 兼容非 UTF-8 历史文本文件 | `git-ai/src/commands/checkpoint_agent/orchestrator.rs`、`git-ai/src/daemon.rs`、`git-ai/tests/integration/github_copilot_tools.rs` | `fs::read_to_string` 失败不再让显式 AI 编辑路径被 daemon 过滤；checkpoint 文件快照改为字节读取 + NUL 二进制排除 + UTF-8 lossy 文本化，daemon 端对 `content=None` 增加 workdir 兜底读取；覆盖 `op-return-exchange` 这类非 UTF-8 Java 文件追加测试方法后落入 unknown 的场景 |
+| 2.30 | Copilot checkpoint 兼容非 UTF-8 历史文本文件 | `git-ai/src/commands/checkpoint_agent/orchestrator.rs`、`git-ai/src/daemon.rs`、`git-ai/tests/integration/github_copilot_tools.rs` | `fs::read_to_string` 失败不再让显式 AI 编辑路径被 daemon 过滤；checkpoint 文件快照改为字节读取 + NUL 二进制排除 + UTF-8 lossy 文本化，daemon 端对 `content=None` 增加 workdir 兜底读取；覆盖 `op-return-exchange` 这类非 UTF-8 文本文件追加 AI 内容后落入 unknown 的场景，逻辑不依赖 `.java` 扩展名 |
+| 2.31 | Windows 运行时健康收敛，补齐 2.29 安装器兜底的根因闭环 | `git-ai/src/commands/daemon.rs`、`git-ai/src/commands/git_ai_handlers.rs`、`git-ai/src/daemon.rs`、`git-ai/tests/daemon_mode.rs`、`git-ai/tests/integration/repos/test_repo.rs` | Windows named pipe 健康检查不再用 `.exists()` 误判离线；`--hook-input stdin` 默认 5 秒超时，宿主不关 stdin 时 checkpoint 子进程会自退出；失效 `active-runtime.json` 自动回退默认 runtime；Windows 测试 PATH 不再泄漏 `git-ai-test-home-*` 临时 bin；全程避免每命令全进程扫描，保护用户本机性能 |
+| 2.32 | Windows Update Service 旧探活污染隔离 | `git-ai/src/integration/install_test_upload.rs`、`git-ai/src/integration/ide_mcp.rs`、`git-ai/docs/design-doc/git-ai看板方案.md` | git-ai Rust 探活增加 `installTestProducer=git-ai-rust`、`installerScript=git-ai-rust-install-test` 和对应 HTTP header；身份解析拒绝 `-BestEffort` / `-GitPath` 这类 PowerShell 参数形用户值，无效 env 不再遮住 MCP 配置，再回退 Git 邮箱 / IP；看板可据此只信任一手探活，隔离 `upload-install-test.ps1` 旧外部脚本直连产生的脏数据 |
+| 2.33 | 同版本安装探活去重、after-commit 自动更新节流、debug JSONL 并发写锁 | `git-ai/src/integration/install_test_upload.rs`、`git-ai/src/commands/upgrade.rs`、`git-ai/src/diagnostics.rs`、`git-ai/docs/design-doc/git-ai看板方案.md` | 同一版本 / 身份 / endpoint 的 `git-ai install success test` 成功后写入 marker，后续同版本自动安装只记录 skip 不再重复上传；提交后的自动更新尊重新鲜 no-update cache，只对已确认 pending update 继续安装；debug 日志写入用跨进程锁保护，避免并发进程把 JSONL 写坏；这是重复探活 / 排查噪音收敛，不直接补造缺失的 AI checkpoint |
+| 2.34 | Copilot checkpoint 采集前置设置自愈 | `git-ai/src/mdm/utils.rs`、`git-ai/src/mdm/agents/vscode.rs`、`git-ai/src/mdm/agents/github_copilot.rs`、`git-ai/docs/design-doc/git-ai看板方案.md` | `install-hooks` 会确保 VS Code 用户 settings 中 `chat.useHooks=true`；当用户显式配置 `chat.hookFilesLocations` 时补齐 `~/.copilot/hooks`；清理指向不存在 `.git-ai\bin\git(.exe)` 或 `git-ai-test-home-*` 的坏 `git.path`，但不再无脑写入 Windows 已禁用的新 wrapper 路径；修复“hook 文件存在但没有 `checkpoint github-copilot`”的未来采集断点，历史无 checkpoint commit 仍保持 unknown |
+| 2.35 | legacy `Human` checkpoint 明确人工新增不再落入 `unknownAdditions` | `git-ai/src/daemon/checkpoint.rs`、`git-ai/src/authorship/virtual_attribution.rs`、`git-ai/src/authorship/stats.rs`、`git-ai/tests/integration/prompt_across_commit.rs`、`git-ai/tests/integration/squash_merge.rs` | 普通 `git-ai checkpoint -- <file>` / 提交重放的 `Human` checkpoint 在没有 AI agent 和工具元数据时，为本次实际新增/改写行写入 commit author 的 `h_*` attestation；AI pre-edit baseline、bash pre-hook、弱 `KnownHuman` 降级仍不强归人工；同一新增行出现 AI 与 `h_*` 重叠时以 `h_*` 为准，工具维度 mixed 统计同步 clamp |
 
 ### Phase 3（2-3 天）：Code Review 自动上传
 
@@ -2737,11 +2752,11 @@ env:
 - `cargo test -q --test integration test_run_in_terminal_missing_pre_snapshot_uses_git_status_fallback` 通过。
 - Windows 下直接跑未限定 harness 的过滤测试时，Cargo 还会尝试启动 `commit_tree_update_ref` 测试二进制，可能报 OS error 740 需要提权；该问题与本次归因逻辑无关，针对性使用 `--lib` / `--test integration` 可正常验证。
 
-### 2026-06-15：op-return-exchange 非 UTF-8 Java 文件漏归因修复
+### 2026-06-15：op-return-exchange 非 UTF-8 文本文件漏归因修复
 
 **变更原因：**
 
-`D:\rj-op\op-return-exchange` 最新提交 `cf060485afcfdacc4d0c85b0ee9902e08798fa3e` 中，用户点名的 `src/test/java/com/ruijie/opreturnexchange/OpReturnExchangeApplicationTests.java`、`src/test/java/com/ruijie/opreturnexchange/SplitTests.java`、`src/test/java/com/ruijie/opreturnexchange/service/MailTest.java` 每个都新增了 `copilotAddedSimpleTest2` 的 5 行测试方法，但最终 authorship note 没有这些文件，`git-ai stats HEAD --json` 显示 `unknown_additions=75`。`debug.jsonl` 里同一 trace 的 `bash_post_checkpoint_resolved` 已检测到 90 个文件，`daemon_checkpoint_request_resolved_files` 却只解析出 79 个文件，差集里的 11 个 Java 源文件每个新增 5 行，正好解释 55 行漏归因；再叠加未归因的 class / workspace 等非源码改动形成最终 unknown。对用户点名的 3 个文件做严格 UTF-8 读取均失败，说明它们是含非 UTF-8 字节的历史文本文件。
+`D:\rj-op\op-return-exchange` 最新提交 `cf060485afcfdacc4d0c85b0ee9902e08798fa3e` 中，用户点名的 `src/test/java/com/ruijie/opreturnexchange/OpReturnExchangeApplicationTests.java`、`src/test/java/com/ruijie/opreturnexchange/SplitTests.java`、`src/test/java/com/ruijie/opreturnexchange/service/MailTest.java` 每个都新增了 `copilotAddedSimpleTest2` 的 5 行测试方法，但最终 authorship note 没有这些文件，`git-ai stats HEAD --json` 显示 `unknown_additions=75`。`debug.jsonl` 里同一 trace 的 `bash_post_checkpoint_resolved` 已检测到 90 个文件，`daemon_checkpoint_request_resolved_files` 却只解析出 79 个文件，差集里的 11 个 Java 源文件每个新增 5 行，正好解释 55 行漏归因；再叠加未归因的 class / workspace 等非源码改动形成最终 unknown。对用户点名的 3 个文件做严格 UTF-8 读取均失败，说明它们是含非 UTF-8 字节的历史文本文件。虽然现场样本是 Java，但失败条件来自通用文本读取链路，任何扩展名的非 UTF-8 文本文件都可能触发。
 
 根因不是 Copilot 没有识别文件，而是 `build_checkpoint_files(...)` 用 `fs::read_to_string(path).ok()` 读取整文件；遇到非 UTF-8 字节时 content 变成 `None`。daemon 侧旧实现又只把 `file.content=Some(...)` 的路径加入 `resolved.files` 和 `dirty_files`，导致“路径已发现、但内容读取失败”的显式 AI 编辑被静默过滤，post-commit 只能把这些新增行记为 unknown。
 
@@ -2751,14 +2766,47 @@ env:
 |------|--------|------|
 | `git-ai/src/commands/checkpoint_agent/orchestrator.rs` | 新增 `read_checkpoint_file_content(...)`，从 `read_to_string` 改为 `fs::read` 字节读取；包含 NUL 字节时视为二进制跳过，否则用 `String::from_utf8_lossy` 生成文本快照 | 非 UTF-8 但仍是文本的 Java / legacy 文件可以进入 checkpoint，不再因为 UTF-8 解码失败变成 `content=None` |
 | `git-ai/src/daemon.rs` | `resolve_checkpoint_request(...)` 在请求 content 缺失时调用 `read_checkpoint_content_from_workdir(...)` 兜底读取工作区文件 | 旧 hook / 其他插件即使发来 `content=None`，daemon 也会尽力保留显式路径，避免请求解析阶段再次静默丢文件 |
-| `git-ai/tests/integration/github_copilot_tools.rs` | 新增 `test_run_in_terminal_non_utf8_existing_file_is_attributed` | 复现“既有非 UTF-8 Java 文件 + Copilot terminal fallback 追加 5 行测试方法”，验证提交后 `unknown_additions=0`、`ai_additions=5` |
+| `git-ai/tests/integration/github_copilot_tools.rs` | 新增 `test_run_in_terminal_non_utf8_existing_text_files_are_attributed` | 复现“既有非 UTF-8 `.java` 和 `.properties` 文本文件 + Copilot terminal fallback 追加内容”，验证提交后 `unknown_additions=0`、`ai_additions=6` |
 | `git-ai/tests/integration/performance.rs` | `FeatureFlags` 测试构造补 `..FeatureFlags::default()` | 避免新增 feature flag 字段后 integration harness 编译被无关测试字面量阻断 |
 
 **验证结论：**
 
 - `cargo fmt` 通过。
-- `cargo test --test integration github_copilot_tools::test_run_in_terminal_non_utf8_existing_file_is_attributed -- --nocapture` 通过。
+- `cargo test --test integration github_copilot_tools::test_run_in_terminal_non_utf8_existing_text_files_are_attributed -- --nocapture` 通过。
 - `cargo test --test integration github_copilot_tools::test_run_in_terminal -- --nocapture` 通过，覆盖 no changes、正常 bash checkpoint、missing pre snapshot fallback、非 UTF-8 既有文件四个同组场景。
+
+### 2026-06-15：Windows busy exe 方案缺口与运行时健康收敛
+
+**变更原因：**
+
+`2.29` 的安装器 retired binary 方案解决的是“Windows 上运行中的 `git-ai.exe` 被占用时，新二进制仍能落回稳定路径”。这个方向没有错，但它存在明显缺口：它没有减少 `git-ai.exe` 被占用的来源，也不能处理 replacement runtime 失效后客户端继续路由到旧 runtime 的问题。现场最新提交的上传日志表明，真正的 HTTP 上传约 108ms，post-commit 到 payload/HTTP 成功约 2.7 秒；慢的是提交后约 74 秒才进入 `post_commit_started`，说明问题发生在事件路由 / daemon 健康 / 残留 checkpoint 进程阶段，而不是服务端上传慢。
+
+本轮确认的根因链路是四段叠加：Windows named pipe 路径 `\\.\pipe\...` 不是普通文件，旧 `daemon_is_up(...)` 先做 `.exists()` 会把健康 daemon 误判为离线；`checkpoint ... --hook-input stdin` 遇到宿主不关闭 stdin 时会无限等待，残留进程继续持有旧 exe 镜像；`active-runtime.json` 指向的 replacement runtime 失效后没有自动回退默认 runtime；Windows 测试 harness 没有清理 `git-ai-test-home-*` 临时 bin，可能把测试 shim 泄漏到真实 PATH。`2.29` 因此是必要兜底，但不是彻底方案。
+
+**本次代码级修改：**
+
+| 文件 | 修改点 | 影响 |
+|------|--------|------|
+| `git-ai/src/commands/daemon.rs` | Windows 下 `daemon_is_up(...)` 不再对 named pipe 路径做 `.exists()`，直接用 100ms socket/pipe connect 探测 | 正常运行的 daemon 不会被误判为离线，避免重复启动 / replacement runtime 扩散 |
+| `git-ai/src/commands/git_ai_handlers.rs` | `--hook-input stdin` 改为带超时读取，默认 `GIT_AI_HOOK_STDIN_TIMEOUT_MS=5000`，超时后以 0 退出并跳过 checkpoint | IDE / Agent 宿主异常不关闭 stdin 时，checkpoint 子进程不会无限挂住，也不会长期持有旧 exe |
+| `git-ai/src/daemon.rs` | `active_runtime_config(...)` 读取 `active-runtime.json` 后，只有 control/trace 可连接或 runtime lock 仍被持有时才保留；否则删除元数据并回退默认 runtime | replacement runtime 失效后自动收敛到稳定路径，不需要用户手工清理 `active-runtime.json` |
+| `git-ai/tests/daemon_mode.rs` | 新增 `checkpoint_hook_stdin_times_out_when_host_keeps_pipe_open`，并把测试 PATH 清理改为 Windows/Unix 通用 | 回归覆盖 stdin 未关闭导致 checkpoint 残留的进程堆积根因；daemon 专项测试不再泄漏临时 git-ai shim |
+| `git-ai/tests/integration/repos/test_repo.rs` | Windows 测试环境同样剔除 `git-ai-test-home-*`、含 `git-ai.exe` 或 git-ai wrapper 的 PATH 目录 | 集成测试不会通过 PATH 命中真实安装版或临时安装版 git-ai，降低测试污染真实运行时的风险 |
+| `git-ai/src/git/test_utils/mod.rs` | 给 `TmpRepo` 补 `git_command(...)` 测试工具包装 | 恢复当前库单测编译通道，避免无关测试工具 API 缺口阻塞验证 |
+
+**性能边界：**
+
+- 不在普通命令路径做全系统进程扫描，也不按进程名高频清理用户机器。
+- active runtime 只在存在 `active-runtime.json` 时做轻量 socket/lock 探测。
+- hook stdin 超时只作用于显式 `--hook-input stdin` 的 hook 调用。
+- 进程树清理仍保留在安装 / 重启等低频维护路径，作为兜底，而不是常态控制面。
+
+**验证结论：**
+
+- `cargo fmt` 通过。
+- `cargo test -q active_runtime_config` 通过。
+- `cargo test -q hook_stdin_timeout_defaults_and_rejects_invalid_values` 通过。
+- `cargo test -q --test daemon_mode checkpoint_hook_stdin_times_out_when_host_keeps_pipe_open -- --nocapture` 通过。
 
 ### 2026-06-14：安装测试上传、无 note 兜底上传、北京时间和 hooksPath 根因修复
 
@@ -2796,6 +2844,86 @@ env:
 - 现场安装版 `git-ai.exe` / `git.exe` 的 SHA256 已与 `target/release/git-ai.exe` 一致。
 - 模拟坏 `core.hooksPath=...\yoavlax.ai-contribution-tracker\git-hooks` 后，安装版 `git-ai install-hooks` 输出 `Removed stale global core.hooksPath...`，最终 `core.hooksPath=<unset>`、Trace2 pipe 保留、只剩一个新 `git-ai.exe bg run`。
 - `bfd32c8` 这类历史无 note commit 不补造 note；已按 `source=repair-missing-note` 上传 `hasAuthorshipNote=false` / `unknownAdditions=32` 的 metadata-only 记录，远程返回 200。
+
+### 2026-06-15：席正浩 ibs-ecp-service 10:22 归因缺失与重复安装探活修复
+
+**变更原因：**
+
+`logs/席正浩.jsonl` 显示，用户机器在 `2026-06-15 10:07` 和 `10:23` 前后多次出现 `git-ai install success test (2.2.32)`，并且 `D:\test\ibs-ecp-service` 在 `2026-06-15 10:22:19` 左右的提交被反馈为“代码无法识别”。本轮排查先把两个现象拆开：
+
+- `10:22` 这次不是“统计没有上传”。commit `4cf9b083b3cce5d57fd572a2f4fa194fc32c0752` 在 `10:22:30` 已经完成 HTTP 上传，服务端返回 `code=200`、`msg=git-ai记录创建成功`。
+- 它也不是服务端字段映射错误。上传 payload 的本地统计就是 `gitDiffAddedLines=1`、`unknownAdditions=1`、`aiAdditions=0`。
+- 真正断掉的是归因输入：`post_commit_working_log_loaded` 里只有 1 条 `human` checkpoint，`aiCheckpointCount=0`、`promptCount=0`、`sessionCount=0`、`attestationFileCount=0`。
+- 同一用户同一版本在 `10:05` 的上一笔 commit `1563dba853c31d607da7081e2d42abaa12eb08b9` 仍有 `aiCheckpointCount=2`、`promptCount=2`、`aiAdditions=24`，说明归因引擎和上传链路本身能工作。
+- 断档窗口发生在 `10:07` 自动安装 / `install-hooks` / daemon 重启 / 安装探活之后；`10:20-10:21` 期间日志只有 `git-ai blame --json --contents`，没有新的 `checkpoint github-copilot` 或 Copilot terminal checkpoint。
+
+因此，这类现场不能用“只要用户说是 AI，就把 unknown 硬归成 AI”来修；那会破坏 git-ai 的审计语义。第一轮修复只是让自动更新和安装探活对用户提交链路更安静、更幂等，并强化日志完整性，避免同版本自动安装反复扰动 daemon / hook 状态，也避免坏 JSONL 让后续排查失真。它能降低再次断档和误判排查方向的概率，但并没有直接解决“为什么没有新的 `checkpoint github-copilot`”。
+
+**本次代码级修改：**
+
+| 文件 | 修改点 | 影响 |
+|------|--------|------|
+| `git-ai/src/integration/install_test_upload.rs` | 新增安装探活成功 marker：`~/.git-ai/internal/install_test_uploads.json`，key 由 producer、installer script、git-ai 版本、身份来源、身份值和上传 endpoint 共同计算 | 同一版本、同一用户身份、同一上传地址的 `git-ai install success test` 成功后只上传一次；后续同版本 `install-hooks` 只写 `install_test_upload_skipped(reason=already_uploaded_for_version_identity_and_endpoint)` |
+| `git-ai/src/integration/install_test_upload.rs` | 新增 `install_test_uploads.lock` 跨进程锁，marker 读写和实际上传串行化；只有上传成功后才写 marker | 多个安装 / 自动更新进程并发触发时，不会在 marker 尚未落盘前重复打远程探活；失败不会被误记成成功，下一次仍可重试 |
+| `git-ai/src/commands/upgrade.rs` | `AfterCommit` 更新检查不再无条件绕过缓存；只有 auto-update 未禁用、缓存 channel 匹配且缓存里已有 pending update 时，提交后才强制继续推进安装 | 提交后不会因为新鲜 no-update cache 被忽略而重复调度同版本安装链路；仍保留“已经确认有新版本”时尽快安装的能力 |
+| `git-ai/src/diagnostics.rs` | `append_debug_event(...)` 写 `debug.jsonl` 前获取 `debug.lock`，锁内完成日志裁剪和单行追加 | 多个 git-ai 进程并发写日志时，不再把两条 JSON 行交错写坏；后续现场能可靠按时间线还原 checkpoint / install / upload 事件 |
+| `git-ai/docs/design-doc/git-ai看板方案.md` | 回填本次现场证据、根因边界、代码修改、性能边界和验证结论 | 后续排查同类问题时，先区分“上传失败”“上传成功但 unknown”“重复安装探活”“AI checkpoint 缺失”，不再混成一个故障点 |
+
+**性能边界：**
+
+- 不在普通 git 命令路径做全系统进程扫描，也不按进程名高频杀进程。
+- 安装探活 marker 锁只作用于 `install-hooks` / 安装成功探活路径；普通 `git commit`、`git blame`、`git-ai stats` 不会等待这个锁。
+- marker 锁最长等待 30 秒，目的是在并发安装时让第二个安装进程看到第一个进程写下的成功 marker；超时后直接跳过探活，不阻塞用户提交链路。
+- after-commit 自动更新继续复用后台调度，不把 commit 变成同步下载 / 同步安装；本次只收窄“什么时候需要检查 / 推进安装”的条件。
+- debug 日志锁最长等待 2 秒；拿不到锁时放弃本条 debug 写入，优先保护用户命令响应和 JSONL 完整性。
+
+**验证结论：**
+
+- `cargo fmt` 通过。
+- `cargo test --lib -q install_test_marker` 通过，覆盖 marker key 稳定性和重复写入只保留一条成功记录。
+- `cargo test --lib -q install_test` 通过，覆盖安装探活 payload 标识、身份过滤、PowerShell 参数形用户值拒绝和 marker 行为。
+- `cargo test --lib -q test_should_check_for_updates` 通过，覆盖 after-commit 尊重新鲜 no-update cache，以及 pending update 仍会触发安装推进。
+- `cargo test --lib -q debug_log_lock_serializes_concurrent_writes` 通过，覆盖 debug JSONL 并发写入不会产生坏行。
+
+### 2026-06-15：Copilot checkpoint 采集前置设置自愈
+
+**变更原因：**
+
+对席正浩这类 `unknownAdditions=1` 的现场继续下钻后，必须把问题说清楚：没有 AI checkpoint 时，post-commit 只能把新增行记为 unknown；这是正确的审计行为，不应该改成“凭用户口头确认就归 AI”。真正要修的是 checkpoint 为什么没有产生。
+
+本轮确认有三类安装 / 自动更新后容易遗留的设置层断点：
+
+- `~/.copilot/hooks/git-ai.json` 存在，不等于 VS Code 一定加载它；如果 `chat.useHooks=false`，Copilot native hook 不会执行。
+- 如果用户 settings 里已经配置了 `chat.hookFilesLocations`，VS Code 会按这个 allow-list 加载 hook；一旦里面没有 `~/.copilot/hooks`，git-ai 写好的 Copilot hook 文件也不会被读取。
+- Windows 安装器已经不再为新用户创建 legacy `git.exe` wrapper，残留的 VS Code `git.path` 如果仍指向 `C:\Users\admin\.git-ai\bin\git.exe`、不存在的 `.git-ai\bin\git`、或测试隔离泄漏出来的 `git-ai-test-home-*`，VS Code Git 链路会命中坏路径，出现 `Cannot Run Git: No such file ...`，并放大 checkpoint / commit 链路断档。
+
+因此，修复不能是“安装时强行写 `git.path` 到 `.git-ai\bin\git.exe`”；那会在新用户机器上重新制造不存在的路径。正确做法是：只清理明确属于 git-ai 且已经坏掉的 `git.path`，让 VS Code 回到系统 Git；同时确保 Copilot hook 的 VS Code 加载开关和加载路径存在。
+
+**本次代码级修改：**
+
+| 文件 | 修改点 | 影响 |
+|------|--------|------|
+| `git-ai/src/mdm/utils.rs` | 新增 `update_vscode_copilot_hook_locations_settings(...)`，当 `chat.hookFilesLocations` 已存在时补齐 / 启用 `~/.copilot/hooks`；未配置该键时不主动新增 | 保持 VS Code 默认约定路径行为，同时修复“用户显式 allow-list 漏掉 Copilot hooks 目录”导致的无 checkpoint |
+| `git-ai/src/mdm/utils.rs` | 新增 `repair_vscode_git_path_settings(...)`，只删除明显坏掉的 git-ai managed `git.path`：不存在的 `.git-ai\bin\git(.exe)`、`git-ai-test-home-*` 临时目录等；保留系统 Git 或用户自定义 Git | 避免自动安装后 VS Code 继续调用不存在的 git shim，也避免重新写入已被 Windows 安装器禁用的 legacy wrapper |
+| `git-ai/src/mdm/agents/vscode.rs` | VS Code 安装器在配置 `chat.useHooks` 前先修复坏 `git.path`，随后补齐 Copilot hook allow-list | `git-ai install-hooks` / 安装脚本调用 VS Code 安装器时，可一次性修复 VS Code 侧导致 Copilot checkpoint 不触发的 settings |
+| `git-ai/src/mdm/agents/github_copilot.rs` | GitHub Copilot 安装器自身也执行同样的 VS Code settings 自愈 | 即使 VS Code extension 安装器未命中或被跳过，只要检测到 Copilot / VS Code settings，也能修复 Copilot native hook 的必要前置条件 |
+| `git-ai/src/mdm/utils.rs`、`git-ai/src/mdm/agents/github_copilot.rs` | 新增回归测试覆盖 `chat.useHooks=false`、`chat.hookFilesLocations` 缺少 `~/.copilot/hooks`、`git.path` 指向 `git-ai-test-home-*` 或不存在 shim | 锁定“hook 文件存在但没有 `checkpoint github-copilot`”的设置层断点，避免后续安装器回退 |
+
+**性能边界：**
+
+- 只读写 VS Code / Code Insiders 用户 settings 文件，不扫描全盘，不按进程名杀进程。
+- 不主动修改项目 `.vscode/settings.json` 或 `.code-workspace`，避免改团队仓库配置；若工作区覆盖用户设置，仍按安装成功判断手册单独排查。
+- 不无脑写 `git.path`。当前 Windows 新安装不会创建 `git.exe` wrapper，写入不存在路径比不写更坏；本次只删除明确坏掉的 git-ai managed 路径。
+- `chat.hookFilesLocations` 未配置时不新增该键，因为 VS Code 默认会扫描 `~/.copilot/hooks`；只有用户显式配置 allow-list 时才补齐 `~/.copilot/hooks`。
+
+**验证结论：**
+
+- `cargo fmt` 通过。
+- `cargo check -q` 通过。
+- `cargo test --lib -q update_vscode_copilot_hook_locations` 通过，覆盖补齐 / 启用 `~/.copilot/hooks` 以及未配置 allow-list 时不写入。
+- `cargo test --lib -q repair_vscode_git_path_settings` 通过，覆盖删除不存在 git-ai shim、删除 `git-ai-test-home-*` 泄漏、保留系统 Git。
+- `cargo test --lib -q test_install_extras_repairs_vscode_settings_for_copilot_hooks` 通过，覆盖 Copilot 安装器独立修复 VS Code settings 的端到端行为。
+- `cargo test --lib -q github_copilot` 通过，Copilot 模块 57 个测试全部通过。
 
 ### 2026-05-10：补充 Windows 真机验证结论与 GitHub latest / asset 修正流程
 

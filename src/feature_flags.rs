@@ -19,9 +19,24 @@ macro_rules! define_feature_flags {
         ),* $(,)?
     ) => {
         /// Feature flags for the application
-        #[derive(Debug, Clone, Serialize)]
+        #[derive(Debug, Clone)]
         pub struct FeatureFlags {
             $(pub $field: bool,)*
+        }
+
+        impl Serialize for FeatureFlags {
+            fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+            where
+                S: serde::Serializer,
+            {
+                use serde::ser::SerializeMap;
+
+                let mut map = serializer.serialize_map(None)?;
+                $(
+                    map.serialize_entry(stringify!($file_name), &self.$field)?;
+                )*
+                map.end()
+            }
         }
 
         impl Default for FeatureFlags {

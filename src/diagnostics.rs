@@ -1,14 +1,19 @@
+use crate::utils::LockFile;
 use chrono::{FixedOffset, SecondsFormat, Utc};
 use serde_json::{Map, Value, json};
 use std::ffi::OsString;
 use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 const DEBUG_LOG_FILE: &str = "debug.jsonl";
 const DEBUG_LOG_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const DEBUG_LOG_RETAIN_BYTES: u64 = 512 * 1024 * 1024;
 const DEBUG_LOG_BEIJING_OFFSET_SECONDS: i32 = 8 * 60 * 60;
+const DEBUG_LOG_LOCK_FILE: &str = "debug.lock";
+const DEBUG_LOG_LOCK_WAIT_MILLIS: u64 = 2_000;
+const DEBUG_LOG_LOCK_RETRY_MILLIS: u64 = 20;
 
 pub(crate) fn debug_enabled() -> bool {
     match std::env::var("GIT_AI_DEBUG") {
@@ -63,6 +68,10 @@ pub(crate) fn append_debug_event(event: &str, fields: Value) {
     if fs::create_dir_all(log_dir).is_err() {
         return;
     }
+
+    let Some(_log_lock) = acquire_debug_log_lock(log_dir) else {
+        return;
+    };
 
     enforce_debug_log_size_limit(&log_path);
 
@@ -236,6 +245,22 @@ fn retain_debug_log_tail(log_path: &Path, retain_bytes: u64) -> std::io::Result<
     Ok(())
 }
 
+fn acquire_debug_log_lock(log_dir: &Path) -> Option<LockFile> {
+    let lock_path = log_dir.join(DEBUG_LOG_LOCK_FILE);
+    let started_at = Instant::now();
+    let max_wait = Duration::from_millis(DEBUG_LOG_LOCK_WAIT_MILLIS);
+    let retry = Duration::from_millis(DEBUG_LOG_LOCK_RETRY_MILLIS);
+    loop {
+        if let Some(lock) = LockFile::try_acquire(&lock_path) {
+            return Some(lock);
+        }
+        if started_at.elapsed() >= max_wait {
+            return None;
+        }
+        std::thread::sleep(retry);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -284,6 +309,54 @@ mod tests {
             .with_timezone(&Utc);
 
         assert_eq!(debug_timestamp(now), "2026-05-04T14:30:00.123+08:00");
+    }
+
+    #[test]
+    fn debug_log_lock_serializes_concurrent_writes() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let log_dir = temp_dir.path().join("logs");
+        fs::create_dir_all(&log_dir).unwrap();
+        let log_path = log_dir.join(DEBUG_LOG_FILE);
+        let thread_count: usize = 8;
+        let writes_per_thread: usize = 50;
+        let mut handles = Vec::new();
+
+        for thread_idx in 0..thread_count {
+            let log_dir = log_dir.clone();
+            let log_path = log_path.clone();
+            handles.push(std::thread::spawn(move || {
+                for write_idx in 0..writes_per_thread {
+                    let _lock = acquire_debug_log_lock(&log_dir)
+                        .expect("debug log lock should be acquired");
+                    let mut file = fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(&log_path)
+                        .unwrap();
+                    writeln!(
+                        file,
+                        "{}",
+                        json!({
+                            "thread": thread_idx,
+                            "write": write_idx,
+                            "payload": "x".repeat(2048),
+                        })
+                    )
+                    .unwrap();
+                }
+            }));
+        }
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        let content = fs::read_to_string(&log_path).unwrap();
+        let lines = content.lines().collect::<Vec<_>>();
+        assert_eq!(lines.len(), thread_count * writes_per_thread);
+        for line in lines {
+            serde_json::from_str::<Value>(line).expect("debug log line should remain valid JSON");
+        }
     }
 
     #[test]

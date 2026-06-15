@@ -263,12 +263,18 @@ impl DaemonConfig {
 
     fn active_runtime_config(default_internal_dir: &Path) -> Option<Self> {
         let meta_path = Self::active_runtime_meta_path(default_internal_dir);
-        let contents = fs::read_to_string(meta_path).ok()?;
+        let contents = fs::read_to_string(&meta_path).ok()?;
         let meta: ActiveDaemonRuntimeMeta = serde_json::from_str(&contents).ok()?;
         if meta.internal_dir == default_internal_dir {
             return None;
         }
-        Some(Self::from_internal_dir(meta.internal_dir))
+        let active_config = Self::from_internal_dir(meta.internal_dir);
+        if active_runtime_is_reachable_or_starting(&active_config) {
+            return Some(active_config);
+        }
+
+        let _ = fs::remove_file(meta_path);
+        None
     }
 
     pub fn activate_replacement_runtime(reason: &str) -> Result<Self, GitAiError> {
@@ -377,6 +383,33 @@ impl DaemonLock {
         })?;
         Ok(Self { _lock: lock })
     }
+}
+
+fn active_runtime_is_reachable_or_starting(config: &DaemonConfig) -> bool {
+    let control_ok = local_socket_connects_with_timeout(
+        &config.control_socket_path,
+        DAEMON_SOCKET_PROBE_TIMEOUT,
+    )
+    .is_ok();
+    let trace_ok =
+        local_socket_connects_with_timeout(&config.trace_socket_path, DAEMON_SOCKET_PROBE_TIMEOUT)
+            .is_ok();
+    if control_ok && trace_ok {
+        return true;
+    }
+
+    if let Some(parent) = config.lock_path.parent()
+        && fs::create_dir_all(parent).is_err()
+    {
+        return false;
+    }
+
+    LockFile::try_acquire(&config.lock_path)
+        .map(|lock| {
+            drop(lock);
+            false
+        })
+        .unwrap_or(true)
 }
 
 fn is_trace_payload(payload: &Value) -> bool {
@@ -2114,10 +2147,11 @@ fn build_replay_checkpoint_request(
     checkpoint_kind: CheckpointKind,
     agent_id: Option<AgentId>,
     path_role: PreparedPathRole,
-    metadata: HashMap<String, String>,
+    mut metadata: HashMap<String, String>,
 ) -> CheckpointRequest {
     let base_commit = crate::commands::checkpoint_agent::orchestrator::BaseCommit::Initial;
     let repo_work_dir_path = std::path::PathBuf::from(repo_work_dir);
+    metadata.insert("git_ai_replay_checkpoint".to_string(), "true".to_string());
 
     let checkpoint_files: Vec<crate::commands::checkpoint_agent::orchestrator::CheckpointFile> =
         files
@@ -9264,6 +9298,71 @@ mod tests {
         }
     }
 
+    fn write_active_runtime_meta(default_internal_dir: &Path, replacement_internal_dir: &Path) {
+        let meta_path = DaemonConfig::active_runtime_meta_path(default_internal_dir);
+        fs::create_dir_all(meta_path.parent().expect("active runtime parent"))
+            .expect("create active runtime parent");
+        fs::write(
+            meta_path,
+            serde_json::to_string(&ActiveDaemonRuntimeMeta {
+                internal_dir: replacement_internal_dir.to_path_buf(),
+                activated_at_ns: 1,
+                reason: "test".to_string(),
+            })
+            .expect("serialize active runtime meta"),
+        )
+        .expect("write active runtime meta");
+    }
+
+    #[test]
+    fn active_runtime_config_removes_stale_replacement_when_lock_is_free() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let default_internal_dir = temp.path().join("default").join(".git-ai").join("internal");
+        let replacement_internal_dir = temp
+            .path()
+            .join("replacement")
+            .join(".git-ai")
+            .join("internal");
+        let replacement = DaemonConfig::from_internal_dir(replacement_internal_dir.clone());
+        replacement.ensure_parent_dirs().expect("replacement dirs");
+        write_active_runtime_meta(&default_internal_dir, &replacement_internal_dir);
+
+        let resolved = DaemonConfig::active_runtime_config(&default_internal_dir);
+
+        assert!(
+            resolved.is_none(),
+            "stale replacement runtime should fall back to default"
+        );
+        assert!(
+            !DaemonConfig::active_runtime_meta_path(&default_internal_dir).exists(),
+            "stale active-runtime.json should be removed"
+        );
+    }
+
+    #[test]
+    fn active_runtime_config_keeps_replacement_when_lock_is_held() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let default_internal_dir = temp.path().join("default").join(".git-ai").join("internal");
+        let replacement_internal_dir = temp
+            .path()
+            .join("replacement")
+            .join(".git-ai")
+            .join("internal");
+        let replacement = DaemonConfig::from_internal_dir(replacement_internal_dir.clone());
+        replacement.ensure_parent_dirs().expect("replacement dirs");
+        let _lock = LockFile::try_acquire(&replacement.lock_path).expect("hold replacement lock");
+        write_active_runtime_meta(&default_internal_dir, &replacement_internal_dir);
+
+        let resolved = DaemonConfig::active_runtime_config(&default_internal_dir)
+            .expect("held replacement runtime should be kept");
+
+        assert_eq!(resolved.internal_dir, replacement_internal_dir);
+        assert!(
+            DaemonConfig::active_runtime_meta_path(&default_internal_dir).exists(),
+            "active-runtime.json should remain while replacement lock is held"
+        );
+    }
+
     #[test]
     fn human_replay_checkpoint_request_has_no_agent_identity() {
         let request = build_human_replay_checkpoint_request(
@@ -9305,7 +9404,9 @@ mod tests {
         assert_eq!(request.checkpoint_kind, CheckpointKind::AiAgent);
         assert_eq!(request.agent_id, Some(agent_id));
         assert_eq!(request.path_role, PreparedPathRole::Edited);
-        assert_eq!(request.metadata, metadata);
+        let mut expected_metadata = metadata;
+        expected_metadata.insert("git_ai_replay_checkpoint".to_string(), "true".to_string());
+        assert_eq!(request.metadata, expected_metadata);
     }
 
     #[test]
@@ -9424,7 +9525,15 @@ mod tests {
         #[cfg(unix)]
         std::os::unix::fs::symlink(&target, &link).unwrap();
         #[cfg(windows)]
-        std::os::windows::fs::symlink_file(&target, &link).unwrap();
+        {
+            if let Err(error) = std::os::windows::fs::symlink_file(&target, &link) {
+                if error.raw_os_error() == Some(1314) {
+                    eprintln!("skipping symlink watermark test: symlink privilege not available");
+                    return;
+                }
+                panic!("failed to create test symlink: {error}");
+            }
+        }
 
         // Watermark the symlink
         let wm = compute_watermarks_from_stat(dir.to_str().unwrap(), &["link.txt".to_string()]);

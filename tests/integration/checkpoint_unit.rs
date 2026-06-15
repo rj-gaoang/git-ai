@@ -1,3 +1,4 @@
+use crate::repos::test_file::ExpectedLineExt;
 use crate::repos::test_repo::TestRepo;
 use git_ai::authorship::working_log::{AgentId, Checkpoint, CheckpointKind, WorkingLogEntry};
 use git_ai::commands::checkpoint_agent::orchestrator::{
@@ -707,6 +708,23 @@ fn test_known_human_checkpoint_without_ai_history_records_h_hash_attributions() 
         latest.line_stats.additions > 0,
         "KnownHuman checkpoint should record line stats"
     );
+}
+
+#[test]
+fn test_same_content_ai_checkpoint_after_known_human_does_not_claim_human_lines() {
+    let repo = TestRepo::new();
+
+    std::fs::write(repo.path().join("same-content.txt"), "one\ntwo\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "same-content.txt"])
+        .unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "same-content.txt"])
+        .unwrap();
+
+    repo.stage_all_and_commit("same content checkpoint race")
+        .unwrap();
+
+    let mut file = repo.filename("same-content.txt");
+    file.assert_lines_and_blame(crate::lines!["one".human(), "two".human()]);
 }
 
 #[test]

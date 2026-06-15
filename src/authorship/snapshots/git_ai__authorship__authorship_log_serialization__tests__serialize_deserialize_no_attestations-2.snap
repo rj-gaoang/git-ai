@@ -1,5 +1,6 @@
 ---
 source: src/authorship/authorship_log_serialization.rs
+assertion_line: 1086
 expression: deserialized
 ---
 AuthorshipLogV3 {
@@ -18,6 +19,7 @@ AuthorshipLogV3 {
                     model: "claude-3-sonnet",
                 },
                 human_author: None,
+                messages: [],
                 messages_url: None,
                 total_additions: 0,
                 total_deletions: 0,
@@ -27,6 +29,5 @@ AuthorshipLogV3 {
             },
         },
         humans: {},
-        sessions: {},
     },
 }

@@ -19,7 +19,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::process::{Child, Command, Output, Stdio};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const DAEMON_TEST_PROBE_TIMEOUT: Duration = Duration::from_millis(100);
 
@@ -137,14 +137,22 @@ fn wait_for_daemon_sockets(repo: &TestRepo) {
 fn wait_for_daemon_latest_seq(repo: &TestRepo, min_seq: u64) {
     let control = daemon_control_socket_path(repo);
     let repo_working_dir = repo.canonical_path().to_string_lossy().to_string();
-    for _ in 0..200 {
-        let response = send_control_request(
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut last_error = None;
+    while Instant::now() < deadline {
+        let response = match send_control_request(
             &control,
             &ControlRequest::StatusFamily {
                 repo_working_dir: repo_working_dir.clone(),
             },
-        )
-        .expect("status request should succeed while waiting for traced command");
+        ) {
+            Ok(response) => response,
+            Err(error) => {
+                last_error = Some(error.to_string());
+                thread::sleep(Duration::from_millis(50));
+                continue;
+            }
+        };
         let latest_seq = response
             .data
             .as_ref()
@@ -157,8 +165,9 @@ fn wait_for_daemon_latest_seq(repo: &TestRepo, min_seq: u64) {
         thread::sleep(Duration::from_millis(25));
     }
     panic!(
-        "daemon did not observe traced command for {}",
-        repo.canonical_path().display()
+        "daemon did not observe traced command for {} (last_status_error={})",
+        repo.canonical_path().display(),
+        last_error.as_deref().unwrap_or("none")
     );
 }
 
@@ -237,10 +246,18 @@ fn wait_for_child_exit(child: &mut Child) {
     let _ = child.wait();
 }
 
+fn new_async_mode_repo_without_daemon() -> TestRepo {
+    let mut repo =
+        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::NoDaemon);
+    repo.patch_git_ai_config(|patch| {
+        patch.feature_flags = Some(serde_json::json!({ "async_mode": true }));
+    });
+    repo
+}
+
 #[test]
 fn install_hooks_async_mode_sets_daemon_trace2_global_config() {
-    let repo =
-        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::NoDaemon);
+    let repo = new_async_mode_repo_without_daemon();
 
     let output = git_ai_with_daemon_env(&repo, &["install-hooks", "--dry-run=false"])
         .expect("install-hooks should succeed");
@@ -262,8 +279,7 @@ fn install_hooks_async_mode_sets_daemon_trace2_global_config() {
 
 #[test]
 fn install_hooks_async_mode_dry_run_does_not_write_trace2_global_config() {
-    let repo =
-        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::NoDaemon);
+    let repo = new_async_mode_repo_without_daemon();
 
     git_ai_with_daemon_env(&repo, &["install-hooks", "--dry-run=true"])
         .expect("install-hooks dry-run should succeed");
@@ -283,8 +299,7 @@ fn install_hooks_async_mode_dry_run_does_not_write_trace2_global_config() {
 
 #[test]
 fn install_hooks_async_mode_trace2_target_routes_real_git_trace_to_daemon() {
-    let repo =
-        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::NoDaemon);
+    let repo = new_async_mode_repo_without_daemon();
 
     git_ai_with_daemon_env(&repo, &["install-hooks", "--dry-run=false"])
         .expect("install-hooks should succeed");
@@ -326,8 +341,7 @@ fn async_mode_checkpoint_starts_daemon_when_down() {
     // to prevent process storms under parallel test load. This test verifies
     // production-only auto-start behavior, so we manually start the daemon
     // and then verify the checkpoint delegates to it.
-    let repo =
-        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::NoDaemon);
+    let repo = new_async_mode_repo_without_daemon();
     write_daemon_config(&repo);
 
     let control = daemon_control_socket_path(&repo);

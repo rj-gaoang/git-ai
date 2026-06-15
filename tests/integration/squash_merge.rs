@@ -497,9 +497,9 @@ fn test_prepare_working_log_squash_with_main_changes_standard_human() {
     );
 }
 
-/// Variant of test_prepare_working_log_squash_multiple_sessions using unattributed (legacy)
-/// human checkpoints. Assertions match origin/main behavior: "footer" gains the AI-attributed
-/// trailing newline and is counted as AI.
+/// Variant of test_prepare_working_log_squash_multiple_sessions using legacy
+/// human checkpoints. Legacy Human checkpoints now materialize h_* attestations
+/// for committed human additions.
 #[test]
 fn test_prepare_working_log_squash_multiple_sessions_standard_human() {
     let repo = TestRepo::new();
@@ -542,7 +542,7 @@ fn test_prepare_working_log_squash_multiple_sessions_standard_human() {
         "// AI session 1".ai(),
         "body".human(),
         "// Human addition".human(),
-        "footer".ai(),
+        "footer".human(),
         "// AI session 2".ai()
     ]);
 
@@ -551,18 +551,15 @@ fn test_prepare_working_log_squash_multiple_sessions_standard_human() {
         stats.git_diff_added_lines, 4,
         "Squash commit adds 4 lines total (includes newline)"
     );
+    assert_eq!(stats.ai_additions, 2, "2 AI lines from feature branch");
+    assert_eq!(stats.ai_accepted, 2, "2 AI lines accepted without edits");
     assert_eq!(
-        stats.ai_additions, 3,
-        "3 AI lines from feature branch (both sessions plus reformatted footer)"
-    );
-    assert_eq!(stats.ai_accepted, 3, "3 AI lines accepted without edits");
-    assert_eq!(
-        stats.human_additions, 0,
-        "0 KnownHuman-attested lines (checkpoint -- produces empty attribution)"
+        stats.human_additions, 2,
+        "legacy Human checkpoint materializes committed human additions"
     );
     assert_eq!(
-        stats.unknown_additions, 1,
-        "1 unattested human line (// Human addition, unattributed via checkpoint --)"
+        stats.unknown_additions, 0,
+        "legacy Human checkpoint no longer leaves the committed human addition unknown"
     );
 }
 

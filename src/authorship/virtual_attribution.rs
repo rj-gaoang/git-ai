@@ -557,7 +557,13 @@ impl VirtualAttributions {
                 );
             }
 
-            if checkpoint.kind == CheckpointKind::KnownHuman {
+            if checkpoint.kind == CheckpointKind::KnownHuman
+                || checkpoint
+                    .entries
+                    .iter()
+                    .flat_map(|entry| entry.line_attributions.iter())
+                    .any(|attr| attr.author_id.starts_with("h_"))
+            {
                 let hash =
                     crate::authorship::authorship_log_serialization::generate_human_short_hash(
                         &checkpoint.author,
@@ -707,7 +713,13 @@ impl VirtualAttributions {
                 );
             }
 
-            if checkpoint.kind == CheckpointKind::KnownHuman {
+            if checkpoint.kind == CheckpointKind::KnownHuman
+                || checkpoint
+                    .entries
+                    .iter()
+                    .flat_map(|entry| entry.line_attributions.iter())
+                    .any(|attr| attr.author_id.starts_with("h_"))
+            {
                 let hash =
                     crate::authorship::authorship_log_serialization::generate_human_short_hash(
                         &checkpoint.author,
@@ -849,7 +861,13 @@ impl VirtualAttributions {
                 );
             }
 
-            if checkpoint.kind == CheckpointKind::KnownHuman {
+            if checkpoint.kind == CheckpointKind::KnownHuman
+                || checkpoint
+                    .entries
+                    .iter()
+                    .flat_map(|entry| entry.line_attributions.iter())
+                    .any(|attr| attr.author_id.starts_with("h_"))
+            {
                 let hash =
                     crate::authorship::authorship_log_serialization::generate_human_short_hash(
                         &checkpoint.author,
@@ -1479,6 +1497,35 @@ fn split_lines_preserving_terminators(s: &str) -> Vec<&str> {
     lines
 }
 
+fn resolve_overlapping_committed_lines(committed_lines_map: &mut HashMap<String, Vec<u32>>) {
+    let mut line_owner: HashMap<u32, String> = HashMap::new();
+    let mut authors: Vec<String> = committed_lines_map.keys().cloned().collect();
+    authors.sort_by_key(|author| {
+        if author == &CheckpointKind::Human.to_str() {
+            2
+        } else if author.starts_with("h_") {
+            0
+        } else {
+            1
+        }
+    });
+
+    for author in authors {
+        let Some(lines) = committed_lines_map.get(&author) else {
+            continue;
+        };
+        for line in lines {
+            line_owner.entry(*line).or_insert_with(|| author.clone());
+        }
+    }
+
+    let mut resolved: HashMap<String, Vec<u32>> = HashMap::new();
+    for (line, author) in line_owner {
+        resolved.entry(author).or_default().push(line);
+    }
+    *committed_lines_map = resolved;
+}
+
 impl VirtualAttributions {
     /// Split VirtualAttributions into committed and uncommitted buckets
     ///
@@ -1720,6 +1767,8 @@ impl VirtualAttributions {
                     committed_lines_map.entry(author_id).or_default().push(line);
                 }
             }
+
+            resolve_overlapping_committed_lines(&mut committed_lines_map);
 
             // Add committed attributions to authorship log
             if !committed_lines_map.is_empty() {
@@ -2054,6 +2103,8 @@ impl VirtualAttributions {
                     committed_lines_map.entry(author_id).or_default().push(line);
                 }
             }
+
+            resolve_overlapping_committed_lines(&mut committed_lines_map);
 
             // Add committed attributions to authorship log
             if !committed_lines_map.is_empty() {

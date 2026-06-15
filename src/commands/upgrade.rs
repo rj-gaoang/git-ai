@@ -304,7 +304,10 @@ fn should_check_for_updates(
     policy: UpdateCheckPolicy,
     auto_updates_disabled: bool,
 ) -> bool {
-    if policy == UpdateCheckPolicy::AfterCommit && !auto_updates_disabled {
+    if policy == UpdateCheckPolicy::AfterCommit
+        && !auto_updates_disabled
+        && cache.is_some_and(|cache| cache.matches_channel(channel) && cache.update_available())
+    {
         return true;
     }
 
@@ -1467,10 +1470,27 @@ mod tests {
 
     #[test]
     #[serial]
-    fn test_should_check_for_updates_bypasses_no_update_cache_after_commit() {
+    fn test_should_check_for_updates_respects_no_update_cache_after_commit() {
         let channel = UpdateChannel::Latest;
         let mut cache = UpdateCache::new(channel);
         cache.last_checked_at = current_timestamp();
+
+        assert!(!should_check_for_updates(
+            channel,
+            Some(&cache),
+            UpdateCheckPolicy::AfterCommit,
+            false,
+        ));
+    }
+
+    #[test]
+    #[serial]
+    fn test_should_check_for_updates_uses_pending_update_after_commit() {
+        let channel = UpdateChannel::Latest;
+        let mut cache = UpdateCache::new(channel);
+        cache.last_checked_at = current_timestamp();
+        cache.available_tag = Some("v99.99.99".to_string());
+        cache.available_semver = Some("99.99.99".to_string());
 
         assert!(should_check_for_updates(
             channel,

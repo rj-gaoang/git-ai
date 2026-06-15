@@ -411,6 +411,12 @@ pub fn stats_from_authorship_log(
     if commit_stats.mixed_additions > max_mixed {
         commit_stats.mixed_additions = max_mixed;
     }
+    let mut remaining_mixed = commit_stats.mixed_additions;
+    for tool_stats in commit_stats.tool_model_breakdown.values_mut() {
+        let clamped = tool_stats.mixed_additions.min(remaining_mixed);
+        tool_stats.mixed_additions = clamped;
+        remaining_mixed = remaining_mixed.saturating_sub(clamped);
+    }
 
     // Update tool-level accepted counts using diff-based attribution.
     for (tool_model, accepted) in ai_accepted_by_tool {
@@ -1359,6 +1365,47 @@ mod tests {
                 .iter()
                 .all(|hash| !hash.starts_with("h_")),
             "weak KnownHuman without AI checkpoint must not create h_* human attestations: {:?}",
+            attestation_hashes
+        );
+    }
+
+    #[test]
+    fn legacy_human_checkpoint_counts_as_human_additions() {
+        let tmp_repo = TmpRepo::new().unwrap();
+
+        tmp_repo
+            .write_file("test.txt", "Base line\n", true)
+            .unwrap();
+        tmp_repo.commit_all("Initial commit").unwrap();
+
+        tmp_repo
+            .write_file("test.txt", "Base line\nManual line\n", true)
+            .unwrap();
+        tmp_repo
+            .trigger_checkpoint_with_legacy_human("test_user")
+            .unwrap();
+
+        let authorship_log = tmp_repo
+            .commit_with_message("Manual line with legacy human checkpoint")
+            .unwrap();
+
+        let head_sha = tmp_repo.get_head_commit_sha().unwrap();
+        let stats = stats_for_commit_stats(tmp_repo.gitai_repo(), &head_sha, &[]).unwrap();
+
+        assert_eq!(stats.git_diff_added_lines, 1);
+        assert_eq!(stats.ai_additions, 0);
+        assert_eq!(stats.human_additions, 1);
+        assert_eq!(stats.unknown_additions, 0);
+
+        let attestation_hashes: Vec<&str> = authorship_log
+            .attestations
+            .iter()
+            .flat_map(|file| file.entries.iter())
+            .map(|entry| entry.hash.as_str())
+            .collect();
+        assert!(
+            attestation_hashes.iter().any(|hash| hash.starts_with("h_")),
+            "legacy Human checkpoint should materialize h_* human attestations: {:?}",
             attestation_hashes
         );
     }

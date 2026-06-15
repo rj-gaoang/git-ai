@@ -171,6 +171,13 @@ impl TmpRepo {
         self.trigger_checkpoint_with_known_human_metadata(author, false)
     }
 
+    pub fn trigger_checkpoint_with_legacy_human(
+        &self,
+        author: &str,
+    ) -> Result<(usize, usize, usize), GitAiError> {
+        self.trigger_checkpoint(author, CheckpointKind::Human, None)
+    }
+
     fn trigger_checkpoint_with_known_human_metadata(
         &self,
         author: &str,
@@ -426,6 +433,10 @@ impl TmpRepo {
 
     fn run_git(&self, args: &[&str]) -> Result<(), GitAiError> {
         self.run_git_with_env(args, &[])
+    }
+
+    pub fn git_command(&self, args: &[&str]) -> Result<(), GitAiError> {
+        self.run_git(args)
     }
 
     fn run_git_with_env(&self, args: &[&str], envs: &[(&str, &str)]) -> Result<(), GitAiError> {

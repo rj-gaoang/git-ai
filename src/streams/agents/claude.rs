@@ -382,20 +382,28 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn test_scan_discovers_real_claude_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let project_dir = temp.path().join("projects").join("-tmp-project");
+        fs::create_dir_all(&project_dir).unwrap();
+        fs::write(project_dir.join("session-1.jsonl"), "{}\n").unwrap();
+
+        unsafe {
+            std::env::set_var("CLAUDE_CONFIG_DIR", temp.path());
+        }
+
         let paths = ClaudeAgent::scan_conversation_files();
-        // On this machine we have files in ~/.claude/projects/
-        if dirs::home_dir()
-            .map(|h| h.join(".claude/projects").exists())
-            .unwrap_or(false)
-        {
-            assert!(
-                !paths.is_empty(),
-                "Should discover files in ~/.claude/projects/"
-            );
-            for path in &paths {
-                assert!(path.extension().and_then(|s| s.to_str()) == Some("jsonl"));
-            }
+        unsafe {
+            std::env::remove_var("CLAUDE_CONFIG_DIR");
+        }
+
+        assert!(
+            paths.iter().any(|path| path.ends_with("session-1.jsonl")),
+            "Should discover files in CLAUDE_CONFIG_DIR/projects/"
+        );
+        for path in &paths {
+            assert_eq!(path.extension().and_then(|s| s.to_str()), Some("jsonl"));
         }
     }
 

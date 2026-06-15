@@ -369,7 +369,7 @@ fn test_commit_hunks_attribution_boundaries_split() {
     let commit = repo.stage_all_and_commit("boundary split").unwrap();
 
     let mut file = repo.filename("split.txt");
-    file.assert_committed_lines(lines!["Untracked".unattributed_human(), "AI added".ai()]);
+    file.assert_committed_lines(lines!["Untracked".human(), "AI added".ai()]);
 
     let git_repo = get_repo(&repo);
     let parent_sha = get_parent_sha(&repo);
@@ -392,11 +392,11 @@ fn test_commit_hunks_attribution_boundaries_split() {
     // Untracked and AI should be separate hunks
     assert_eq!(addition_hunks.len(), 2);
 
-    // First hunk: untracked (no prompt_id, no human_id)
+    // First hunk: explicit legacy human checkpoint (human_id, no prompt_id)
     assert_eq!(addition_hunks[0].start_line, 1);
     assert_eq!(addition_hunks[0].end_line, 1);
     assert!(addition_hunks[0].prompt_id.is_none());
-    assert!(addition_hunks[0].human_id.is_none());
+    assert!(addition_hunks[0].human_id.is_some());
 
     // Second hunk: AI
     assert_eq!(addition_hunks[1].start_line, 2);

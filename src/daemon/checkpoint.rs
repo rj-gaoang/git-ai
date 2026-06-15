@@ -5,7 +5,7 @@ use crate::authorship::authorship_log_serialization::generate_session_id;
 #[cfg(not(any(test, feature = "test-support")))]
 use crate::authorship::authorship_log_serialization::generate_short_hash;
 use crate::authorship::imara_diff_utils::{
-    LineChangeTag, compute_line_changes, normalize_line_endings,
+    DiffOp, LineChangeTag, capture_diff_slices, compute_line_changes, normalize_line_endings,
 };
 use crate::authorship::working_log::CheckpointKind;
 use crate::authorship::working_log::{Checkpoint, WorkingLogEntry};
@@ -263,6 +263,16 @@ fn execute_resolved_checkpoint(
 
     let trace_id = checkpoint_request.trace_id.clone();
     let effective_kind = effective_checkpoint_kind(kind, &checkpoint_request);
+    let attest_human_lines = kind == CheckpointKind::Human
+        && effective_kind == CheckpointKind::Human
+        && checkpoint_request.agent_id.is_none()
+        && checkpoint_request.metadata.is_empty();
+    let limit_current_author_to_changed_lines = effective_kind.is_ai()
+        || attest_human_lines
+        || checkpoint_request
+            .metadata
+            .get("git_ai_replay_checkpoint")
+            .is_some_and(|value| value == "true");
 
     let entries_start = Instant::now();
     let (entries, file_stats) = smol::block_on(get_checkpoint_entries(
@@ -277,6 +287,8 @@ fn execute_resolved_checkpoint(
         resolved.ts,
         Some(resolved.base_commit.as_str()),
         trace_id.clone(),
+        attest_human_lines,
+        limit_current_author_to_changed_lines,
     ))?;
     tracing::debug!(
         "[BENCHMARK] get_checkpoint_entries generated {} entries, took {:?}",
@@ -504,18 +516,26 @@ fn save_current_file_states(
     Ok(file_content_hashes)
 }
 
+fn get_previous_content_from_head_opt(
+    repo: &Repository,
+    file_path: &str,
+    head_tree_id: &Option<String>,
+) -> Option<String> {
+    let Some(tree_id) = head_tree_id.as_ref() else {
+        return None;
+    };
+    match repo.read_file_blob_at_tree(tree_id, std::path::Path::new(file_path)) {
+        Ok(content) => Some(String::from_utf8_lossy(&content).to_string()),
+        Err(_) => None,
+    }
+}
+
 fn get_previous_content_from_head(
     repo: &Repository,
     file_path: &str,
     head_tree_id: &Option<String>,
 ) -> String {
-    let Some(tree_id) = head_tree_id.as_ref() else {
-        return String::new();
-    };
-    match repo.read_file_blob_at_tree(tree_id, std::path::Path::new(file_path)) {
-        Ok(content) => String::from_utf8_lossy(&content).to_string(),
-        Err(_) => String::new(),
-    }
+    get_previous_content_from_head_opt(repo, file_path, head_tree_id).unwrap_or_default()
 }
 
 /// Compare file contents ignoring CRLF/LF differences.
@@ -630,6 +650,8 @@ fn get_checkpoint_entry_for_file(
     head_tree_id: Arc<Option<String>>,
     initial_attributions: Arc<HashMap<String, Vec<LineAttribution>>>,
     initial_snapshot_contents: Arc<HashMap<String, String>>,
+    attest_human_lines: bool,
+    limit_current_author_to_changed_lines: bool,
     ts: u128,
 ) -> Result<Option<(WorkingLogEntry, FileLineStats)>, GitAiError> {
     let file_start = Instant::now();
@@ -650,12 +672,15 @@ fn get_checkpoint_entry_for_file(
         .read_current_file_content(&file_path)
         .unwrap_or_default();
 
-    // Non-pre-commit fast path:
-    // Preserve existing `git-ai checkpoint` behavior for human-only files by writing an
-    // attribution-empty entry while still capturing line stats.
-    // KnownHuman checkpoints must bypass this path so they record h_<hash> attributions
-    // that later AI checkpoints can use to identify human-written lines.
-    if kind == CheckpointKind::Human && !has_prior_ai_edits && initial_attrs_for_file.is_empty() {
+    // Baseline-only human fast path:
+    // AI pre-edit snapshots and downgraded weak KnownHuman checkpoints use the plain
+    // "human" sentinel and must not create h_* attestations. Explicit legacy human
+    // checkpoints bypass this path so committed human lines can be counted.
+    if kind == CheckpointKind::Human
+        && !attest_human_lines
+        && !has_prior_ai_edits
+        && initial_attrs_for_file.is_empty()
+    {
         let previous_content = if let Some(state) = previous_state.as_ref() {
             working_log
                 .get_file_version(&state.blob_sha)
@@ -696,8 +721,23 @@ fn get_checkpoint_entry_for_file(
         (content, attrs)
     } else {
         // File doesn't exist in any previous checkpoint - need to initialize from git + INITIAL
-        let previous_content =
-            get_previous_content_from_head(&repo, &file_path, head_tree_id.as_ref());
+        let previous_content_from_head =
+            get_previous_content_from_head_opt(&repo, &file_path, head_tree_id.as_ref());
+
+        if kind.is_ai()
+            && previous_content_from_head.is_none()
+            && let Some(state) = previous_state.as_ref()
+            && state.kind == CheckpointKind::KnownHuman
+        {
+            let latest_content = working_log
+                .get_file_version(&state.blob_sha)
+                .unwrap_or_default();
+            if content_eq_normalized(&current_content, &latest_content) {
+                return Ok(None);
+            }
+        }
+
+        let previous_content = previous_content_from_head.unwrap_or_default();
 
         // Skip if no changes, UNLESS we have INITIAL attributions for this file
         // (in which case we need to create an entry to record those attributions)
@@ -809,6 +849,7 @@ fn get_checkpoint_entry_for_file(
         blob_sha: &file_content_hash,
         author_id: author_id.as_ref(),
         is_ai_checkpoint: kind.is_ai(),
+        limit_current_author_to_changed_lines,
         previous_content: &previous_content,
         previous_attributions: &prev_attributions,
         content: &current_content,
@@ -835,6 +876,8 @@ async fn get_checkpoint_entries(
     ts: u128,
     head_commit_override: Option<&str>,
     trace_id: String,
+    attest_human_lines: bool,
+    limit_current_author_to_changed_lines: bool,
 ) -> Result<(Vec<WorkingLogEntry>, Vec<FileLineStats>), GitAiError> {
     let entries_fn_start = Instant::now();
 
@@ -882,7 +925,10 @@ async fn get_checkpoint_entries(
 
     // Determine author_id based on checkpoint kind and agent_id
     let author_id = match effective_kind {
-        CheckpointKind::Human => effective_kind.to_str(), // "human" — stripped, never attested
+        CheckpointKind::Human if attest_human_lines => {
+            crate::authorship::authorship_log_serialization::generate_human_short_hash(author)
+        }
+        CheckpointKind::Human => effective_kind.to_str(),
         CheckpointKind::KnownHuman => {
             crate::authorship::authorship_log_serialization::generate_human_short_hash(author)
         }
@@ -966,6 +1012,8 @@ async fn get_checkpoint_entries(
                     head_tree_id.clone(),
                     initial_attributions.clone(),
                     initial_snapshot_contents.clone(),
+                    attest_human_lines,
+                    limit_current_author_to_changed_lines,
                     ts,
                 )
             })
@@ -1022,6 +1070,7 @@ struct FileEntryInput<'a> {
     blob_sha: &'a str,
     author_id: &'a str,
     is_ai_checkpoint: bool,
+    limit_current_author_to_changed_lines: bool,
     previous_content: &'a str,
     previous_attributions: &'a [Attribution],
     content: &'a str,
@@ -1036,6 +1085,7 @@ fn make_entry_for_file(
         blob_sha,
         author_id,
         is_ai_checkpoint,
+        limit_current_author_to_changed_lines,
         previous_content,
         previous_attributions,
         content,
@@ -1076,12 +1126,27 @@ fn make_entry_for_file(
     // let filtered_attributions = crate::authorship::attribution_tracker::discard_uncontentious_attributions_for_author(&new_attributions, &CheckpointKind::Human.to_str());
 
     let line_attr_start = Instant::now();
-    let line_attributions =
+    let mut line_attributions =
         crate::authorship::attribution_tracker::attributions_to_line_attributions_for_checkpoint(
             &new_attributions,
             content,
             is_ai_checkpoint,
         );
+    let new_attributions = if limit_current_author_to_changed_lines {
+        line_attributions = restrict_current_author_attributions_to_changed_lines(
+            line_attributions,
+            previous_content,
+            content,
+            author_id,
+        );
+        crate::authorship::attribution_tracker::line_attributions_to_attributions(
+            &line_attributions,
+            content,
+            ts,
+        )
+    } else {
+        new_attributions
+    };
     tracing::debug!(
         "[BENCHMARK]   attributions_to_line_attributions for {} took {:?}",
         file_path,
@@ -1105,6 +1170,109 @@ fn make_entry_for_file(
     );
 
     Ok((entry, line_stats))
+}
+
+fn split_lines_preserving_terminators(s: &str) -> Vec<&str> {
+    let mut lines = Vec::new();
+    let mut start = 0;
+
+    for (idx, ch) in s.char_indices() {
+        if ch == '\n' {
+            lines.push(&s[start..idx + 1]);
+            start = idx + 1;
+        }
+    }
+
+    if start < s.len() {
+        lines.push(&s[start..]);
+    }
+
+    lines
+}
+
+fn changed_new_line_numbers(previous_content: &str, current_content: &str) -> HashSet<u32> {
+    let previous_lines = split_lines_preserving_terminators(previous_content);
+    let current_lines = split_lines_preserving_terminators(current_content);
+    let mut changed = HashSet::new();
+
+    for op in capture_diff_slices(&previous_lines, &current_lines) {
+        match op {
+            DiffOp::Insert {
+                new_index, new_len, ..
+            }
+            | DiffOp::Replace {
+                new_index, new_len, ..
+            } => {
+                let start = new_index as u32 + 1;
+                let end = start + new_len as u32;
+                for line in start..end {
+                    changed.insert(line);
+                }
+            }
+            DiffOp::Equal { .. } | DiffOp::Delete { .. } => {}
+        }
+    }
+
+    changed
+}
+
+fn restrict_current_author_attributions_to_changed_lines(
+    line_attributions: Vec<LineAttribution>,
+    previous_content: &str,
+    current_content: &str,
+    current_author_id: &str,
+) -> Vec<LineAttribution> {
+    let changed_lines = changed_new_line_numbers(previous_content, current_content);
+    if changed_lines.is_empty() {
+        return line_attributions
+            .into_iter()
+            .filter(|attr| attr.author_id != current_author_id)
+            .collect();
+    }
+
+    let mut restricted = Vec::new();
+    for attr in line_attributions {
+        if attr.author_id != current_author_id {
+            restricted.push(attr);
+            continue;
+        }
+
+        let mut lines: Vec<u32> = (attr.start_line..=attr.end_line)
+            .filter(|line| changed_lines.contains(line))
+            .collect();
+        lines.sort_unstable();
+        lines.dedup();
+
+        if lines.is_empty() {
+            continue;
+        }
+
+        let mut range_start = lines[0];
+        let mut range_end = lines[0];
+        for line in lines.into_iter().skip(1) {
+            if line == range_end + 1 {
+                range_end = line;
+            } else {
+                restricted.push(LineAttribution {
+                    start_line: range_start,
+                    end_line: range_end,
+                    author_id: attr.author_id.clone(),
+                    overrode: attr.overrode.clone(),
+                });
+                range_start = line;
+                range_end = line;
+            }
+        }
+
+        restricted.push(LineAttribution {
+            start_line: range_start,
+            end_line: range_end,
+            author_id: attr.author_id,
+            overrode: attr.overrode,
+        });
+    }
+
+    restricted
 }
 
 /// Compute line statistics for a single file by diffing previous and current content

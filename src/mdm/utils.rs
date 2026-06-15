@@ -2,6 +2,7 @@ use crate::authorship::imara_diff_utils::{LineChangeTag, compute_line_changes};
 use crate::error::GitAiError;
 use jsonc_parser::ParseOptions;
 use jsonc_parser::cst::CstRootNode;
+use jsonc_parser::json;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -773,6 +774,176 @@ pub fn update_vscode_chat_hook_settings(
     Ok(Some(diff_output))
 }
 
+/// Update VS Code hook file locations in a settings.json/jsonc file.
+///
+/// If users define `chat.hookFilesLocations`, VS Code uses that allow-list
+/// instead of only relying on built-in hook locations. Ensure the Copilot
+/// default hook directory remains enabled so `~/.copilot/hooks/git-ai.json`
+/// is still loaded.
+pub fn update_vscode_copilot_hook_locations_settings(
+    settings_path: &Path,
+    dry_run: bool,
+) -> Result<Option<String>, GitAiError> {
+    let original = if settings_path.exists() {
+        fs::read_to_string(settings_path)?
+    } else {
+        String::new()
+    };
+
+    let parse_input = if original.trim().is_empty() {
+        "{}".to_string()
+    } else {
+        original.clone()
+    };
+
+    let parse_options = ParseOptions::default();
+    let root = CstRootNode::parse(&parse_input, &parse_options).map_err(|err| {
+        GitAiError::Generic(format!(
+            "Failed to parse {}: {}",
+            settings_path.display(),
+            err
+        ))
+    })?;
+
+    let object = root.object_value_or_set();
+    let mut changed = false;
+
+    if let Some(prop) = object.get("chat.hookFilesLocations") {
+        let should_replace = prop.value().and_then(|node| node.as_object()).is_none();
+
+        if should_replace {
+            prop.set_value(json!({
+                "~/.copilot/hooks": true
+            }));
+            changed = true;
+        } else if let Some(locations) = prop.value().and_then(|node| node.as_object()) {
+            match locations.get("~/.copilot/hooks") {
+                Some(location_prop) => {
+                    let should_update = match location_prop.value() {
+                        Some(node) => match node.as_boolean_lit() {
+                            Some(bool_node) => !bool_node.value(),
+                            None => true,
+                        },
+                        None => true,
+                    };
+
+                    if should_update {
+                        location_prop.set_value(jsonc_parser::json!(true));
+                        changed = true;
+                    }
+                }
+                None => {
+                    locations.append("~/.copilot/hooks", jsonc_parser::json!(true));
+                    changed = true;
+                }
+            }
+        }
+    }
+
+    if !changed {
+        return Ok(None);
+    }
+
+    let new_content = root.to_string();
+    let diff_output = generate_diff(settings_path, &original, &new_content);
+
+    if !dry_run {
+        if let Some(parent) = settings_path.parent()
+            && !parent.exists()
+        {
+            fs::create_dir_all(parent)?;
+        }
+        write_atomic(settings_path, new_content.as_bytes())?;
+    }
+
+    Ok(Some(diff_output))
+}
+
+/// Remove stale VS Code `git.path` values that point at old git-ai shims.
+///
+/// Windows installs no longer create a fresh `~/.git-ai/bin/git.exe` shim, so a
+/// stale settings value can make VS Code fail with "No such file". We only
+/// remove values that are clearly git-ai-managed and broken, leaving normal
+/// user/system Git settings alone.
+pub fn repair_vscode_git_path_settings(
+    settings_path: &Path,
+    dry_run: bool,
+) -> Result<Option<String>, GitAiError> {
+    let original = if settings_path.exists() {
+        fs::read_to_string(settings_path)?
+    } else {
+        String::new()
+    };
+
+    if original.trim().is_empty() {
+        return Ok(None);
+    }
+
+    let parse_options = ParseOptions::default();
+    let root = CstRootNode::parse(&original, &parse_options).map_err(|err| {
+        GitAiError::Generic(format!(
+            "Failed to parse {}: {}",
+            settings_path.display(),
+            err
+        ))
+    })?;
+
+    let Some(object) = root.object_value() else {
+        return Ok(None);
+    };
+
+    let Some(prop) = object.get("git.path") else {
+        return Ok(None);
+    };
+
+    let Some(current) = prop
+        .value()
+        .and_then(|node| node.as_string_lit())
+        .and_then(|lit| lit.decoded_value().ok())
+        .map(|value| value.to_string())
+    else {
+        return Ok(None);
+    };
+
+    if !stale_git_ai_git_path_should_be_removed(&current) {
+        return Ok(None);
+    }
+
+    prop.remove();
+
+    let new_content = root.to_string();
+    let diff_output = generate_diff(settings_path, &original, &new_content);
+
+    if !dry_run {
+        write_atomic(settings_path, new_content.as_bytes())?;
+    }
+
+    Ok(Some(diff_output))
+}
+
+fn stale_git_ai_git_path_should_be_removed(value: &str) -> bool {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    let normalized = trimmed.replace('/', "\\").to_ascii_lowercase();
+    if !(normalized.contains("\\.git-ai\\bin\\git") || normalized.contains("git-ai-test-home-")) {
+        return false;
+    }
+
+    if normalized.contains("git-ai-test-home-") {
+        return true;
+    }
+
+    if normalized.contains("disabled-legacy-wrapper") {
+        return true;
+    }
+
+    let candidate = PathBuf::from(trimmed);
+    !candidate.exists()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -963,6 +1134,148 @@ mod tests {
 
         let final_content = fs::read_to_string(&settings_path).unwrap();
         assert!(final_content.contains("\"chat.useHooks\": true"));
+    }
+
+    #[test]
+    fn test_update_vscode_copilot_hook_locations_adds_missing_location() {
+        let temp_dir = TempDir::new().unwrap();
+        let settings_path = temp_dir.path().join("settings.json");
+        let initial = r#"{
+    "chat.hookFilesLocations": {
+        "~/.other/hooks": true
+    }
+}
+"#;
+        fs::write(&settings_path, initial).unwrap();
+
+        let result = update_vscode_copilot_hook_locations_settings(&settings_path, false).unwrap();
+        assert!(result.is_some());
+
+        let final_content = fs::read_to_string(&settings_path).unwrap();
+        assert!(final_content.contains("\"~/.other/hooks\": true"));
+        assert!(final_content.contains("\"~/.copilot/hooks\": true"));
+    }
+
+    #[test]
+    fn test_update_vscode_copilot_hook_locations_enables_false_location() {
+        let temp_dir = TempDir::new().unwrap();
+        let settings_path = temp_dir.path().join("settings.json");
+        let initial = r#"{
+    "chat.hookFilesLocations": {
+        "~/.copilot/hooks": false
+    }
+}
+"#;
+        fs::write(&settings_path, initial).unwrap();
+
+        let result = update_vscode_copilot_hook_locations_settings(&settings_path, false).unwrap();
+        assert!(result.is_some());
+
+        let final_content = fs::read_to_string(&settings_path).unwrap();
+        assert!(final_content.contains("\"~/.copilot/hooks\": true"));
+    }
+
+    #[test]
+    fn test_update_vscode_copilot_hook_locations_ignores_absent_setting() {
+        let temp_dir = TempDir::new().unwrap();
+        let settings_path = temp_dir.path().join("settings.json");
+        let initial = r#"{
+    "chat.useHooks": true
+}
+"#;
+        fs::write(&settings_path, initial).unwrap();
+
+        let result = update_vscode_copilot_hook_locations_settings(&settings_path, false).unwrap();
+        assert!(result.is_none());
+
+        let final_content = fs::read_to_string(&settings_path).unwrap();
+        assert_eq!(final_content, initial);
+    }
+
+    #[test]
+    fn test_repair_vscode_git_path_settings_removes_missing_git_ai_shim() {
+        let temp_dir = TempDir::new().unwrap();
+        let settings_path = temp_dir.path().join("settings.json");
+        let missing_shim = temp_dir.path().join(".git-ai").join("bin").join("git.exe");
+        let initial = format!(
+            r#"{{
+    // keep user comments
+    "git.path": "{}",
+    "chat.useHooks": true
+}}
+"#,
+            missing_shim.display().to_string().replace('\\', "\\\\")
+        );
+        fs::write(&settings_path, initial).unwrap();
+
+        let result = repair_vscode_git_path_settings(&settings_path, false).unwrap();
+        assert!(result.is_some());
+
+        let final_content = fs::read_to_string(&settings_path).unwrap();
+        assert!(final_content.contains("// keep user comments"));
+        assert!(!final_content.contains("\"git.path\""));
+        assert!(final_content.contains("\"chat.useHooks\": true"));
+    }
+
+    #[test]
+    fn test_repair_vscode_git_path_settings_removes_test_home_leak() {
+        let temp_dir = TempDir::new().unwrap();
+        let settings_path = temp_dir.path().join("settings.json");
+        let initial = r#"{
+    "git.path": "C:\\Users\\admin\\AppData\\Local\\Temp\\git-ai-test-home-36524\\.git-ai\\bin\\git"
+}
+"#;
+        fs::write(&settings_path, initial).unwrap();
+
+        let result = repair_vscode_git_path_settings(&settings_path, false).unwrap();
+        assert!(result.is_some());
+
+        let final_content = fs::read_to_string(&settings_path).unwrap();
+        assert!(!final_content.contains("\"git.path\""));
+    }
+
+    #[test]
+    fn test_repair_vscode_git_path_settings_removes_disabled_legacy_wrapper() {
+        let temp_dir = TempDir::new().unwrap();
+        let settings_path = temp_dir.path().join("settings.json");
+        let disabled_wrapper = temp_dir
+            .path()
+            .join(".git-ai")
+            .join("bin")
+            .join("git.exe.disabled-legacy-wrapper-20260615120000");
+        fs::create_dir_all(disabled_wrapper.parent().unwrap()).unwrap();
+        fs::write(&disabled_wrapper, b"legacy wrapper").unwrap();
+        let initial = format!(
+            r#"{{
+    "git.path": "{}"
+}}
+"#,
+            disabled_wrapper.display().to_string().replace('\\', "\\\\")
+        );
+        fs::write(&settings_path, initial).unwrap();
+
+        let result = repair_vscode_git_path_settings(&settings_path, false).unwrap();
+        assert!(result.is_some());
+
+        let final_content = fs::read_to_string(&settings_path).unwrap();
+        assert!(!final_content.contains("\"git.path\""));
+    }
+
+    #[test]
+    fn test_repair_vscode_git_path_settings_preserves_existing_non_git_ai_path() {
+        let temp_dir = TempDir::new().unwrap();
+        let settings_path = temp_dir.path().join("settings.json");
+        let initial = r#"{
+    "git.path": "C:\\Program Files\\Git\\cmd\\git.exe"
+}
+"#;
+        fs::write(&settings_path, initial).unwrap();
+
+        let result = repair_vscode_git_path_settings(&settings_path, false).unwrap();
+        assert!(result.is_none());
+
+        let final_content = fs::read_to_string(&settings_path).unwrap();
+        assert_eq!(final_content, initial);
     }
 
     #[test]

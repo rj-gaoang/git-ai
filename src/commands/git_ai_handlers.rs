@@ -15,6 +15,17 @@ use serde::{Deserialize, Serialize};
 use std::env;
 use std::io::IsTerminal;
 use std::io::Read;
+use std::sync::mpsc;
+use std::time::Duration;
+
+const DEFAULT_HOOK_STDIN_TIMEOUT_MS: u64 = 5_000;
+
+enum HookStdinReadResult {
+    Read(String),
+    Empty,
+    Failed(String),
+    TimedOut(Duration),
+}
 
 fn install_maintenance_marker_path() -> Option<std::path::PathBuf> {
     config::internal_dir_path().map(|dir| dir.join("install-maintenance.json"))
@@ -443,17 +454,26 @@ fn handle_checkpoint(args: &[String]) {
                 if i + 1 < args.len() {
                     hook_input = Some(strip_utf8_bom(args[i + 1].clone()));
                     if hook_input.as_ref().unwrap() == "stdin" {
-                        let mut stdin = std::io::stdin();
-                        let mut buffer = String::new();
-                        if let Err(e) = stdin.read_to_string(&mut buffer) {
-                            eprintln!("Failed to read stdin for hook input: {}", e);
-                            std::process::exit(0);
+                        match read_hook_stdin_with_timeout() {
+                            HookStdinReadResult::Read(buffer) => {
+                                hook_input = Some(strip_utf8_bom(buffer));
+                            }
+                            HookStdinReadResult::Empty => {
+                                eprintln!("No hook input provided (via --hook-input or stdin).");
+                                std::process::exit(0);
+                            }
+                            HookStdinReadResult::Failed(e) => {
+                                eprintln!("Failed to read stdin for hook input: {}", e);
+                                std::process::exit(0);
+                            }
+                            HookStdinReadResult::TimedOut(timeout) => {
+                                eprintln!(
+                                    "Timed out after {:?} waiting for hook stdin; skipping checkpoint.",
+                                    timeout
+                                );
+                                std::process::exit(0);
+                            }
                         }
-                        if buffer.trim().is_empty() {
-                            eprintln!("No hook input provided (via --hook-input or stdin).");
-                            std::process::exit(0);
-                        }
-                        hook_input = Some(strip_utf8_bom(buffer));
                     } else if hook_input.as_ref().unwrap().trim().is_empty() {
                         eprintln!("Error: --hook-input requires a value");
                         std::process::exit(0);
@@ -642,6 +662,45 @@ fn strip_utf8_bom(input: String) -> String {
         stripped.to_string()
     } else {
         input
+    }
+}
+
+fn hook_stdin_timeout() -> Duration {
+    hook_stdin_timeout_from_env_value(
+        std::env::var("GIT_AI_HOOK_STDIN_TIMEOUT_MS")
+            .ok()
+            .as_deref(),
+    )
+}
+
+fn hook_stdin_timeout_from_env_value(value: Option<&str>) -> Duration {
+    value
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|ms| *ms > 0)
+        .map(Duration::from_millis)
+        .unwrap_or_else(|| Duration::from_millis(DEFAULT_HOOK_STDIN_TIMEOUT_MS))
+}
+
+fn read_hook_stdin_with_timeout() -> HookStdinReadResult {
+    let timeout = hook_stdin_timeout();
+    let (tx, rx) = mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let mut stdin = std::io::stdin();
+        let mut buffer = String::new();
+        let result = match stdin.read_to_string(&mut buffer) {
+            Ok(_) if buffer.trim().is_empty() => HookStdinReadResult::Empty,
+            Ok(_) => HookStdinReadResult::Read(buffer),
+            Err(e) => HookStdinReadResult::Failed(e.to_string()),
+        };
+        let _ = tx.send(result);
+    });
+
+    match rx.recv_timeout(timeout) {
+        Ok(result) => result,
+        Err(mpsc::RecvTimeoutError::Timeout) => HookStdinReadResult::TimedOut(timeout),
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            HookStdinReadResult::Failed("stdin reader exited without a result".to_string())
+        }
     }
 }
 
@@ -1536,7 +1595,11 @@ fn exit_with_log_status(status: std::process::ExitStatus) -> ! {
 
 #[cfg(test)]
 mod tests {
-    use super::{install_maintenance_block_reason, normalize_head_rev, parse_upload_stats_args};
+    use super::{
+        DEFAULT_HOOK_STDIN_TIMEOUT_MS, hook_stdin_timeout_from_env_value,
+        install_maintenance_block_reason, normalize_head_rev, parse_upload_stats_args,
+    };
+    use std::time::Duration;
 
     #[test]
     fn install_maintenance_blocks_checkpoint_commands() {
@@ -1615,5 +1678,25 @@ mod tests {
         assert_eq!(normalize_head_rev("head~2"), "HEAD~2");
         assert_eq!(normalize_head_rev("head^1"), "HEAD^1");
         assert_eq!(normalize_head_rev("head@{0}"), "HEAD@{0}");
+    }
+
+    #[test]
+    fn hook_stdin_timeout_defaults_and_rejects_invalid_values() {
+        assert_eq!(
+            hook_stdin_timeout_from_env_value(None),
+            Duration::from_millis(DEFAULT_HOOK_STDIN_TIMEOUT_MS)
+        );
+        assert_eq!(
+            hook_stdin_timeout_from_env_value(Some("0")),
+            Duration::from_millis(DEFAULT_HOOK_STDIN_TIMEOUT_MS)
+        );
+        assert_eq!(
+            hook_stdin_timeout_from_env_value(Some("bogus")),
+            Duration::from_millis(DEFAULT_HOOK_STDIN_TIMEOUT_MS)
+        );
+        assert_eq!(
+            hook_stdin_timeout_from_env_value(Some("123")),
+            Duration::from_millis(123)
+        );
     }
 }

@@ -1,9 +1,12 @@
 use crate::error::GitAiError;
-use crate::mdm::hook_installer::{HookCheckResult, HookInstaller, HookInstallerParams};
+use crate::mdm::hook_installer::{
+    HookCheckResult, HookInstaller, HookInstallerParams, InstallResult,
+};
 use crate::mdm::utils::{
     MIN_CODE_VERSION, generate_diff, get_editor_version, home_dir, parse_version,
-    resolve_editor_cli, settings_paths_for_products, should_process_settings_target,
-    version_meets_requirement, write_atomic,
+    repair_vscode_git_path_settings, resolve_editor_cli, settings_paths_for_products,
+    should_process_settings_target, update_vscode_chat_hook_settings,
+    update_vscode_copilot_hook_locations_settings, version_meets_requirement, write_atomic,
 };
 use serde_json::{Value, json};
 use std::fs;
@@ -398,6 +401,94 @@ impl HookInstaller for GitHubCopilotInstaller {
 
         Ok(Some(diff_output))
     }
+
+    fn install_extras(
+        &self,
+        _params: &HookInstallerParams,
+        dry_run: bool,
+    ) -> Result<Vec<InstallResult>, GitAiError> {
+        let mut results = Vec::new();
+
+        for settings_path in Self::settings_targets() {
+            if !should_process_settings_target(&settings_path) {
+                continue;
+            }
+
+            match repair_vscode_git_path_settings(&settings_path, dry_run) {
+                Ok(Some(diff)) => {
+                    results.push(InstallResult {
+                        changed: true,
+                        diff: Some(diff),
+                        message: format!(
+                            "GitHub Copilot: stale VS Code git.path removed from {}",
+                            settings_path.display()
+                        ),
+                    });
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    results.push(InstallResult {
+                        changed: false,
+                        diff: None,
+                        message: format!(
+                            "GitHub Copilot: Failed to repair VS Code git.path settings: {}",
+                            e
+                        ),
+                    });
+                }
+            }
+
+            match update_vscode_chat_hook_settings(&settings_path, dry_run) {
+                Ok(Some(diff)) => {
+                    results.push(InstallResult {
+                        changed: true,
+                        diff: Some(diff),
+                        message: format!(
+                            "GitHub Copilot: VS Code chat hook settings updated in {}",
+                            settings_path.display()
+                        ),
+                    });
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    results.push(InstallResult {
+                        changed: false,
+                        diff: None,
+                        message: format!(
+                            "GitHub Copilot: Failed to configure VS Code chat hook settings: {}",
+                            e
+                        ),
+                    });
+                }
+            }
+
+            match update_vscode_copilot_hook_locations_settings(&settings_path, dry_run) {
+                Ok(Some(diff)) => {
+                    results.push(InstallResult {
+                        changed: true,
+                        diff: Some(diff),
+                        message: format!(
+                            "GitHub Copilot: VS Code hook location settings updated in {}",
+                            settings_path.display()
+                        ),
+                    });
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    results.push(InstallResult {
+                        changed: false,
+                        diff: None,
+                        message: format!(
+                            "GitHub Copilot: Failed to configure VS Code hook locations: {}",
+                            e
+                        ),
+                    });
+                }
+            }
+        }
+
+        Ok(results)
+    }
 }
 
 #[cfg(test)]
@@ -418,11 +509,13 @@ mod tests {
 
         let prev_home = std::env::var_os("HOME");
         let prev_userprofile = std::env::var_os("USERPROFILE");
+        let prev_appdata = std::env::var_os("APPDATA");
 
         // SAFETY: tests are serialized via #[serial], so mutating process env is safe.
         unsafe {
             std::env::set_var("HOME", &home);
             std::env::set_var("USERPROFILE", &home);
+            std::env::set_var("APPDATA", home.join("AppData").join("Roaming"));
         }
 
         f(&home);
@@ -436,6 +529,10 @@ mod tests {
             match prev_userprofile {
                 Some(v) => std::env::set_var("USERPROFILE", v),
                 None => std::env::remove_var("USERPROFILE"),
+            }
+            match prev_appdata {
+                Some(v) => std::env::set_var("APPDATA", v),
+                None => std::env::remove_var("APPDATA"),
             }
         }
     }
@@ -755,6 +852,54 @@ mod tests {
 
             installer.uninstall_hooks(&params, false).unwrap();
             assert!(!legacy_path.exists());
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn test_install_extras_repairs_vscode_settings_for_copilot_hooks() {
+        with_temp_home(|home| {
+            let settings_path = home
+                .join("AppData")
+                .join("Roaming")
+                .join("Code")
+                .join("User")
+                .join("settings.json");
+            fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
+            fs::write(
+                &settings_path,
+                r#"{
+    "git.path": "C:\\Users\\admin\\AppData\\Local\\Temp\\git-ai-test-home-36524\\.git-ai\\bin\\git",
+    "chat.useHooks": false,
+    "chat.hookFilesLocations": {
+        "~/.other/hooks": true
+    }
+}
+"#,
+            )
+            .unwrap();
+
+            let params = HookInstallerParams {
+                binary_path: test_binary_path(),
+            };
+            let results = GitHubCopilotInstaller
+                .install_extras(&params, false)
+                .unwrap();
+
+            assert!(
+                results.iter().any(|result| result.changed),
+                "expected settings repairs, got: {:?}",
+                results
+                    .iter()
+                    .map(|result| result.message.as_str())
+                    .collect::<Vec<_>>()
+            );
+
+            let final_content = fs::read_to_string(&settings_path).unwrap();
+            assert!(!final_content.contains("\"git.path\""));
+            assert!(final_content.contains("\"chat.useHooks\": true"));
+            assert!(final_content.contains("\"~/.other/hooks\": true"));
+            assert!(final_content.contains("\"~/.copilot/hooks\": true"));
         });
     }
 
