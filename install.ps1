@@ -420,6 +420,27 @@ function Copy-InstalledBinary {
     }
 }
 
+function Invoke-GitAiInstallHooks {
+    param([Parameter(Mandatory = $true)][string]$GitAiExe)
+
+    $hadSkipInstallTestUpload = Test-Path Env:GIT_AI_SKIP_INSTALL_TEST_UPLOAD
+    $originalSkipInstallTestUpload = $env:GIT_AI_SKIP_INSTALL_TEST_UPLOAD
+
+    try {
+        if ($env:GIT_AI_SKIP_INSTALL_TEST_UPLOAD -eq '1' -and [string]::IsNullOrWhiteSpace($env:GIT_AI_TEST_DB_PATH)) {
+            Remove-Item Env:GIT_AI_SKIP_INSTALL_TEST_UPLOAD -ErrorAction SilentlyContinue
+        }
+
+        & $GitAiExe install-hooks | Out-Host
+    } finally {
+        if ($hadSkipInstallTestUpload) {
+            $env:GIT_AI_SKIP_INSTALL_TEST_UPLOAD = $originalSkipInstallTestUpload
+        } else {
+            Remove-Item Env:GIT_AI_SKIP_INSTALL_TEST_UPLOAD -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 function Get-UploadActivityLockPath {
     $internalDir = Join-Path $HOME '.git-ai\internal'
     New-Item -ItemType Directory -Force -Path $internalDir | Out-Null
@@ -956,7 +977,7 @@ if ($env:INSTALL_NONCE -and $env:API_BASE) {
 # Install hooks
 Write-Host 'Setting up IDE/agent hooks...'
 try {
-    & $launcherExe install-hooks | Out-Host
+    Invoke-GitAiInstallHooks -GitAiExe $launcherExe
     Write-Success 'Successfully set up IDE/agent hooks'
 } catch {
     Write-Warning "Warning: Failed to set up IDE/agent hooks. Please try running 'git-ai install-hooks' manually."

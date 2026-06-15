@@ -702,6 +702,31 @@ fn windows_install_script_writes_current_exe_pointer_to_launcher() {
 }
 
 #[test]
+fn windows_install_script_allows_git_ai_rust_install_probe_during_service_updates() {
+    let script = fs::read_to_string(install_script_path()).expect("failed to read install.ps1");
+    assert!(
+        script.contains("function Invoke-GitAiInstallHooks"),
+        "install.ps1 should wrap install-hooks so git-ai can run its own install probe"
+    );
+    assert!(
+        script.contains("Remove-Item Env:GIT_AI_SKIP_INSTALL_TEST_UPLOAD"),
+        "install.ps1 should temporarily clear inherited service skip env for install-hooks"
+    );
+    assert!(
+        script.contains("[string]::IsNullOrWhiteSpace($env:GIT_AI_TEST_DB_PATH)"),
+        "install.ps1 should keep test database environments from uploading install probes"
+    );
+    assert!(
+        script.contains("Invoke-GitAiInstallHooks -GitAiExe $launcherExe"),
+        "install.ps1 should call install-hooks through the environment-isolating wrapper"
+    );
+    assert!(
+        !script.contains("& $launcherExe install-hooks | Out-Host"),
+        "install.ps1 should not call install-hooks directly"
+    );
+}
+
+#[test]
 fn windows_install_script_stops_process_trees() {
     let script = fs::read_to_string(install_script_path()).expect("failed to read install.ps1");
     assert!(
