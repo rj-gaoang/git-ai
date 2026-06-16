@@ -1,0 +1,78 @@
+docs/design-doc/git-ai看板方案.md
+  s_719f2020511241::t_3c629240e76fcc 38,2480
+  s_719f2020511241::t_76b2f8ef9b08a9 40-41,2481
+install.ps1
+  s_719f2020511241::t_4fa69933e86571 423-443,980
+tests/windows_script_checks.rs
+  s_719f2020511241::t_cc555e437cbbaa 705-728
+---
+{
+  "schema_version": "authorship/3.1.0",
+  "git_ai_version": "2.2.37",
+  "x_user_id": "108",
+  "base_commit_sha": "3bbe41b0a3e4a7748d35535ed282cbf23c900e31",
+  "prompts": {
+    "s_719f2020511241::t_3c629240e76fcc": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ec6ba-3280-7493-b095-af6405fd76d4",
+        "model": "gpt-5.5"
+      },
+      "human_author": "gaoang <gaoang@ruijie.com.cn>",
+      "messages": [],
+      "total_additions": 53,
+      "total_deletions": 1,
+      "accepted_lines": 3140,
+      "overriden_lines": 0
+    },
+    "s_719f2020511241::t_4fa69933e86571": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ec6ba-3280-7493-b095-af6405fd76d4",
+        "model": "gpt-5.5"
+      },
+      "human_author": "gaoang <gaoang@ruijie.com.cn>",
+      "messages": [],
+      "total_additions": 53,
+      "total_deletions": 1,
+      "accepted_lines": 806,
+      "overriden_lines": 0
+    },
+    "s_719f2020511241::t_76b2f8ef9b08a9": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ec6ba-3280-7493-b095-af6405fd76d4",
+        "model": "gpt-5.5"
+      },
+      "human_author": "gaoang <gaoang@ruijie.com.cn>",
+      "messages": [],
+      "total_additions": 53,
+      "total_deletions": 1,
+      "accepted_lines": 3,
+      "overriden_lines": 0
+    },
+    "s_719f2020511241::t_cc555e437cbbaa": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ec6ba-3280-7493-b095-af6405fd76d4",
+        "model": "gpt-5.5"
+      },
+      "human_author": "gaoang <gaoang@ruijie.com.cn>",
+      "messages": [],
+      "total_additions": 53,
+      "total_deletions": 1,
+      "accepted_lines": 25,
+      "overriden_lines": 0
+    }
+  },
+  "sessions": {
+    "s_719f2020511241": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ec6ba-3280-7493-b095-af6405fd76d4",
+        "model": "gpt-5.5"
+      },
+      "human_author": "gaoang <gaoang@ruijie.com.cn>"
+    }
+  }
+}
