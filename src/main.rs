@@ -34,6 +34,13 @@ fn is_superuser_exempt_command(args: &[String]) -> bool {
             .is_some_and(|s| s == "run" || s == "status" || s == "shutdown")
 }
 
+fn is_fast_metadata_command(args: &[String]) -> bool {
+    matches!(
+        args.first().map(String::as_str),
+        Some("version" | "--version" | "-v" | "help" | "--help" | "-h")
+    )
+}
+
 fn main() {
     // Get the binary name that was called
     let binary_name = std::env::args_os()
@@ -58,7 +65,11 @@ fn main() {
     }
 
     let cli = Cli::parse();
-    git_ai::diagnostics::append_process_started_event(&binary_name, &cli.args);
+    if !(matches!(binary_name.as_str(), "git-ai" | "git-ai.exe")
+        && is_fast_metadata_command(&cli.args))
+    {
+        git_ai::diagnostics::append_process_started_event(&binary_name, &cli.args);
+    }
 
     #[cfg(debug_assertions)]
     {
