@@ -35,6 +35,33 @@ fn superuser_guard_exempt_commands_always_work() {
 
 #[test]
 #[cfg(unix)]
+fn superuser_guard_exempts_install_commands() {
+    if unsafe { libc::geteuid() } != 0 {
+        return;
+    }
+
+    let binary_path = get_binary_path();
+    for args in [
+        vec!["install-hooks", "--dry-run=true"],
+        vec!["post-install-probe"],
+    ] {
+        let mut cmd = Command::new(&binary_path);
+        cmd.args(&args)
+            .env("GIT_AI_SKIP_INSTALL_TEST_UPLOAD", "1")
+            .env_remove("GIT_AI_ALLOW_SUPERUSER");
+        remove_all_ci_env_vars(&mut cmd);
+
+        let output = cmd.output().expect("failed to execute binary");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !stderr.contains("running as superuser (root/Administrator) is not recommended"),
+            "{args:?} should be exempt from superuser guard, got: {stderr}"
+        );
+    }
+}
+
+#[test]
+#[cfg(unix)]
 fn superuser_guard_warns_when_running_as_root_without_opt_in() {
     if unsafe { libc::geteuid() } != 0 {
         // Can't test warning behavior as non-root; skip.

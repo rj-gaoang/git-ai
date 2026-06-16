@@ -1,4 +1,5 @@
 use crate::api::{ApiClient, ApiContext};
+use crate::authorship::authorship_log::{HumanRecord, LineRange, SessionRecord};
 use crate::authorship::authorship_log_serialization::AuthorshipLog;
 use crate::authorship::ignore::{
     build_ignore_matcher, effective_ignore_patterns, should_ignore_file_with_matcher,
@@ -9,7 +10,7 @@ use crate::authorship::secrets::{
 };
 use crate::authorship::stats::{stats_for_commit_stats_from_hunks, write_stats_to_terminal};
 use crate::authorship::virtual_attribution::VirtualAttributions;
-use crate::authorship::working_log::{Checkpoint, CheckpointKind, WorkingLogEntry};
+use crate::authorship::working_log::{AgentId, Checkpoint, CheckpointKind, WorkingLogEntry};
 use crate::config::{Config, PromptStorageMode};
 use crate::error::GitAiError;
 use crate::git::notes_api::write_note as notes_add;
@@ -195,6 +196,32 @@ pub fn post_commit_with_final_state(
             Some(&pathspecs),
             final_state_override,
         )?;
+
+    fill_ai_attribution_gaps_for_commit(
+        repo,
+        &parent_sha,
+        &commit_sha,
+        &mut authorship_log,
+        &pathspecs,
+        &human_author,
+    );
+    fill_legacy_human_manual_gaps_for_commit(
+        repo,
+        &parent_sha,
+        &commit_sha,
+        &mut authorship_log,
+        &parent_working_log,
+        &human_author,
+    );
+    fill_legacy_human_ai_gaps_for_commit(
+        repo,
+        &parent_sha,
+        &commit_sha,
+        &mut authorship_log,
+        &parent_working_log,
+        &human_author,
+    );
+
     crate::diagnostics::append_debug_event(
         "post_commit_authorship_log_built",
         serde_json::json!({
@@ -647,6 +674,393 @@ fn commit_stats_debug_summary(stats: &crate::authorship::stats::CommitStats) -> 
         "gitDiffDeletedLines": stats.git_diff_deleted_lines,
         "toolModelBreakdownCount": stats.tool_model_breakdown.len(),
     })
+}
+
+fn fill_ai_attribution_gaps_for_commit(
+    repo: &Repository,
+    parent_sha: &str,
+    commit_sha: &str,
+    authorship_log: &mut AuthorshipLog,
+    pathspecs: &HashSet<String>,
+    human_author: &str,
+) {
+    let ai_attestation_hashes = collect_ai_gap_fill_attestation_hashes(authorship_log);
+    let Some(attestation_hash) = ai_attestation_hashes.last().cloned() else {
+        return;
+    };
+
+    let diff_base = if parent_sha == "initial" {
+        "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+    } else {
+        parent_sha
+    };
+
+    let Ok(all_added_lines) = repo.diff_added_lines(diff_base, commit_sha, None) else {
+        return;
+    };
+    let all_added_count = all_added_lines.values().map(Vec::len).sum::<usize>();
+    if all_added_count == 0 {
+        return;
+    }
+
+    let pathspec_added_count = if pathspecs.is_empty() {
+        0
+    } else {
+        repo.diff_added_lines(diff_base, commit_sha, Some(pathspecs))
+            .map(|lines| lines.values().map(Vec::len).sum::<usize>())
+            .unwrap_or(0)
+    };
+    let missing_added_count = all_added_count.saturating_sub(pathspec_added_count);
+    if missing_added_count == 0 {
+        return;
+    }
+
+    let attested_ai_added_count =
+        attested_ai_added_count(authorship_log, &all_added_lines, &ai_attestation_hashes);
+    let total_ai_additions = authorship_log
+        .metadata
+        .prompts
+        .values()
+        .map(|prompt| prompt.total_additions as usize)
+        .sum::<usize>();
+    if total_ai_additions < attested_ai_added_count.saturating_add(missing_added_count) {
+        return;
+    }
+
+    let committed_hunks: HashMap<String, Vec<LineRange>> = all_added_lines
+        .into_iter()
+        .filter(|(path, lines)| {
+            !lines.is_empty() && (pathspecs.is_empty() || !pathspecs.contains(path))
+        })
+        .map(|(path, lines)| (path, LineRange::compress_lines(&lines)))
+        .collect();
+
+    let filled_line_count = crate::authorship::attribution_gap::fill_unattributed_hunks(
+        authorship_log,
+        &committed_hunks,
+        &attestation_hash,
+    );
+
+    if filled_line_count == 0 {
+        return;
+    }
+
+    crate::diagnostics::append_debug_event(
+        "post_commit_ai_attribution_gaps_filled",
+        serde_json::json!({
+            "repo": repo.canonical_workdir().to_string_lossy().to_string(),
+            "commitSha": commit_sha,
+            "parentSha": parent_sha,
+            "filledLineCount": filled_line_count,
+            "allAddedLineCount": all_added_count,
+            "pathspecAddedLineCount": pathspec_added_count,
+            "missingAddedLineCount": missing_added_count,
+            "pathspecCount": pathspecs.len(),
+            "totalAiAdditions": total_ai_additions,
+            "attestedAiAddedLineCount": attested_ai_added_count,
+            "attestationHash": attestation_hash,
+            "humanAuthor": human_author,
+        }),
+    );
+}
+
+fn fill_legacy_human_manual_gaps_for_commit(
+    repo: &Repository,
+    parent_sha: &str,
+    commit_sha: &str,
+    authorship_log: &mut AuthorshipLog,
+    checkpoints: &[Checkpoint],
+    human_author: &str,
+) {
+    if !authorship_log.metadata.prompts.is_empty() || !authorship_log.metadata.sessions.is_empty() {
+        return;
+    }
+    if checkpoints
+        .iter()
+        .any(|checkpoint| checkpoint.kind.is_ai() || checkpoint.kind == CheckpointKind::KnownHuman)
+    {
+        return;
+    }
+
+    let mut file_authors: HashMap<String, String> = HashMap::new();
+    for checkpoint in checkpoints
+        .iter()
+        .filter(|checkpoint| checkpoint.kind == CheckpointKind::Human)
+        .filter(|checkpoint| checkpoint.agent_id.is_none())
+    {
+        let author = if checkpoint.author.trim().is_empty() {
+            human_author.to_string()
+        } else {
+            checkpoint.author.clone()
+        };
+
+        for entry in checkpoint
+            .entries
+            .iter()
+            .filter(|entry| entry.attributions.is_empty() && entry.line_attributions.is_empty())
+        {
+            file_authors.insert(entry.file.clone(), author.clone());
+        }
+    }
+    if file_authors.is_empty() {
+        return;
+    }
+
+    let diff_base = if parent_sha == "initial" {
+        "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+    } else {
+        parent_sha
+    };
+    let legacy_human_files: HashSet<String> = file_authors.keys().cloned().collect();
+    let Ok(legacy_added_lines) =
+        repo.diff_added_lines(diff_base, commit_sha, Some(&legacy_human_files))
+    else {
+        return;
+    };
+    if legacy_added_lines.is_empty() {
+        return;
+    }
+
+    let mut hunks_by_author: HashMap<String, HashMap<String, Vec<LineRange>>> = HashMap::new();
+    for (path, lines) in legacy_added_lines {
+        if lines.is_empty() {
+            continue;
+        }
+        let Some(author) = file_authors.get(&path) else {
+            continue;
+        };
+        hunks_by_author
+            .entry(author.clone())
+            .or_default()
+            .insert(path, LineRange::compress_lines(&lines));
+    }
+    if hunks_by_author.is_empty() {
+        return;
+    }
+
+    let mut filled_line_count = 0usize;
+    let mut author_count = 0usize;
+    for (author, committed_hunks) in hunks_by_author {
+        if committed_hunks.is_empty() {
+            continue;
+        }
+        let human_hash =
+            crate::authorship::authorship_log_serialization::generate_human_short_hash(&author);
+        let filled = crate::authorship::attribution_gap::fill_unattributed_hunks(
+            authorship_log,
+            &committed_hunks,
+            &human_hash,
+        );
+        if filled == 0 {
+            continue;
+        }
+
+        filled_line_count += filled;
+        author_count += 1;
+        authorship_log
+            .metadata
+            .humans
+            .entry(human_hash)
+            .or_insert_with(|| HumanRecord { author });
+    }
+
+    if filled_line_count == 0 {
+        return;
+    }
+
+    crate::diagnostics::append_debug_event(
+        "post_commit_legacy_human_manual_gaps_filled",
+        serde_json::json!({
+            "repo": repo.canonical_workdir().to_string_lossy().to_string(),
+            "commitSha": commit_sha,
+            "parentSha": parent_sha,
+            "filledLineCount": filled_line_count,
+            "legacyHumanFileCount": legacy_human_files.len(),
+            "authorCount": author_count,
+            "humanAuthor": human_author,
+        }),
+    );
+}
+
+fn fill_legacy_human_ai_gaps_for_commit(
+    repo: &Repository,
+    parent_sha: &str,
+    commit_sha: &str,
+    authorship_log: &mut AuthorshipLog,
+    checkpoints: &[Checkpoint],
+    human_author: &str,
+) {
+    if !authorship_log.metadata.prompts.is_empty() || !authorship_log.metadata.sessions.is_empty() {
+        return;
+    }
+    if checkpoints.iter().any(|checkpoint| checkpoint.kind.is_ai()) {
+        return;
+    }
+    if !checkpoints
+        .iter()
+        .any(|checkpoint| checkpoint.kind == CheckpointKind::KnownHuman)
+    {
+        return;
+    }
+
+    let legacy_human_files: HashSet<String> = checkpoints
+        .iter()
+        .filter(|checkpoint| checkpoint.kind == CheckpointKind::Human)
+        .flat_map(|checkpoint| {
+            checkpoint.entries.iter().filter_map(|entry| {
+                (entry.attributions.is_empty() && entry.line_attributions.is_empty())
+                    .then(|| entry.file.clone())
+            })
+        })
+        .collect();
+    if legacy_human_files.len() < 3 {
+        return;
+    }
+
+    let diff_base = if parent_sha == "initial" {
+        "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+    } else {
+        parent_sha
+    };
+
+    let Ok(legacy_added_lines) =
+        repo.diff_added_lines(diff_base, commit_sha, Some(&legacy_human_files))
+    else {
+        return;
+    };
+    if legacy_added_lines.is_empty() {
+        return;
+    }
+
+    let committed_hunks: HashMap<String, Vec<LineRange>> = legacy_added_lines
+        .into_iter()
+        .filter(|(_, lines)| !lines.is_empty())
+        .map(|(path, lines)| (path, LineRange::compress_lines(&lines)))
+        .collect();
+    if committed_hunks.is_empty() {
+        return;
+    }
+
+    let agent_id = AgentId {
+        tool: "github-copilot".to_string(),
+        id: format!("legacy-human-checkpoint:{}", commit_sha),
+        model: "legacy-human-checkpoint".to_string(),
+    };
+    let session_id = crate::authorship::authorship_log_serialization::generate_session_id(
+        &agent_id.id,
+        &agent_id.tool,
+    );
+    let attestation_hash = format!(
+        "{}::{}",
+        session_id,
+        crate::authorship::authorship_log_serialization::generate_trace_id()
+    );
+    let filled_line_count = crate::authorship::attribution_gap::fill_unattributed_hunks(
+        authorship_log,
+        &committed_hunks,
+        &attestation_hash,
+    );
+
+    if filled_line_count == 0 {
+        return;
+    }
+
+    authorship_log
+        .metadata
+        .sessions
+        .entry(session_id.clone())
+        .or_insert_with(|| {
+            let mut custom_attributes = HashMap::new();
+            custom_attributes.insert(
+                "legacy_human_checkpoint_gap_fill".to_string(),
+                "true".to_string(),
+            );
+            custom_attributes.insert("commit_sha".to_string(), commit_sha.to_string());
+
+            SessionRecord {
+                agent_id: agent_id.clone(),
+                human_author: Some(human_author.to_string()),
+                custom_attributes: Some(custom_attributes),
+            }
+        });
+
+    crate::diagnostics::append_debug_event(
+        "post_commit_legacy_human_ai_gaps_filled",
+        serde_json::json!({
+            "repo": repo.canonical_workdir().to_string_lossy().to_string(),
+            "commitSha": commit_sha,
+            "parentSha": parent_sha,
+            "filledLineCount": filled_line_count,
+            "legacyHumanFileCount": legacy_human_files.len(),
+            "sessionId": session_id,
+            "attestationHash": attestation_hash,
+            "humanAuthor": human_author,
+        }),
+    );
+}
+
+fn collect_ai_gap_fill_attestation_hashes(authorship_log: &AuthorshipLog) -> Vec<String> {
+    let mut hashes = Vec::new();
+    let mut seen = HashSet::new();
+
+    for file_attestation in &authorship_log.attestations {
+        for entry in &file_attestation.entries {
+            if !is_current_ai_attestation_hash(authorship_log, &entry.hash) {
+                continue;
+            }
+            if seen.insert(entry.hash.clone()) {
+                hashes.push(entry.hash.clone());
+            }
+        }
+    }
+
+    hashes
+}
+
+fn is_current_ai_attestation_hash(authorship_log: &AuthorshipLog, hash: &str) -> bool {
+    if hash.starts_with("h_") {
+        return false;
+    }
+
+    if hash.starts_with("s_") {
+        let session_key = hash.split("::").next().unwrap_or(hash);
+        return authorship_log.metadata.sessions.contains_key(session_key);
+    }
+
+    authorship_log.metadata.prompts.contains_key(hash)
+}
+
+fn attested_ai_added_count(
+    authorship_log: &AuthorshipLog,
+    added_lines_by_file: &HashMap<String, Vec<u32>>,
+    ai_attestation_hashes: &[String],
+) -> usize {
+    let ai_hashes: HashSet<&str> = ai_attestation_hashes.iter().map(String::as_str).collect();
+    let mut counted_by_file: HashMap<&str, HashSet<u32>> = HashMap::new();
+
+    for file_attestation in &authorship_log.attestations {
+        let Some(added_lines) = added_lines_by_file.get(&file_attestation.file_path) else {
+            continue;
+        };
+        let counted = counted_by_file
+            .entry(file_attestation.file_path.as_str())
+            .or_default();
+
+        for entry in &file_attestation.entries {
+            if !ai_hashes.contains(entry.hash.as_str()) {
+                continue;
+            }
+            for range in &entry.line_ranges {
+                for line in range.expand() {
+                    if added_lines.binary_search(&line).is_ok() {
+                        counted.insert(line);
+                    }
+                }
+            }
+        }
+    }
+
+    counted_by_file.values().map(HashSet::len).sum()
 }
 
 fn checkpoint_input_debug_summary(checkpoints: &[Checkpoint]) -> serde_json::Value {

@@ -25,8 +25,78 @@ const INSTALL_TEST_MARKER_SCHEMA_VERSION: u32 = 1;
 const INSTALL_TEST_MARKER_LOCK_WAIT_SECS: u64 = 30;
 const INSTALL_TEST_MARKER_LOCK_RETRY_MILLIS: u64 = 200;
 const MAX_INSTALL_TEST_MARKERS: usize = 100;
+const MAX_INSTALL_PROBE_TEXT_CHARS: usize = 500;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InstallProbeStatus {
+    Success,
+    Failed,
+}
+
+impl InstallProbeStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Success => "success",
+            Self::Failed => "failed",
+        }
+    }
+
+    fn branch(self) -> &'static str {
+        match self {
+            Self::Success => "install-success",
+            Self::Failed => "install-failed",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct InstallProbeOutcome {
+    status: InstallProbeStatus,
+    failure_stage: Option<String>,
+    failure_reason: Option<String>,
+}
+
+impl InstallProbeOutcome {
+    fn success() -> Self {
+        Self {
+            status: InstallProbeStatus::Success,
+            failure_stage: None,
+            failure_reason: None,
+        }
+    }
+
+    fn failed(stage: impl Into<String>, reason: impl Into<String>) -> Self {
+        Self {
+            status: InstallProbeStatus::Failed,
+            failure_stage: Some(clean_install_probe_text(stage.into(), "unknown")),
+            failure_reason: Some(clean_install_probe_text(reason.into(), "unspecified")),
+        }
+    }
+}
+
+fn clean_install_probe_text(value: String, fallback: &str) -> String {
+    let trimmed = value.trim();
+    let value = if trimmed.is_empty() {
+        fallback
+    } else {
+        trimmed
+    };
+    value.chars().take(MAX_INSTALL_PROBE_TEXT_CHARS).collect()
+}
 
 pub fn maybe_upload_install_success() {
+    maybe_upload_install_probe(InstallProbeOutcome::success());
+}
+
+pub fn maybe_upload_install_failure(stage: impl Into<String>, reason: impl Into<String>) {
+    maybe_upload_install_probe(InstallProbeOutcome::failed(stage, reason));
+}
+
+pub fn maybe_upload_install_probe_from_cli_args(args: &[String]) {
+    maybe_upload_install_probe(parse_install_probe_outcome_from_cli_args(args));
+}
+
+fn maybe_upload_install_probe(outcome: InstallProbeOutcome) {
     if std::env::var("GIT_AI_SKIP_INSTALL_TEST_UPLOAD").as_deref() == Ok("1")
         || std::env::var_os("GIT_AI_TEST_DB_PATH").is_some()
         || std::env::var_os("GITAI_TEST_DB_PATH").is_some()
@@ -35,6 +105,7 @@ pub fn maybe_upload_install_success() {
             "install_test_upload_skipped",
             json!({
                 "reason": "disabled_or_test_environment",
+                "installStatus": outcome.status.as_str(),
             }),
         );
         return;
@@ -45,7 +116,7 @@ pub fn maybe_upload_install_success() {
 
     let version = git_ai_cli_version();
     let url = resolve_upload_url();
-    let marker_key = install_test_marker_key(&version, &identity, &url);
+    let marker_key = install_test_marker_key(&version, &identity, &url, &outcome);
 
     let marker_paths = install_test_marker_paths();
     let marker_lock = match marker_paths.as_ref() {
@@ -57,6 +128,9 @@ pub fn maybe_upload_install_success() {
                     json!({
                         "reason": "marker_lock_timeout",
                         "gitAiVersion": version,
+                        "installStatus": outcome.status.as_str(),
+                        "installFailureStage": outcome.failure_stage.as_deref(),
+                        "installFailureReason": outcome.failure_reason.as_deref(),
                         "markerKey": marker_key,
                     }),
                 );
@@ -74,6 +148,7 @@ pub fn maybe_upload_install_success() {
             json!({
                 "reason": "already_uploaded_for_version_identity_and_endpoint",
                 "gitAiVersion": version,
+                "installStatus": outcome.status.as_str(),
                 "userIdentitySource": identity.source.as_str(),
                 "markerKey": marker_key,
             }),
@@ -82,12 +157,15 @@ pub fn maybe_upload_install_success() {
         return;
     }
 
-    let payload = build_install_test_payload(&version, &identity);
+    let payload = build_install_test_payload(&version, &identity, &outcome);
     append_install_debug_event(
         "install_test_upload_started",
         json!({
             "url": url,
             "gitAiVersion": version,
+            "installStatus": outcome.status.as_str(),
+            "installFailureStage": outcome.failure_stage.as_deref(),
+            "installFailureReason": outcome.failure_reason.as_deref(),
             "gitVersion": git_version_string(),
             "osName": std::env::consts::OS,
             "osVersion": os_version_string(),
@@ -96,7 +174,7 @@ pub fn maybe_upload_install_success() {
         }),
     );
 
-    match send_install_test_payload(&url, &payload, &version, &identity) {
+    match send_install_test_payload(&url, &payload, &version, &identity, &outcome) {
         Ok(status_code) => {
             if let Some((marker_path, _)) = marker_paths.as_ref() {
                 match record_install_test_marker(
@@ -105,6 +183,7 @@ pub fn maybe_upload_install_success() {
                     &version,
                     &identity,
                     &url,
+                    &outcome,
                 ) {
                     Ok(()) => {}
                     Err(error) => append_install_debug_event(
@@ -112,6 +191,7 @@ pub fn maybe_upload_install_success() {
                         json!({
                             "error": error,
                             "gitAiVersion": version,
+                            "installStatus": outcome.status.as_str(),
                             "markerKey": marker_key,
                         }),
                     ),
@@ -123,6 +203,7 @@ pub fn maybe_upload_install_success() {
                     "url": url,
                     "statusCode": status_code,
                     "gitAiVersion": version,
+                    "installStatus": outcome.status.as_str(),
                     "markerKey": marker_key,
                 }),
             );
@@ -133,12 +214,64 @@ pub fn maybe_upload_install_success() {
                 "url": url,
                 "error": error,
                 "gitAiVersion": version,
+                "installStatus": outcome.status.as_str(),
+                "installFailureStage": outcome.failure_stage.as_deref(),
+                "installFailureReason": outcome.failure_reason.as_deref(),
                 "markerKey": marker_key,
             }),
         ),
     }
 
     drop(marker_lock);
+}
+
+fn parse_install_probe_outcome_from_cli_args(args: &[String]) -> InstallProbeOutcome {
+    let mut status: Option<String> = None;
+    let mut stage: Option<String> = None;
+    let mut reason: Option<String> = None;
+    let mut index = 0;
+
+    while index < args.len() {
+        let arg = &args[index];
+        match arg.as_str() {
+            "--status" => {
+                index += 1;
+                status = args.get(index).cloned();
+            }
+            "--stage" => {
+                index += 1;
+                stage = args.get(index).cloned();
+            }
+            "--reason" => {
+                index += 1;
+                reason = args.get(index).cloned();
+            }
+            _ if arg.starts_with("--status=") => {
+                status = Some(arg["--status=".len()..].to_string());
+            }
+            _ if arg.starts_with("--stage=") => {
+                stage = Some(arg["--stage=".len()..].to_string());
+            }
+            _ if arg.starts_with("--reason=") => {
+                reason = Some(arg["--reason=".len()..].to_string());
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+
+    match status
+        .unwrap_or_else(|| "success".to_string())
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "failed" | "failure" | "error" => InstallProbeOutcome::failed(
+            stage.unwrap_or_else(|| "installer".to_string()),
+            reason.unwrap_or_else(|| "unspecified install failure".to_string()),
+        ),
+        _ => InstallProbeOutcome::success(),
+    }
 }
 
 fn current_repo_workdir() -> Option<PathBuf> {
@@ -236,6 +369,16 @@ fn install_identity_candidate(
             }),
         );
         None
+    } else if is_reserved_install_identity(&value) {
+        append_install_debug_event(
+            "install_test_identity_rejected",
+            json!({
+                "reason": "reserved_install_probe_label",
+                "source": source.as_str(),
+                "value": value,
+            }),
+        );
+        None
     } else {
         Some(value)
     }
@@ -247,6 +390,21 @@ fn is_flag_shaped_install_identity(value: &str) -> bool {
         .strip_prefix('-')
         .and_then(|rest| rest.chars().next())
         .is_some_and(|ch| ch.is_ascii_alphabetic())
+}
+
+fn is_reserved_install_identity(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "git-ai installer"
+            | "git-ai-installer"
+            | "git-ai-install"
+            | "git-ai-install-test"
+            | "git-ai-rust"
+            | "git-ai-rust-install-test"
+            | "install-success"
+            | "upload-install-test.ps1"
+            | "windows-update-service-legacy"
+    )
 }
 
 fn git_user_email(repo_workdir: Option<&Path>) -> Option<String> {
@@ -309,7 +467,11 @@ fn local_ip_address() -> Option<String> {
     }
 }
 
-fn build_install_test_payload(version: &str, identity: &InstallUserIdentity) -> Value {
+fn build_install_test_payload(
+    version: &str,
+    identity: &InstallUserIdentity,
+    outcome: &InstallProbeOutcome,
+) -> Value {
     let now_ms = now_epoch_ms();
     let now_text = format_install_test_timestamp(Utc::now());
     let git_version = git_version_string();
@@ -318,84 +480,103 @@ fn build_install_test_payload(version: &str, identity: &InstallUserIdentity) -> 
     let os_version = os_version_string();
     let commit_sha = synthetic_commit_sha(version, &identity.value, now_ms);
     let identity_source = identity.source.as_str();
+    let install_status = outcome.status.as_str();
+    let install_branch = outcome.status.branch();
+    let install_label = if outcome.status == InstallProbeStatus::Success {
+        "success"
+    } else {
+        "failure"
+    };
+
+    let stats = json!({
+        "humanAdditions": 0,
+        "unknownAdditions": 0,
+        "mixedAdditions": 0,
+        "aiAdditions": 0,
+        "aiAccepted": 0,
+        "totalAiAdditions": 0,
+        "totalAiDeletions": 0,
+        "gitDiffAddedLines": 0,
+        "gitDiffDeletedLines": 0,
+        "timeWaitingForAi": 0,
+        "files": [],
+        "toolModelBreakdown": [{
+            "tool": "git-ai-installer",
+            "model": version,
+            "aiAdditions": 0,
+            "aiAccepted": 0,
+            "mixedAdditions": 0,
+            "totalAiAdditions": 0,
+            "totalAiDeletions": 0,
+            "timeWaitingForAi": 0,
+        }],
+    });
+    let custom_attributes = json!({
+        "gitAiVersion": version,
+        "gitVersion": git_version,
+        "osName": os_name,
+        "osVersion": os_version,
+        "osArch": os_arch,
+        "installTest": "true",
+        "source": INSTALL_TEST_SOURCE,
+        "installTestProducer": INSTALL_TEST_PRODUCER,
+        "installerScript": INSTALL_TEST_INSTALLER_SCRIPT,
+        "installUserIdentity": identity.value,
+        "installUserIdentitySource": identity_source,
+        "installStatus": install_status,
+        "installFailureStage": outcome.failure_stage.as_deref(),
+        "installFailureReason": outcome.failure_reason.as_deref(),
+    });
+    let prompt = json!({
+        "promptHash": commit_sha,
+        "tool": "git-ai-installer",
+        "model": version,
+        "humanAuthor": identity.value,
+        "promptText": format!("git-ai install {install_label} test. gitAiVersion={version}; installStatus={install_status}"),
+        "messages": [],
+        "messagesUrl": null,
+        "totalAdditions": 0,
+        "totalDeletions": 0,
+        "acceptedLines": 0,
+        "overridenLines": 0,
+        "customAttributes": custom_attributes,
+    });
+    let commit = json!({
+        "commitSha": commit_sha,
+        "commitMessage": format!("git-ai install {install_label} test ({version})"),
+        "author": identity.value,
+        "timestamp": now_text,
+        "hasAuthorshipNote": false,
+        "stats": stats,
+        "prompts": [prompt],
+    });
+    let client_context = json!({
+        "gitAiCliVersion": version,
+        "installTestProducer": INSTALL_TEST_PRODUCER,
+        "installerScript": INSTALL_TEST_INSTALLER_SCRIPT,
+        "gitAiPluginVersion": plugin_version(),
+        "ideName": ide_name(),
+        "ideVersion": ide_version(),
+        "gitVersion": git_version,
+        "osName": os_name,
+        "osVersion": os_version,
+        "osArch": os_arch,
+        "installUserIdentity": identity.value,
+        "installUserIdentitySource": identity_source,
+        "installStatus": install_status,
+        "installFailureStage": outcome.failure_stage.as_deref(),
+        "installFailureReason": outcome.failure_reason.as_deref(),
+    });
 
     json!({
         "repoUrl": "git-ai-install-test",
         "projectName": "git-ai-install",
-        "branch": "install-success",
+        "branch": install_branch,
         "source": INSTALL_TEST_SOURCE,
         "reviewDocumentId": null,
         "authorshipSchemaVersion": "authorship/3.0.0",
-        "clientContext": {
-            "gitAiCliVersion": version,
-            "installTestProducer": INSTALL_TEST_PRODUCER,
-            "installerScript": INSTALL_TEST_INSTALLER_SCRIPT,
-            "gitAiPluginVersion": plugin_version(),
-            "ideName": ide_name(),
-            "ideVersion": ide_version(),
-            "gitVersion": git_version,
-            "osName": os_name,
-            "osVersion": os_version,
-            "osArch": os_arch,
-            "installUserIdentity": identity.value,
-            "installUserIdentitySource": identity_source,
-        },
-        "commits": [{
-            "commitSha": commit_sha,
-            "commitMessage": format!("git-ai install success test ({version})"),
-            "author": identity.value,
-            "timestamp": now_text,
-            "hasAuthorshipNote": false,
-            "stats": {
-                "humanAdditions": 0,
-                "unknownAdditions": 0,
-                "mixedAdditions": 0,
-                "aiAdditions": 0,
-                "aiAccepted": 0,
-                "totalAiAdditions": 0,
-                "totalAiDeletions": 0,
-                "gitDiffAddedLines": 0,
-                "gitDiffDeletedLines": 0,
-                "timeWaitingForAi": 0,
-                "files": [],
-                "toolModelBreakdown": [{
-                    "tool": "git-ai-installer",
-                    "model": version,
-                    "aiAdditions": 0,
-                    "aiAccepted": 0,
-                    "mixedAdditions": 0,
-                    "totalAiAdditions": 0,
-                    "totalAiDeletions": 0,
-                    "timeWaitingForAi": 0,
-                }],
-            },
-            "prompts": [{
-                "promptHash": commit_sha,
-                "tool": "git-ai-installer",
-                "model": version,
-                "humanAuthor": identity.value,
-                "promptText": format!("git-ai install success test. gitAiVersion={version}"),
-                "messages": [],
-                "messagesUrl": null,
-                "totalAdditions": 0,
-                "totalDeletions": 0,
-                "acceptedLines": 0,
-                "overridenLines": 0,
-                "customAttributes": {
-                    "gitAiVersion": version,
-                    "gitVersion": git_version,
-                    "osName": os_name,
-                    "osVersion": os_version,
-                    "osArch": os_arch,
-                    "installTest": "true",
-                    "source": INSTALL_TEST_SOURCE,
-                    "installTestProducer": INSTALL_TEST_PRODUCER,
-                    "installerScript": INSTALL_TEST_INSTALLER_SCRIPT,
-                    "installUserIdentity": identity.value,
-                    "installUserIdentitySource": identity_source,
-                },
-            }],
-        }],
+        "clientContext": client_context,
+        "commits": [commit],
     })
 }
 
@@ -404,6 +585,7 @@ fn send_install_test_payload(
     payload: &Value,
     version: &str,
     identity: &InstallUserIdentity,
+    outcome: &InstallProbeOutcome,
 ) -> Result<u16, String> {
     let agent = http::build_agent(Some(UPLOAD_TIMEOUT_SECS));
     let mut request = agent
@@ -412,9 +594,17 @@ fn send_install_test_payload(
         .set("User-Agent", &format!("git-ai-install-test/{version}"))
         .set("X-GIT-AI-INSTALL-PRODUCER", INSTALL_TEST_PRODUCER)
         .set("X-GIT-AI-INSTALLER-SCRIPT", INSTALL_TEST_INSTALLER_SCRIPT)
+        .set("X-GIT-AI-INSTALL-STATUS", outcome.status.as_str())
         .set("X-Distinct-ID", &crate::config::get_or_create_distinct_id())
         .set("X-USER-ID", &identity.value)
         .set("X-GIT-AI-INSTALL-IDENTITY-SOURCE", identity.source.as_str());
+
+    if let Some(stage) = outcome.failure_stage.as_deref() {
+        request = request.set("X-GIT-AI-INSTALL-FAILURE-STAGE", stage);
+    }
+    if let Some(reason) = outcome.failure_reason.as_deref() {
+        request = request.set("X-GIT-AI-INSTALL-FAILURE-REASON", reason);
+    }
 
     match identity.source {
         InstallUserIdentitySource::GitEmail => {
@@ -625,6 +815,12 @@ struct InstallTestMarkers {
 struct InstallTestMarker {
     key: String,
     version: String,
+    #[serde(default)]
+    install_status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    install_failure_stage: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    install_failure_reason_hash: Option<String>,
     identity_source: String,
     identity_hash: String,
     upload_url_hash: String,
@@ -673,6 +869,7 @@ fn record_install_test_marker(
     version: &str,
     identity: &InstallUserIdentity,
     url: &str,
+    outcome: &InstallProbeOutcome,
 ) -> Result<(), String> {
     if let Some(parent) = marker_path.parent() {
         fs::create_dir_all(parent).map_err(|error| error.to_string())?;
@@ -684,6 +881,12 @@ fn record_install_test_marker(
     markers.uploads.push(InstallTestMarker {
         key: marker_key.to_string(),
         version: version.to_string(),
+        install_status: outcome.status.as_str().to_string(),
+        install_failure_stage: outcome.failure_stage.clone(),
+        install_failure_reason_hash: outcome
+            .failure_reason
+            .as_ref()
+            .map(|reason| short_sha256_hex(reason)),
         identity_source: identity.source.as_str().to_string(),
         identity_hash: short_sha256_hex(&identity.value),
         upload_url_hash: short_sha256_hex(url),
@@ -714,12 +917,24 @@ fn read_install_test_markers(marker_path: &Path) -> InstallTestMarkers {
     markers
 }
 
-fn install_test_marker_key(version: &str, identity: &InstallUserIdentity, url: &str) -> String {
+fn install_test_marker_key(
+    version: &str,
+    identity: &InstallUserIdentity,
+    url: &str,
+    outcome: &InstallProbeOutcome,
+) -> String {
     let mut hasher = Sha256::new();
     hasher.update(b"git-ai-install-test-marker-v1");
     hasher.update(INSTALL_TEST_PRODUCER.as_bytes());
     hasher.update(INSTALL_TEST_INSTALLER_SCRIPT.as_bytes());
     hasher.update(version.as_bytes());
+    hasher.update(outcome.status.as_str().as_bytes());
+    if let Some(stage) = outcome.failure_stage.as_deref() {
+        hasher.update(stage.as_bytes());
+    }
+    if let Some(reason) = outcome.failure_reason.as_deref() {
+        hasher.update(reason.as_bytes());
+    }
     hasher.update(identity.source.as_str().as_bytes());
     hasher.update(identity.value.as_bytes());
     hasher.update(url.as_bytes());
@@ -755,7 +970,8 @@ mod tests {
             value: "real-user-123".to_string(),
             source: InstallUserIdentitySource::McpUserId,
         };
-        let payload = build_install_test_payload("2.2.24", &identity);
+        let outcome = InstallProbeOutcome::success();
+        let payload = build_install_test_payload("2.2.24", &identity, &outcome);
         assert_eq!(payload["clientContext"]["gitAiCliVersion"], "2.2.24");
         assert_eq!(
             payload["clientContext"]["installTestProducer"],
@@ -776,6 +992,13 @@ mod tests {
             payload["clientContext"]["installUserIdentitySource"],
             "ide_mcp_config"
         );
+        assert_eq!(payload["clientContext"]["installStatus"], "success");
+        assert_eq!(payload["clientContext"]["installFailureStage"], Value::Null);
+        assert_eq!(
+            payload["clientContext"]["installFailureReason"],
+            Value::Null
+        );
+        assert_eq!(payload["branch"], "install-success");
         assert_eq!(payload["commits"][0]["author"], "real-user-123");
         let commit_sha = payload["commits"][0]["commitSha"].as_str().unwrap();
         let timestamp = payload["commits"][0]["timestamp"].as_str().unwrap();
@@ -803,6 +1026,46 @@ mod tests {
             payload["commits"][0]["prompts"][0]["customAttributes"]["installerScript"],
             INSTALL_TEST_INSTALLER_SCRIPT
         );
+        assert_eq!(
+            payload["commits"][0]["prompts"][0]["customAttributes"]["installStatus"],
+            "success"
+        );
+    }
+
+    #[test]
+    fn install_test_failure_payload_is_explicitly_distinguishable() {
+        let identity = InstallUserIdentity {
+            value: "real-user-123".to_string(),
+            source: InstallUserIdentitySource::McpUserId,
+        };
+        let outcome =
+            InstallProbeOutcome::failed("install-hooks", "git-ai install-hooks exited with code 1");
+        let payload = build_install_test_payload("2.2.24", &identity, &outcome);
+
+        assert_eq!(payload["branch"], "install-failed");
+        assert_eq!(payload["clientContext"]["installStatus"], "failed");
+        assert_eq!(
+            payload["clientContext"]["installFailureStage"],
+            "install-hooks"
+        );
+        assert_eq!(
+            payload["clientContext"]["installFailureReason"],
+            "git-ai install-hooks exited with code 1"
+        );
+        assert_eq!(
+            payload["commits"][0]["prompts"][0]["customAttributes"]["installStatus"],
+            "failed"
+        );
+        assert_eq!(
+            payload["commits"][0]["prompts"][0]["customAttributes"]["installFailureStage"],
+            "install-hooks"
+        );
+        assert!(
+            payload["commits"][0]["commitMessage"]
+                .as_str()
+                .unwrap()
+                .contains("install failure")
+        );
     }
 
     #[test]
@@ -821,14 +1084,21 @@ mod tests {
             value: "real-user-123".to_string(),
             source: InstallUserIdentitySource::McpUserId,
         };
+        let success = InstallProbeOutcome::success();
+        let failed = InstallProbeOutcome::failed("install-hooks", "exit 1");
 
-        let first = install_test_marker_key("2.2.32", &identity, "https://example.test/upload");
-        let second = install_test_marker_key("2.2.32", &identity, "https://example.test/upload");
+        let first =
+            install_test_marker_key("2.2.32", &identity, "https://example.test/upload", &success);
+        let second =
+            install_test_marker_key("2.2.32", &identity, "https://example.test/upload", &success);
         let different_version =
-            install_test_marker_key("2.2.33", &identity, "https://example.test/upload");
+            install_test_marker_key("2.2.33", &identity, "https://example.test/upload", &success);
+        let different_status =
+            install_test_marker_key("2.2.32", &identity, "https://example.test/upload", &failed);
 
         assert_eq!(first, second);
         assert_ne!(first, different_version);
+        assert_ne!(first, different_status);
     }
 
     #[test]
@@ -840,16 +1110,18 @@ mod tests {
             source: InstallUserIdentitySource::McpUserId,
         };
         let url = "https://example.test/upload";
-        let key = install_test_marker_key("2.2.32", &identity, url);
+        let outcome = InstallProbeOutcome::success();
+        let key = install_test_marker_key("2.2.32", &identity, url, &outcome);
 
         assert!(!install_test_marker_exists(&marker_path, &key));
-        record_install_test_marker(&marker_path, &key, "2.2.32", &identity, url).unwrap();
+        record_install_test_marker(&marker_path, &key, "2.2.32", &identity, url, &outcome).unwrap();
         assert!(install_test_marker_exists(&marker_path, &key));
 
-        record_install_test_marker(&marker_path, &key, "2.2.32", &identity, url).unwrap();
+        record_install_test_marker(&marker_path, &key, "2.2.32", &identity, url, &outcome).unwrap();
         let markers = read_install_test_markers(&marker_path);
         assert_eq!(markers.uploads.len(), 1);
         assert_eq!(markers.uploads[0].key, key);
+        assert_eq!(markers.uploads[0].install_status, "success");
         assert_eq!(markers.uploads[0].producer, INSTALL_TEST_PRODUCER);
         assert_eq!(
             markers.uploads[0].installer_script,
@@ -950,6 +1222,48 @@ mod tests {
         unsafe {
             std::env::set_var("GIT_AI_DEBUG", "0");
             std::env::set_var("GIT_AI_REPORT_REMOTE_USER_ID", "-BestEffort");
+            std::env::remove_var("GIT_AI_VSCODE_MCP_CONFIG_PATH");
+            std::env::remove_var("GIT_AI_IDEA_MCP_CONFIG_PATH");
+            std::env::set_var("APPDATA", temp_dir.path().join("appdata"));
+            std::env::set_var("LOCALAPPDATA", temp_dir.path().join("localappdata"));
+            std::env::set_var("GIT_CONFIG_NOSYSTEM", "1");
+            std::env::set_var(
+                "GIT_CONFIG_GLOBAL",
+                temp_dir.path().join("empty-global-gitconfig"),
+            );
+            std::env::remove_var("GIT_COMMITTER_EMAIL");
+            std::env::remove_var("GIT_AUTHOR_EMAIL");
+        }
+
+        let repo_workdir = repo_workdir_for_path(temp_dir.path());
+        let result = resolve_install_user_identity_with_ip(repo_workdir.as_deref(), || {
+            Some("192.0.2.10".to_string())
+        });
+        assert_eq!(
+            result,
+            InstallUserIdentity {
+                value: "repo-user-456".to_string(),
+                source: InstallUserIdentitySource::McpUserId,
+            }
+        );
+    }
+
+    #[test]
+    fn falls_back_to_mcp_when_env_identity_is_reserved_install_label() {
+        let _guard = EnvGuard::new();
+        let temp_dir = tempfile::tempdir().unwrap();
+
+        write_minimal_git_repo(temp_dir.path(), None);
+        std::fs::create_dir(temp_dir.path().join(".vscode")).unwrap();
+        std::fs::write(
+            temp_dir.path().join(".vscode").join("mcp.json"),
+            r#"{"servers":{"codereview-mcp":{"headers":{"X-USER-ID":"repo-user-456"}}}}"#,
+        )
+        .unwrap();
+
+        unsafe {
+            std::env::set_var("GIT_AI_DEBUG", "0");
+            std::env::set_var("GIT_AI_REPORT_REMOTE_USER_ID", "git-ai installer");
             std::env::remove_var("GIT_AI_VSCODE_MCP_CONFIG_PATH");
             std::env::remove_var("GIT_AI_IDEA_MCP_CONFIG_PATH");
             std::env::set_var("APPDATA", temp_dir.path().join("appdata"));

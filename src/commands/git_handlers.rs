@@ -24,8 +24,39 @@ fn should_run_post_commit_followups(parsed: &ParsedGitInvocation, command_succee
     command_succeeded && parsed.command.as_deref() == Some("commit")
 }
 
+fn run_post_commit_followups(
+    parsed: &ParsedGitInvocation,
+    repository: Option<&Repository>,
+    show_async_stats: bool,
+    fallback_upload_source: &str,
+) {
+    if show_async_stats && let Some(repo) = repository {
+        maybe_show_async_post_commit_stats(parsed, repo);
+    }
+
+    // Start the current commit's dashboard upload before scheduling a background
+    // self-update. The update worker may stop/restart git-ai services during
+    // install, so the upload must get the first chance to acquire its activity
+    // lock and persist this commit's status.
+    maybe_spawn_post_commit_fallback_upload(repository, fallback_upload_source);
+    crate::commands::upgrade::maybe_schedule_background_update_check_after_commit();
+}
+
 const FALLBACK_UPLOAD_WAIT_FOR_AUTHORSHIP_NOTE_MS: &str = "5000";
 const FALLBACK_UPLOAD_GUARD_ENV: &str = "GIT_AI_POST_COMMIT_FALLBACK_UPLOAD_SPAWNED";
+
+fn post_commit_fallback_upload_args(commit_sha: &str, source: &str) -> Vec<String> {
+    vec![
+        "upload-stats".to_string(),
+        commit_sha.to_string(),
+        "--source".to_string(),
+        source.to_string(),
+        "--wait-for-authorship-note-ms".to_string(),
+        FALLBACK_UPLOAD_WAIT_FOR_AUTHORSHIP_NOTE_MS.to_string(),
+        "--skip-if-already-uploaded".to_string(),
+        "--acquire-activity-lock-before-stats".to_string(),
+    ]
+}
 
 #[cfg(unix)]
 extern "C" fn forward_signal_handler(sig: libc::c_int) {
@@ -162,8 +193,7 @@ pub fn handle_git(args: &[String]) {
         );
         let exit_status = proxy_to_git(args, false, None);
         if should_run_post_commit_followups(&parsed, exit_status.success()) {
-            crate::commands::upgrade::maybe_schedule_background_update_check_after_commit();
-            maybe_spawn_post_commit_fallback_upload(repository.as_ref(), "wrapper_no_daemon");
+            run_post_commit_followups(&parsed, repository.as_ref(), false, "wrapper_no_daemon");
         }
         exit_with_status(exit_status);
     }
@@ -200,11 +230,7 @@ pub fn handle_git(args: &[String]) {
     // After a successful commit, wait briefly for the daemon to produce an
     // authorship note so we can show stats inline (same UX as plain wrapper mode).
     if should_run_post_commit_followups(&parsed, exit_status.success()) {
-        crate::commands::upgrade::maybe_schedule_background_update_check_after_commit();
-        if let Some(repo) = repository.as_ref() {
-            maybe_show_async_post_commit_stats(&parsed, repo);
-        }
-        maybe_spawn_post_commit_fallback_upload(repository.as_ref(), "wrapper_post_commit");
+        run_post_commit_followups(&parsed, repository.as_ref(), true, "wrapper_post_commit");
     }
 
     exit_with_status(exit_status);
@@ -460,13 +486,7 @@ fn maybe_spawn_post_commit_fallback_upload(repo: Option<&Repository>, source: &s
 
     let mut cmd = Command::new(exe);
     cmd.current_dir(&workdir)
-        .arg("upload-stats")
-        .arg(&commit_sha)
-        .arg("--source")
-        .arg(source)
-        .arg("--wait-for-authorship-note-ms")
-        .arg(FALLBACK_UPLOAD_WAIT_FOR_AUTHORSHIP_NOTE_MS)
-        .arg("--skip-if-authorship-note-found")
+        .args(post_commit_fallback_upload_args(&commit_sha, source))
         .env(crate::commands::git_hook_handlers::ENV_SKIP_ALL_HOOKS, "1")
         .env(FALLBACK_UPLOAD_GUARD_ENV, "1")
         .stdout(Stdio::null())
@@ -574,6 +594,22 @@ mod tests {
         assert!(should_run_post_commit_followups(&commit, true));
         assert!(!should_run_post_commit_followups(&commit, false));
         assert!(!should_run_post_commit_followups(&push, true));
+    }
+
+    #[test]
+    fn post_commit_fallback_upload_waits_for_note_but_does_not_skip_on_note_found() {
+        let args = post_commit_fallback_upload_args(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "wrapper_post_commit",
+        );
+
+        assert!(args.contains(&"--wait-for-authorship-note-ms".to_string()));
+        assert!(args.contains(&"--skip-if-already-uploaded".to_string()));
+        assert!(args.contains(&"--acquire-activity-lock-before-stats".to_string()));
+        assert!(
+            !args.contains(&"--skip-if-authorship-note-found".to_string()),
+            "fallback upload must still upload this commit after the daemon writes its note"
+        );
     }
 }
 

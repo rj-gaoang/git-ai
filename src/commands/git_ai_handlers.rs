@@ -107,6 +107,7 @@ pub fn handle_git_ai(args: &[String]) {
             | "upgrade"
             | "install-hooks"
             | "install"
+            | "post-install-probe"
             | "uninstall-hooks"
     );
     if needs_daemon {
@@ -216,6 +217,11 @@ pub fn handle_git_ai(args: &[String]) {
                 std::process::exit(1);
             }
         },
+        "post-install-probe" => {
+            crate::integration::install_test_upload::maybe_upload_install_probe_from_cli_args(
+                &args[1..],
+            );
+        }
         "uninstall-hooks" => match commands::install_hooks::run_uninstall(&args[1..]) {
             Ok(statuses) => {
                 if let Ok(statuses_value) = serde_json::to_value(&statuses) {
@@ -419,6 +425,7 @@ fn print_help() {
     eprintln!("    --skills               Also install agent skill files");
     eprintln!("    --visual-studio-extension");
     eprintln!("                           Also install the Visual Studio extension on Windows");
+    eprintln!("  post-install-probe Internal command used by installers to report install outcome");
     eprintln!("  uninstall-hooks    Remove git-ai hooks from all detected tools");
     eprintln!("  ci                 Continuous integration utilities");
     eprintln!("    github                 GitHub CI helpers");
@@ -1124,6 +1131,8 @@ struct UploadStatsArgs {
     ignore_patterns: Vec<String>,
     wait_for_authorship_note_ms: Option<u64>,
     skip_if_authorship_note_found: bool,
+    skip_if_already_uploaded: bool,
+    acquire_activity_lock_before_stats: bool,
 }
 
 fn handle_upload_stats(args: &[String]) {
@@ -1198,6 +1207,10 @@ fn handle_upload_stats(args: &[String]) {
             &effective_patterns,
             parsed.dry_run,
             &parsed.source,
+            crate::integration::upload_stats::UploadLocalCommitStatsOptions {
+                skip_if_already_uploaded: parsed.skip_if_already_uploaded,
+                acquire_activity_lock_before_stats: parsed.acquire_activity_lock_before_stats,
+            },
         ) {
             Ok(crate::integration::upload_stats::ManualUploadOutcome::DryRun {
                 commit_sha,
@@ -1269,6 +1282,8 @@ fn parse_upload_stats_args(args: &[String]) -> Result<UploadStatsArgs, String> {
     let mut ignore_patterns = Vec::new();
     let mut wait_for_authorship_note_ms = None;
     let mut skip_if_authorship_note_found = false;
+    let mut skip_if_already_uploaded = false;
+    let mut acquire_activity_lock_before_stats = false;
     let mut commit_revs = Vec::new();
 
     let mut i = 0;
@@ -1311,6 +1326,14 @@ fn parse_upload_stats_args(args: &[String]) -> Result<UploadStatsArgs, String> {
                 skip_if_authorship_note_found = true;
                 i += 1;
             }
+            "--skip-if-already-uploaded" => {
+                skip_if_already_uploaded = true;
+                i += 1;
+            }
+            "--acquire-activity-lock-before-stats" => {
+                acquire_activity_lock_before_stats = true;
+                i += 1;
+            }
             value if value.starts_with("--") => {
                 return Err(format!("unknown upload-stats flag: {}", value));
             }
@@ -1332,6 +1355,8 @@ fn parse_upload_stats_args(args: &[String]) -> Result<UploadStatsArgs, String> {
         ignore_patterns,
         wait_for_authorship_note_ms,
         skip_if_authorship_note_found,
+        skip_if_already_uploaded,
+        acquire_activity_lock_before_stats,
     })
 }
 
@@ -1639,6 +1664,8 @@ mod tests {
         assert!(parsed.ignore_patterns.is_empty());
         assert_eq!(parsed.wait_for_authorship_note_ms, None);
         assert!(!parsed.skip_if_authorship_note_found);
+        assert!(!parsed.skip_if_already_uploaded);
+        assert!(!parsed.acquire_activity_lock_before_stats);
     }
 
     #[test]
@@ -1652,6 +1679,8 @@ mod tests {
             "--wait-for-authorship-note-ms".to_string(),
             "1234".to_string(),
             "--skip-if-authorship-note-found".to_string(),
+            "--skip-if-already-uploaded".to_string(),
+            "--acquire-activity-lock-before-stats".to_string(),
             "head~1".to_string(),
             "abc1234".to_string(),
         ];
@@ -1662,6 +1691,8 @@ mod tests {
         assert_eq!(parsed.ignore_patterns, vec!["Cargo.lock"]);
         assert_eq!(parsed.wait_for_authorship_note_ms, Some(1234));
         assert!(parsed.skip_if_authorship_note_found);
+        assert!(parsed.skip_if_already_uploaded);
+        assert!(parsed.acquire_activity_lock_before_stats);
         assert_eq!(parsed.commit_revs, vec!["HEAD~1", "abc1234"]);
     }
 

@@ -735,12 +735,52 @@ fn windows_install_script_allows_git_ai_rust_install_probe_during_service_update
         "install.ps1 should temporarily clear inherited service skip env for install-hooks"
     );
     assert!(
+        script.contains("$env:GIT_AI_DEFER_INSTALL_HOOKS_PROBE = '1'"),
+        "install.ps1 should defer install-hooks probes until the full installer result is known"
+    );
+    assert!(
+        script.contains("function Invoke-GitAiPostInstallProbe"),
+        "install.ps1 should expose a standalone install probe wrapper"
+    );
+    assert!(
         script.contains("[string]::IsNullOrWhiteSpace($env:GIT_AI_TEST_DB_PATH)"),
         "install.ps1 should keep test database environments from uploading install probes"
     );
     assert!(
         script.contains("Invoke-GitAiInstallHooks -GitAiExe $launcherExe"),
         "install.ps1 should call install-hooks through the environment-isolating wrapper"
+    );
+    assert!(
+        script.contains("Invoke-GitAiPostInstallProbe -GitAiExe $launcherExe -Status 'failed' -Stage 'install-hooks' -Reason $installHooksError"),
+        "install.ps1 should send a distinguishable failed-install probe when hook setup fails"
+    );
+    assert!(
+        script.contains("Invoke-GitAiPostInstallProbe -GitAiExe $launcherExe -Status 'success'"),
+        "install.ps1 should send success probes only after the full installer reports success"
+    );
+    assert!(
+        script.contains("$installHooksSucceeded = $false")
+            && script.contains("$installHooksSucceeded = $true")
+            && script.contains("if ($installHooksSucceeded)"),
+        "install.ps1 should not send a success probe after hook setup failed"
+    );
+    assert!(
+        script.contains("throw \"git-ai install-hooks exited with code $LASTEXITCODE\""),
+        "install.ps1 should treat native install-hooks nonzero exit codes as hook setup failures"
+    );
+    assert!(
+        script.contains("throw \"git-ai post-install-probe exited with code $LASTEXITCODE\""),
+        "install.ps1 should treat native post-install-probe nonzero exit codes as probe failures"
+    );
+    let hook_call = script
+        .find("Invoke-GitAiInstallHooks -GitAiExe $launcherExe")
+        .expect("install-hooks wrapper call should exist");
+    let probe_call = script
+        .find("Invoke-GitAiPostInstallProbe -GitAiExe $launcherExe -Status 'success'")
+        .expect("post-install-probe wrapper call should exist");
+    assert!(
+        hook_call < probe_call,
+        "success install probe should run after hook setup and final installer success output"
     );
     assert!(
         !script.contains("& $launcherExe install-hooks | Out-Host"),

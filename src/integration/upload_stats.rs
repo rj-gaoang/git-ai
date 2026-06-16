@@ -191,6 +191,12 @@ pub enum ManualUploadOutcome {
     },
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct UploadLocalCommitStatsOptions {
+    pub skip_if_already_uploaded: bool,
+    pub acquire_activity_lock_before_stats: bool,
+}
+
 #[derive(Debug, Clone)]
 struct UploadDebugContext {
     commit_sha: String,
@@ -484,6 +490,13 @@ fn note_blob_oid_for_commit(repo: &Repository, commit_sha: &str) -> Option<Strin
     note_blob_oids_for_commits(repo, &[commit_sha.to_string()])
         .ok()
         .and_then(|mut notes| notes.remove(commit_sha))
+}
+
+fn note_already_uploaded(index: &UploadStatusIndex, commit_sha: &str, note_blob_oid: &str) -> bool {
+    index.notes.get(commit_sha).is_some_and(|record| {
+        record.upload_status == NoteUploadStatus::Succeeded
+            && record.note_blob_oid.as_deref() == Some(note_blob_oid)
+    })
 }
 
 fn sync_reachable_note_statuses(
@@ -960,6 +973,7 @@ pub fn upload_local_commit_stats(
     ignore_patterns: &[String],
     dry_run: bool,
     source: &str,
+    options: UploadLocalCommitStatsOptions,
 ) -> Result<ManualUploadOutcome, String> {
     let commit_short = short_sha(commit_sha).to_string();
     crate::diagnostics::append_debug_event(
@@ -974,6 +988,7 @@ pub fn upload_local_commit_stats(
         }),
     );
 
+    let note_blob_oid = note_blob_oid_for_commit(repo, commit_sha);
     let Some(authorship_log) = get_authorship(repo, commit_sha) else {
         return upload_local_commit_stats_without_authorship_note(
             repo,
@@ -981,6 +996,7 @@ pub fn upload_local_commit_stats(
             ignore_patterns,
             dry_run,
             source,
+            options,
         );
     };
 
@@ -995,6 +1011,52 @@ pub fn upload_local_commit_stats(
             "attestationFileCount": authorship_log.attestations.len(),
         }),
     );
+
+    let debug_context = UploadDebugContext {
+        commit_sha: commit_sha.to_string(),
+        commit_short: commit_short.clone(),
+        source: source.to_string(),
+        mode: if dry_run {
+            "manual_dry_run".to_string()
+        } else {
+            "manual".to_string()
+        },
+    };
+
+    let mut upload_activity_lock = None;
+    if options.acquire_activity_lock_before_stats {
+        upload_activity_lock = Some(acquire_upload_activity_lock(&debug_context)?);
+    }
+
+    let mut status_index = None;
+    if options.skip_if_already_uploaded {
+        let _upload_activity_lock = match upload_activity_lock.take() {
+            Some(lock) => lock,
+            None => acquire_upload_activity_lock(&debug_context)?,
+        };
+        let loaded_status_index = load_upload_status_index(repo);
+        if let Some(note_blob_oid) = note_blob_oid.as_deref()
+            && note_already_uploaded(&loaded_status_index, commit_sha, note_blob_oid)
+        {
+            crate::diagnostics::append_debug_event(
+                "upload_stats_skipped",
+                json!({
+                    "reason": "already_uploaded",
+                    "source": source,
+                    "commitSha": commit_sha,
+                    "commitShort": commit_short,
+                    "repo": repo.canonical_workdir().to_string_lossy().to_string(),
+                    "mode": if dry_run { "manual_dry_run" } else { "manual" },
+                }),
+            );
+            return Ok(ManualUploadOutcome::Skipped {
+                commit_sha: commit_sha.to_string(),
+                reason: "already_uploaded",
+            });
+        }
+        upload_activity_lock = Some(_upload_activity_lock);
+        status_index = Some(loaded_status_index);
+    }
 
     let stats = stats_for_commit_stats(repo, commit_sha, ignore_patterns).map_err(|err| {
         let error = err.to_string();
@@ -1043,19 +1105,11 @@ pub fn upload_local_commit_stats(
         .clone()
         .or_else(|| resolve_x_user_id(Some(repo.canonical_workdir())));
 
-    let debug_context = UploadDebugContext {
-        commit_sha: commit_sha.to_string(),
-        commit_short: commit_short.clone(),
-        source: source.to_string(),
-        mode: if dry_run {
-            "manual_dry_run".to_string()
-        } else {
-            "manual".to_string()
-        },
+    let _upload_activity_lock = match upload_activity_lock.take() {
+        Some(lock) => lock,
+        None => acquire_upload_activity_lock(&debug_context)?,
     };
-
-    let _upload_activity_lock = acquire_upload_activity_lock(&debug_context)?;
-    let mut status_index = load_upload_status_index(repo);
+    let mut status_index = status_index.unwrap_or_else(|| load_upload_status_index(repo));
     let seeds = vec![UploadCandidateSeed {
         commit_sha: commit_sha.to_string(),
         authorship_log: Some(authorship_log.clone()),
@@ -2055,6 +2109,7 @@ fn upload_local_commit_stats_without_authorship_note(
     ignore_patterns: &[String],
     dry_run: bool,
     source: &str,
+    options: UploadLocalCommitStatsOptions,
 ) -> Result<ManualUploadOutcome, String> {
     let commit_short = short_sha(commit_sha).to_string();
     crate::diagnostics::append_debug_event(
@@ -2068,6 +2123,22 @@ fn upload_local_commit_stats_without_authorship_note(
             "effect": "uploading metadata-only stats with hasAuthorshipNote=false",
         }),
     );
+
+    let debug_context = UploadDebugContext {
+        commit_sha: commit_sha.to_string(),
+        commit_short: commit_short.clone(),
+        source: source.to_string(),
+        mode: if dry_run {
+            "manual_dry_run_missing_note".to_string()
+        } else {
+            "manual_missing_note".to_string()
+        },
+    };
+
+    let mut upload_activity_lock = None;
+    if options.acquire_activity_lock_before_stats {
+        upload_activity_lock = Some(acquire_upload_activity_lock(&debug_context)?);
+    }
 
     let stats = fallback_stats_without_authorship_note(repo, commit_sha, ignore_patterns)?;
     crate::diagnostics::append_debug_event(
@@ -2102,18 +2173,10 @@ fn upload_local_commit_stats_without_authorship_note(
         .clone()
         .or_else(|| resolve_x_user_id(Some(repo.canonical_workdir())));
 
-    let debug_context = UploadDebugContext {
-        commit_sha: commit_sha.to_string(),
-        commit_short: commit_short.clone(),
-        source: source.to_string(),
-        mode: if dry_run {
-            "manual_dry_run_missing_note".to_string()
-        } else {
-            "manual_missing_note".to_string()
-        },
+    let _upload_activity_lock = match upload_activity_lock.take() {
+        Some(lock) => lock,
+        None => acquire_upload_activity_lock(&debug_context)?,
     };
-
-    let _upload_activity_lock = acquire_upload_activity_lock(&debug_context)?;
     crate::diagnostics::append_debug_event(
         "upload_stats_ready",
         json!({
@@ -2941,6 +3004,22 @@ mod tests {
         assert_eq!(record.note_blob_oid.as_deref(), Some("new-blob"));
         assert_eq!(record.last_status_code, None);
         assert_eq!(record.last_error, None);
+    }
+
+    #[test]
+    fn note_already_uploaded_requires_matching_successful_note_blob() {
+        let mut index = UploadStatusIndex::default();
+        let commit_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+        ensure_note_status_record(&mut index, commit_sha, Some("blob-a".to_string()), 1);
+        mark_upload_succeeded(&mut index, &[commit_sha.to_string()], 200, 2);
+
+        assert!(note_already_uploaded(&index, commit_sha, "blob-a"));
+        assert!(!note_already_uploaded(&index, commit_sha, "blob-b"));
+
+        ensure_note_status_record(&mut index, commit_sha, Some("blob-b".to_string()), 3);
+
+        assert!(!note_already_uploaded(&index, commit_sha, "blob-b"));
     }
 
     #[test]

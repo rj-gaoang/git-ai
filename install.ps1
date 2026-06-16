@@ -430,13 +430,61 @@ function Invoke-GitAiInstallHooks {
 
     $hadSkipInstallTestUpload = Test-Path Env:GIT_AI_SKIP_INSTALL_TEST_UPLOAD
     $originalSkipInstallTestUpload = $env:GIT_AI_SKIP_INSTALL_TEST_UPLOAD
+    $hadDeferInstallHooksProbe = Test-Path Env:GIT_AI_DEFER_INSTALL_HOOKS_PROBE
+    $originalDeferInstallHooksProbe = $env:GIT_AI_DEFER_INSTALL_HOOKS_PROBE
+
+    try {
+        if ($env:GIT_AI_SKIP_INSTALL_TEST_UPLOAD -eq '1' -and [string]::IsNullOrWhiteSpace($env:GIT_AI_TEST_DB_PATH)) {
+            Remove-Item Env:GIT_AI_SKIP_INSTALL_TEST_UPLOAD -ErrorAction SilentlyContinue
+        }
+        $env:GIT_AI_DEFER_INSTALL_HOOKS_PROBE = '1'
+
+        & $GitAiExe install-hooks | Out-Host
+        if ($LASTEXITCODE -ne 0) {
+            throw "git-ai install-hooks exited with code $LASTEXITCODE"
+        }
+    } finally {
+        if ($hadSkipInstallTestUpload) {
+            $env:GIT_AI_SKIP_INSTALL_TEST_UPLOAD = $originalSkipInstallTestUpload
+        } else {
+            Remove-Item Env:GIT_AI_SKIP_INSTALL_TEST_UPLOAD -ErrorAction SilentlyContinue
+        }
+        if ($hadDeferInstallHooksProbe) {
+            $env:GIT_AI_DEFER_INSTALL_HOOKS_PROBE = $originalDeferInstallHooksProbe
+        } else {
+            Remove-Item Env:GIT_AI_DEFER_INSTALL_HOOKS_PROBE -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Invoke-GitAiPostInstallProbe {
+    param(
+        [Parameter(Mandatory = $true)][string]$GitAiExe,
+        [Parameter(Mandatory = $false)][string]$Status = 'success',
+        [Parameter(Mandatory = $false)][string]$Stage = '',
+        [Parameter(Mandatory = $false)][string]$Reason = ''
+    )
+
+    $hadSkipInstallTestUpload = Test-Path Env:GIT_AI_SKIP_INSTALL_TEST_UPLOAD
+    $originalSkipInstallTestUpload = $env:GIT_AI_SKIP_INSTALL_TEST_UPLOAD
 
     try {
         if ($env:GIT_AI_SKIP_INSTALL_TEST_UPLOAD -eq '1' -and [string]::IsNullOrWhiteSpace($env:GIT_AI_TEST_DB_PATH)) {
             Remove-Item Env:GIT_AI_SKIP_INSTALL_TEST_UPLOAD -ErrorAction SilentlyContinue
         }
 
-        & $GitAiExe install-hooks | Out-Host
+        $probeArgs = @('post-install-probe', '--status', $Status)
+        if (-not [string]::IsNullOrWhiteSpace($Stage)) {
+            $probeArgs += @('--stage', $Stage)
+        }
+        if (-not [string]::IsNullOrWhiteSpace($Reason)) {
+            $probeArgs += @('--reason', $Reason)
+        }
+
+        & $GitAiExe @probeArgs | Out-Host
+        if ($LASTEXITCODE -ne 0) {
+            throw "git-ai post-install-probe exited with code $LASTEXITCODE"
+        }
     } finally {
         if ($hadSkipInstallTestUpload) {
             $env:GIT_AI_SKIP_INSTALL_TEST_UPLOAD = $originalSkipInstallTestUpload
@@ -981,11 +1029,19 @@ if ($env:INSTALL_NONCE -and $env:API_BASE) {
 
 # Install hooks
 Write-Host 'Setting up IDE/agent hooks...'
+$installHooksSucceeded = $false
 try {
     Invoke-GitAiInstallHooks -GitAiExe $launcherExe
+    $installHooksSucceeded = $true
     Write-Success 'Successfully set up IDE/agent hooks'
 } catch {
+    $installHooksError = $_.Exception.Message
     Write-Warning "Warning: Failed to set up IDE/agent hooks. Please try running 'git-ai install-hooks' manually."
+    try {
+        Invoke-GitAiPostInstallProbe -GitAiExe $launcherExe -Status 'failed' -Stage 'install-hooks' -Reason $installHooksError
+    } catch {
+        Write-Warning "Warning: Failed to send git-ai failed-install probe. Dashboard install telemetry may be delayed."
+    }
 }
 
 # Best-effort restart only for daemon-initiated self-updates.
@@ -1011,6 +1067,14 @@ if ($pathUpdate.UserStatus -eq 'Updated') {
 Write-Success "Successfully installed git-ai into $launcherDir"
 Write-Success "Synchronized compatibility entrypoint into $installDir"
 Write-Success "You can now run 'git-ai' from your terminal"
+
+if ($installHooksSucceeded) {
+    try {
+        Invoke-GitAiPostInstallProbe -GitAiExe $launcherExe -Status 'success'
+    } catch {
+        Write-Warning "Warning: Failed to send git-ai install success probe. Dashboard install telemetry may be delayed."
+    }
+}
 
 # Configure Git Bash shell profiles so git-ai takes precedence over /mingw64/bin/git
 # Git Bash (MSYS2/MinGW) prepends its own directories to PATH, which shadows

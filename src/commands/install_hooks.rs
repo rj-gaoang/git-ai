@@ -457,21 +457,42 @@ pub fn run(args: &[String]) -> Result<HashMap<String, String>, GitAiError> {
         let _ = crate::daemon::telemetry_handle::init_daemon_telemetry_handle();
     }
 
-    // Get absolute path to the current binary
-    let binary_path = get_current_binary_path()?;
-    persist_install_config(&binary_path, options.dry_run)?;
+    // Get absolute path to the current binary. Do not let canonicalization or
+    // install-time config persistence block hook/trace2 setup.
+    let binary_path = current_binary_path_for_install();
+    persist_install_config_best_effort(&binary_path, options.dry_run);
     let params = HookInstallerParams { binary_path };
 
-    // Run async operations with smol and convert result
-    let statuses = smol::block_on(async_run_install(&params, &options))?;
+    // Run async operations with smol and convert result before emitting the
+    // install probe, so success telemetry only means hook setup completed.
+    let statuses = smol::block_on(async_run_install(&params, &options));
 
     // Clean up legacy envelope logs directory and related artifacts.
     // These are no longer used — all telemetry now routes through the daemon.
     if !options.dry_run {
         cleanup_legacy_envelope_logs();
-        crate::integration::install_test_upload::maybe_upload_install_success();
     }
 
+    let defer_install_probe =
+        std::env::var("GIT_AI_DEFER_INSTALL_HOOKS_PROBE").as_deref() == Ok("1");
+
+    let statuses = match statuses {
+        Ok(statuses) => {
+            if !options.dry_run && !defer_install_probe {
+                crate::integration::install_test_upload::maybe_upload_install_success();
+            }
+            statuses
+        }
+        Err(error) => {
+            if !options.dry_run && !defer_install_probe {
+                crate::integration::install_test_upload::maybe_upload_install_failure(
+                    "install-hooks",
+                    error.to_string(),
+                );
+            }
+            return Err(error);
+        }
+    };
     Ok(to_hashmap(statuses))
 }
 
@@ -493,6 +514,36 @@ fn parse_install_options(args: &[String]) -> InstallOptions {
 
 fn should_include_installer(id: &str, options: &InstallOptions) -> bool {
     options.include_visual_studio_extension || id != VISUAL_STUDIO_INSTALLER_ID
+}
+
+fn current_binary_path_for_install() -> PathBuf {
+    match get_current_binary_path() {
+        Ok(path) => path,
+        Err(error) => {
+            let fallback = std::env::current_exe().unwrap_or_else(|_| {
+                PathBuf::from(if cfg!(windows) {
+                    "git-ai.exe"
+                } else {
+                    "git-ai"
+                })
+            });
+            eprintln!(
+                "Warning: could not canonicalize git-ai binary path (non-fatal): {error}; using {}",
+                fallback.display()
+            );
+            fallback
+        }
+    }
+}
+
+fn persist_install_config_best_effort(binary_path: &Path, dry_run: bool) -> bool {
+    match persist_install_config(binary_path, dry_run) {
+        Ok(changed) => changed,
+        Err(error) => {
+            eprintln!("Warning: could not persist install config (non-fatal): {error}");
+            false
+        }
+    }
 }
 
 fn persist_install_config(binary_path: &Path, dry_run: bool) -> Result<bool, GitAiError> {
@@ -1417,6 +1468,34 @@ mod tests {
             Some("https://enterprise.example")
         );
         assert_eq!(config.api_key.as_deref(), Some("sk-enterprise-key-12345"));
+    }
+
+    #[test]
+    #[serial]
+    fn persist_install_config_best_effort_ignores_invalid_existing_config() {
+        let temp = tempdir().unwrap();
+        let install_dir = temp.path().join("bin");
+        fs::create_dir_all(&install_dir).unwrap();
+        fs::write(test_binary_path(&install_dir), "").unwrap();
+
+        let config_dir = temp.path().join(".git-ai");
+        fs::create_dir_all(&config_dir).unwrap();
+        fs::write(config_dir.join("config.json"), b"{not valid json").unwrap();
+
+        let _home = EnvVarGuard::set("HOME", temp.path().to_str().unwrap());
+        #[cfg(windows)]
+        let _userprofile = EnvVarGuard::set("USERPROFILE", temp.path().to_str().unwrap());
+        let _api_base = EnvVarGuard::set("API_BASE", "https://enterprise.example");
+        let _api_key = EnvVarGuard::remove("API_KEY");
+
+        assert!(
+            persist_install_config(&test_binary_path(&install_dir), false).is_err(),
+            "invalid existing config should still reproduce the underlying persistence failure"
+        );
+        assert!(
+            !persist_install_config_best_effort(&test_binary_path(&install_dir), false),
+            "install-hooks should ignore non-critical config persistence failures"
+        );
     }
 
     #[cfg(windows)]

@@ -1,5 +1,8 @@
+use crate::repos::test_file::ExpectedLineExt;
 use crate::repos::test_repo::TestRepo;
+use git_ai::authorship::attribution_tracker::LineAttribution;
 use git_ai::authorship::authorship_log_serialization::AuthorshipLog;
+use git_ai::authorship::working_log::{Checkpoint, CheckpointKind, WorkingLogEntry};
 
 #[test]
 fn test_post_commit_empty_repo_with_checkpoint() {
@@ -35,6 +38,124 @@ fn test_post_commit_empty_repo_with_checkpoint() {
         note_result.is_some(),
         "post_commit should handle empty repo without errors"
     );
+}
+
+#[test]
+fn test_legacy_human_batch_with_known_human_adjustment_fills_ai_gaps() {
+    let repo = TestRepo::new();
+
+    std::fs::write(repo.path().join("seed.txt"), "seed\n").unwrap();
+    repo.git(&["add", "seed.txt"]).unwrap();
+    repo.stage_all_and_commit("Initial commit").unwrap();
+
+    std::fs::write(repo.path().join("ai_a.java"), "class A {}\n").unwrap();
+    std::fs::write(repo.path().join("ai_b.java"), "class B {}\n").unwrap();
+    std::fs::write(repo.path().join("mixed.java"), "class M {}\nmanual tweak\n").unwrap();
+
+    let working_log = repo.current_working_logs();
+    let ai_a_blob = working_log.persist_file_version("class A {}\n").unwrap();
+    let ai_b_blob = working_log.persist_file_version("class B {}\n").unwrap();
+    let mixed_blob = working_log
+        .persist_file_version("class M {}\nmanual tweak\n")
+        .unwrap();
+    let legacy_entries = vec![
+        WorkingLogEntry::new("ai_a.java".to_string(), ai_a_blob, vec![], vec![]),
+        WorkingLogEntry::new("ai_b.java".to_string(), ai_b_blob, vec![], vec![]),
+        WorkingLogEntry::new("mixed.java".to_string(), mixed_blob.clone(), vec![], vec![]),
+    ];
+    let legacy_checkpoint = Checkpoint::new(
+        CheckpointKind::Human,
+        String::new(),
+        "v-xujianfeng1".to_string(),
+        legacy_entries,
+    );
+    let known_human_checkpoint = Checkpoint::new(
+        CheckpointKind::KnownHuman,
+        String::new(),
+        "v-xujianfeng1".to_string(),
+        vec![WorkingLogEntry::new(
+            "mixed.java".to_string(),
+            mixed_blob,
+            vec![],
+            vec![LineAttribution {
+                start_line: 2,
+                end_line: 2,
+                author_id:
+                    git_ai::authorship::authorship_log_serialization::generate_human_short_hash(
+                        "v-xujianfeng1",
+                    ),
+                overrode: None,
+            }],
+        )],
+    );
+    working_log
+        .write_all_checkpoints(&[legacy_checkpoint, known_human_checkpoint])
+        .unwrap();
+
+    repo.git(&["add", "ai_a.java", "ai_b.java", "mixed.java"])
+        .unwrap();
+    repo.stage_all_and_commit("Legacy Copilot batch plus manual tweak")
+        .unwrap();
+
+    let stats = repo.stats().unwrap();
+    assert_eq!(stats.git_diff_added_lines, 4);
+    assert_eq!(stats.ai_additions, 3);
+    assert_eq!(stats.human_additions, 1);
+    assert_eq!(stats.unknown_additions, 0);
+
+    let mut mixed = repo.filename("mixed.java");
+    mixed.assert_lines_and_blame(crate::lines!["class M {}".ai(), "manual tweak".human()]);
+}
+
+#[test]
+fn test_legacy_human_checkpoint_fills_manual_gaps() {
+    let repo = TestRepo::new();
+
+    std::fs::write(repo.path().join("seed.txt"), "seed\n").unwrap();
+    repo.git(&["add", "seed.txt"]).unwrap();
+    repo.stage_all_and_commit("Initial commit").unwrap();
+
+    std::fs::write(
+        repo.path().join("ReceiptAddressInfoController.java"),
+        "class ReceiptAddressInfoController {}\nmanual branch\n",
+    )
+    .unwrap();
+
+    let working_log = repo.current_working_logs();
+    let blob = working_log
+        .persist_file_version("class ReceiptAddressInfoController {}\nmanual branch\n")
+        .unwrap();
+    let legacy_checkpoint = Checkpoint::new(
+        CheckpointKind::Human,
+        String::new(),
+        "v-zhangbiao6 <v-zhangbiao6@ruijie.com.cn>".to_string(),
+        vec![WorkingLogEntry::new(
+            "ReceiptAddressInfoController.java".to_string(),
+            blob,
+            vec![],
+            vec![],
+        )],
+    );
+    working_log
+        .write_all_checkpoints(&[legacy_checkpoint])
+        .unwrap();
+
+    repo.git(&["add", "ReceiptAddressInfoController.java"])
+        .unwrap();
+    repo.stage_all_and_commit("Manual legacy human edit")
+        .unwrap();
+
+    let stats = repo.stats().unwrap();
+    assert_eq!(stats.git_diff_added_lines, 2);
+    assert_eq!(stats.ai_additions, 0);
+    assert_eq!(stats.human_additions, 2);
+    assert_eq!(stats.unknown_additions, 0);
+
+    let mut file = repo.filename("ReceiptAddressInfoController.java");
+    file.assert_lines_and_blame(crate::lines![
+        "class ReceiptAddressInfoController {}".human(),
+        "manual branch".human()
+    ]);
 }
 
 #[test]
