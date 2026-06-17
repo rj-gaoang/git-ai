@@ -2248,15 +2248,43 @@ pub fn restore_recent_working_log_snapshot(
         return Ok(false);
     }
 
-    repo.storage
-        .working_log_for_base_commit(base_commit)?
-        .write_initial_attributions_with_contents(
-            snapshot.files.clone(),
-            snapshot.prompts.clone(),
-            snapshot.humans.clone(),
-            snapshot.file_contents.clone(),
-            snapshot.sessions.clone(),
-        )?;
+    let working_log = repo.storage.working_log_for_base_commit(base_commit)?;
+    let mut initial = working_log.read_initial_attributions();
+
+    for (file_path, line_attributions) in &snapshot.files {
+        if line_attributions.is_empty() || initial.files.contains_key(file_path) {
+            continue;
+        }
+
+        initial
+            .files
+            .insert(file_path.clone(), line_attributions.clone());
+        if let Some(content) = snapshot.file_contents.get(file_path) {
+            let blob_sha = working_log.persist_file_version(content)?;
+            initial.file_blobs.insert(file_path.clone(), blob_sha);
+        }
+    }
+
+    for (prompt_id, prompt_record) in &snapshot.prompts {
+        initial
+            .prompts
+            .entry(prompt_id.clone())
+            .or_insert_with(|| prompt_record.clone());
+    }
+    for (human_id, human_record) in &snapshot.humans {
+        initial
+            .humans
+            .entry(human_id.clone())
+            .or_insert_with(|| human_record.clone());
+    }
+    for (session_id, session_record) in &snapshot.sessions {
+        initial
+            .sessions
+            .entry(session_id.clone())
+            .or_insert_with(|| session_record.clone());
+    }
+
+    working_log.write_initial(initial)?;
     Ok(working_log_has_tracked_state_for_base(repo, base_commit))
 }
 
@@ -2567,13 +2595,11 @@ fn recover_reset_working_log_for_commit_replay(
     final_state_override: Option<&HashMap<String, String>>,
     pathspecs: Option<&[String]>,
 ) -> Result<bool, GitAiError> {
-    if base_commit.trim().is_empty()
-        || base_commit == "initial"
-        || working_log_has_tracked_state_for_base(repo, base_commit)
-    {
+    if base_commit.trim().is_empty() || base_commit == "initial" {
         return Ok(false);
     }
 
+    let base_already_has_state = working_log_has_tracked_state_for_base(repo, base_commit);
     let old_head = latest_reset_for_base_commit(repo, base_commit)?
         .map(|reset| reset.old_head_sha)
         .or_else(|| resolve_reset_old_head_for_base(worktree, base_commit));
@@ -2592,6 +2618,9 @@ fn recover_reset_working_log_for_commit_replay(
         final_state_override,
     )? {
         return Ok(true);
+    }
+    if base_already_has_state {
+        return Ok(false);
     }
 
     if let Err(error) =
@@ -2695,13 +2724,13 @@ fn recover_recent_replay_prerequisites_for_commit_replay(
                     remove_working_log_attributions_for_pathspecs(repo, base_commit, &pathspecs)?;
                     return Ok(());
                 }
-                if working_log_has_tracked_state_for_base(repo, base_commit) {
-                    continue;
-                }
                 if let Some(snapshot) = working_log_snapshot.as_ref()
                     && restore_recent_working_log_snapshot(repo, base_commit, snapshot)?
                 {
                     return Ok(());
+                }
+                if working_log_has_tracked_state_for_base(repo, base_commit) {
+                    continue;
                 }
                 if let Err(error) = attempt_materialize_commit_chain_authorship(
                     repo,
@@ -2733,16 +2762,24 @@ fn recover_recent_replay_prerequisites_for_commit_replay(
                 target_head,
                 old_head,
             } => {
-                if working_log_has_tracked_state_for_base(repo, base_commit) {
-                    continue;
-                }
                 if target_head != base_commit
                     || old_head.is_empty()
                     || !repo.storage.has_working_log(&old_head)
                 {
                     continue;
                 }
-                repo.storage.rename_working_log(&old_head, base_commit)?;
+                if working_log_has_tracked_state_for_base(repo, base_commit) {
+                    if let Some(snapshot) = capture_recent_working_log_snapshot(
+                        repo,
+                        &old_head,
+                        Some(author.to_string()),
+                    )? && restore_recent_working_log_snapshot(repo, base_commit, &snapshot)?
+                    {
+                        let _ = repo.storage.delete_working_log_for_base_commit(&old_head);
+                    }
+                } else {
+                    repo.storage.rename_working_log(&old_head, base_commit)?;
+                }
             }
             RecentReplayPrerequisite::CheckoutSwitchMerge {
                 target_head,
@@ -2833,9 +2870,6 @@ fn ensure_rewrite_prerequisites(
         author,
         exact_final_state.as_ref(),
     )?;
-    if working_log_has_tracked_state_for_base(repo, &base_commit) {
-        return Ok(());
-    }
 
     recover_reset_working_log_for_commit_replay(
         repo,

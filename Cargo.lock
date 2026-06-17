@@ -1194,7 +1194,7 @@ dependencies = [
 
 [[package]]
 name = "git-ai"
-version = "2.2.38"
+version = "2.2.39"
 dependencies = [
  "chrono",
  "clap",
