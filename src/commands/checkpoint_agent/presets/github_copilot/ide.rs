@@ -305,6 +305,7 @@ pub(super) fn parse_vscode_native_hooks(
             context,
             tool_use_id,
             stream_source,
+            dirty_files,
         })]);
     }
 
@@ -672,6 +673,42 @@ mod tests {
                 assert_eq!(e.tool_use_id, "tu-3");
             }
             _ => panic!("Expected PostBashCall"),
+        }
+    }
+
+    #[test]
+    fn test_copilot_native_post_bash_call_carries_dirty_files() {
+        let input = json!({
+            "hook_event_name": "PostToolUse",
+            "cwd": "/home/user/project",
+            "tool_name": "run_in_terminal",
+            "session_id": "sess-456",
+            "tool_use_id": "tu-3",
+            "dirtyFiles": {
+                "/home/user/project/src/a.ts": "export const a = true;\n",
+                "/home/user/project/src/b.ts": "export const b = true;\n"
+            },
+            "transcript_path": "/home/user/.vscode/data/github.copilot-chat/transcripts/sess-456.json"
+        })
+        .to_string();
+        let events = GithubCopilotPreset
+            .parse(&input, "t_test123456789a")
+            .unwrap();
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            ParsedHookEvent::PostBashCall(e) => {
+                let dirty_files = e.dirty_files.as_ref().unwrap();
+                assert_eq!(dirty_files.len(), 2);
+                assert_eq!(
+                    dirty_files.get(&PathBuf::from("/home/user/project/src/a.ts")),
+                    Some(&"export const a = true;\n".to_string())
+                );
+                assert_eq!(
+                    dirty_files.get(&PathBuf::from("/home/user/project/src/b.ts")),
+                    Some(&"export const b = true;\n".to_string())
+                );
+            }
+            other => panic!("Expected PostBashCall, got {:?}", other),
         }
     }
 

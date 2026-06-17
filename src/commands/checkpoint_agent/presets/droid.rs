@@ -184,6 +184,7 @@ impl AgentPreset for DroidPreset {
                 context,
                 tool_use_id,
                 stream_source,
+                dirty_files: None,
             })]);
         }
 

@@ -47,6 +47,10 @@ Speckit 是团队使用的「规范驱动开发」框架，通过 `.specify/` �
 
 > **实施补充（2026-06-16，安装探活区分最终成功与安装失败）**：安装探活语义收紧为“结果探活”而不是“进程到达 git-ai 探活”：`installStatus=success` 只允许在完整安装脚本收尾成功后发送；`install-hooks` 被 `install.ps1` 调用时通过 `GIT_AI_DEFER_INSTALL_HOOKS_PROBE=1` 延后自身探活，避免 hook 阶段成功被误认为整体安装成功。若 hook 阶段或安装器明确失败，会发送 `installStatus=failed`、`branch=install-failed`，并携带 `installFailureStage` / `installFailureReason`，看板可以直接区分“安装成功”和“安装失败”。手工运行 `git-ai install-hooks` 时仍会在命令结果确定后发送对应 success/failed 探活。marker key 和本地 `install_test_uploads.json` 也加入安装状态与失败阶段/原因，避免同版本同用户的失败探活被成功探活去重或反向污染。
 
+> **实施补充（2026-06-17，6 月 16/17 归因异常、Copilot `dirtyFiles` 路径兜底、recent `KnownHuman` 保存误归因与自动更新不丢本次 commit）**：本轮把张艺锋、庞福泽、徐建丰、张彪、胡晴琨等现场日志中暴露的归因异常统一归档。日志治理层面，按用户要求只保留目标日期窗口，`徐建丰.jsonl` / `张彪.jsonl` 仅保留 `2026-06-16`，`胡晴琨.jsonl` 仅保留 `2026-06-17`，过滤前文件以 `.bak-before-...-filter` 形式保留，异常大日志和旧脏日志不再参与本轮判断。归因层面，`op-api` 在 `2026-06-17 16:29:36` 的提交 `23a81b7cc8a45fbc849630b957681f884b856c5f` 使用的是 `2.2.39`，不是旧版本问题；日志显示 Copilot hook 的 `tool_input` / `tool_response` 有时只包含文本片段、执行结果或被脱敏内容，没有 `file_path/path/files` 字段，真实文件路径在顶层 `dirtyFiles` / `dirty_files` 的 key 中。旧解析只把 `dirtyFiles` 当作内容快照，不把 key 当路径兜底，导致 `checkpoint github-copilot` 路径为空并跳过；现已在 GitHub Copilot `ide` / `cli` preset 中加入 `file_paths_from_dirty_files(...)` 兜底，覆盖 `rj-ltc-contract-web`、`ai-cr-manage-service`、`op-api` 这类“代码实际由 AI 写，但大量文件 unknown”的路径缺失场景。另一个独立问题是 AI 写入后会触发 VS Code / IDE 的保存或文件变更监听，`AI Edited` 后紧跟 `IDE known_human` 是两个独立 hook 的正常竞态，并不代表用户手工重写了整文件；旧逻辑可能让这次保存事件把已有 AI 行重新抢成人工。当前 `checkpoint.rs` 已在 previous state 中保留时间戳，1 秒内继续拒绝紧随 AI 的 `KnownHuman`，30 秒内的 recent AI save 只归因真实新增 / 改动行，已有 AI 行保持 AI。自动更新层面，`git commit` 成功后现在先启动本次 commit 的 fallback `upload-stats --wait-for-authorship-note-ms 5000 --skip-if-already-uploaded --acquire-activity-lock-before-stats`，再调度后台自更新；后台升级仍正常执行，但不会先重启 / 替换 runtime 导致远程看板丢失本次 commit 的归因记录。
+
+> **实施补充（2026-06-17，王江龙 ltc-platform 同文件 AI 尾段 unknown 修复）**：针对 `logs/王江龙-20260617.jsonl` 中 `2026-06-17 22:00:44` 左右提交 `819ae3f1318750b4bfeac86d7dac8a0461ec2f65`，`src/main/java/com/ruijie/ltc/service/impl/CrAiParseFlowServiceImpl.java` 本次新增 298 行却只识别 159 行 AI、剩余 139 行既非 AI 也非人工的问题，确认不是服务端看板映射错误。日志显示 post-commit 已加载 16 个 Copilot AI checkpoint，整体 `gitDiffAddedLines=592`、`aiAdditions=453`、`unknownAdditions=139`；同时 `post_commit_ai_attribution_gaps_filled` 只补了 `missingAddedLineCount=10`，说明旧 gap-fill 只覆盖“AI 会话生成但完全没进 pathspec 的漏文件”，没有覆盖“文件已经进入 AI pathspec，且已有部分 AI line range 落地，但同一文件尾部还有未被 line range 覆盖的新增行”。现场 `CrAiParseFlowServiceImpl.java` 正好表现为同一文件前 159 行已有 AI attestation、后 139 行缺 line-range attestation。修复落在 `post_commit` 的 AI gap-fill：在已有当前 AI attestation 落地的文件内，收集本次 commit 新增行里仍未被任何 human/AI attestation 覆盖的行，并在 `totalAiAdditions >= 已落地 AI 行 + 待补缺口行` 的预算保护下补到当前 AI attestation；完全没有 AI 落地证据的文件仍不会被事后硬判为 AI。新增诊断字段 `unattributedAddedLineCount` / `landedAiFileCount`，用于区分“漏文件 pathspec 缺口”和“已识别 AI 文件内部缺口”；新增回归 `test_copilot_ai_session_fills_unattributed_tail_in_checkpointed_file` 覆盖 298 行中 159 行已归 AI、139 行尾段缺失的形态。
+
 > **实施补充（2026-06-15，Windows Update Service 安装 git-ai 时 busy launcher 不再阻塞升级）**：针对 `ruijie-ai-update-service` 安装 / 重试 `v2.2.35` 时持续失败，现场日志 `C:\ProgramData\RuiJieAIUpdateService\logs\install-v2.2.35-20260615154604.log` 显示失败发生在 wrapper 的 pre-install cleanup 阶段：`C:\Users\admin\.git-ai\launcher\git-ai.exe` 正被 `git-ai --version`、`git-ai checkpoint codex --hook-input stdin`、`git-ai bg run` 等进程持有，wrapper 等待 `launcher\git-ai.exe` 可独占写打开超时后直接抛出 `pre-install git-ai launcher cleanup failed; launcher_files_ok=False`，导致真正的 git-ai 安装器根本没有机会执行。根因不是 service 没有先停止自身，也不是用户必须手工杀进程，而是 wrapper 把“launcher exe 当前 busy”当成安装前置硬失败；但 Windows 支持先把运行中的 exe 重命名到 retired 路径，再把新 exe 放回稳定路径，git-ai 安装器本身已经具备这种替换能力。修复分两层：第一，`windows-update-service/src/main.rs` 的 `Invoke-PreInstallCleanup` 不再等待 launcher/bin 文件空闲，也不再因为 `launcherFilesOk=false` 退出；它只记录 `pre_install_cleanup_launcher_files_busy_non_blocking` / `pre_install_cleanup_legacy_non_blocking` 诊断，然后让下载后的 git-ai 安装器接管替换。第二，`git-ai/install.ps1` 的 `Install-BinaryWithRenameFallback` 改为优先 rename-retire 旧 exe，只有退休失败才进入停止 daemon / 杀同目录进程树兜底；同时 PATH 更新改为优先 `.git-ai\launcher`，`.git-ai\bin` 只保留兼容副本，减少新老入口混跑。service wrapper 还会 patch 旧版远程安装脚本，给旧 `install.ps1` 注入 `prefer_rename_retire_before_process_kill` 策略，避免服务端 git-ai 包未同步时仍回到先杀进程的旧行为。该方案不会在普通命令路径做全系统进程扫描，也不会为了升级频繁杀用户 IDE / hook 进程；只有替换旧 exe 的 rename-retire 极少数失败时才走进程清理兜底。验证已覆盖 wrapper 生成脚本定向测试 `cargo test test_build_installer_command_includes_wrapper_diagnostics --manifest-path windows-update-service\Cargo.toml -- --nocapture`、release 构建 `cargo build --release --manifest-path windows-update-service\Cargo.toml`、本地发布包生成 `windows-update-service\prepare-server-package.ps1 -KeepOutput`。本地新包已生成在 `windows-update-service\dist\ruijie-ai-update-service`；线上 `http://172.16.37.100:8888/ruijie-ai-update-service/manifest.json` 仍是旧包，必须发布新包后用户重试安装才会进入该修复路径。
 
 > **实施补充（2026-06-12，大提交自动上传补算 stats）**：针对 `debug.jsonl` 中 `post_commit_stats_skipped(reason=expensive_commit)` 后又出现 `upload_stats_skipped(reason=stats_unavailable)` 的链路，`git-ai` 自动上传不再因为 post-commit 快路径未携带 `CommitStats` 而直接跳过。大提交仍然保留提交钩子内的昂贵统计保护，但 `post_commit` 会把同一份 ignore patterns 和“允许补算”标记传给上传模块；上传任务在构建 payload 时重新调用 `stats_for_commit_stats(...)` 补齐统计后再上传。merge commit 的 stats 缺失仍保持跳过，避免把合并提交误上传为 0 行统计。新增诊断字段 `statsSource=background_recompute`、`willRecomputeStats=true`、`willRecomputeMissingStatsForUpload=true` 用于确认该路径已经进入补算。
@@ -2492,6 +2496,9 @@ GitHub Copilot VS Code native hook 的补充说明：当 hook payload 因为脱�
 | 2.39 | Windows Update Service 安装 git-ai 时 busy launcher 不再阻塞升级 | `windows-update-service/src/main.rs`、`windows-update-service/prepare-server-package.ps1`、`git-ai/install.ps1`、`git-ai/tests/windows_script_checks.rs`、`git-ai/docs/design-doc/git-ai看板方案.md` | service wrapper 的 pre-install cleanup 不再等待 `.git-ai\launcher\git-ai.exe` / `.git-ai\bin\git-ai.exe` 可独占写打开，busy 文件只记录非阻塞诊断并交给 git-ai 安装器 rename-retire 替换；远程旧安装脚本会被 patch 为优先退休旧 exe、失败后才杀进程兜底；Windows 直接安装 PATH 也优先 launcher，减少 launcher/bin 新旧入口混跑 |
 | 2.40 | Windows Update Service 不再把已落盘成功误判为安装失败 / 卡住 | `git-ai/src/main.rs`、`windows-update-service/src/main.rs`、`git-ai/docs/design-doc/git-ai看板方案.md` | 现场确认 2.2.36 是“二进制已替换成功但 service 安装事务失败”：`launcher\git-ai.exe` 和 `bin\git-ai.exe` 已返回 2.2.36，Rust 探活也可发送，但 `install-v2.2.36-*.log` 末尾显示 `install integrity failed: launcher version probe timed out`，`state.json` 仍停在 `last_result=installing` / `installed_semver=2.2.33`，服务为 Stopped。根因是安装末尾用 `git-ai version` 探测新 exe，版本命令仍会写 debug 日志并可能被日志锁 / 卡住进程拖住；wrapper 超时后只 Kill 未 Wait，残留 `git-ai --version/version`；service 父进程还用 `Command::output()` 捕获 PowerShell stdout/stderr，若子进程继承管道句柄，外层 `install.ps1` 会表现为不返回。修复：`git-ai` 的 help/version 等快速元数据命令不再写 debug 日志；service 所有版本探针改用 `--version`、注入 `GIT_AI_DEBUG=0` / `GIT_AI_DEBUG_STDERR=0`、超时后 Kill+Wait；Rust 侧版本检测也有 8s 超时；service 启动 PowerShell 安装脚本时不再捕获 stdout/stderr 管道，而依赖 wrapper transcript 写安装日志并等待进程退出，从根上避免“git-ai 已能用但 service 仍 installing/假失败/卡住”。 |
 | 2.41 | 安装探活作者不再允许使用安装器/工具标签 | `git-ai/src/integration/install_test_upload.rs`、`windows-update-service/upload-install-test.ps1`、`windows-update-service/dist/ruijie-ai-update-service/upload-install-test.ps1`、`git-ai/docs/design-doc/git-ai看板方案.md` | 明确 `git-ai-install` / `install-success` 只是安装成功探活维度；真正异常是 `author=git-ai installer`。Rust 内置探活拒绝 `git-ai installer`、`git-ai-install`、`install-success`、`upload-install-test.ps1`、`windows-update-service-legacy` 等 reserved identity 并继续回退真实 MCP / Git 邮箱 / IP；legacy PowerShell 探活脚本移除 `git-ai installer` 兜底，最差只写 `unknown-install-user`，避免工具名再进入看板作者。 |
+| 2.42 | Copilot native / CLI hook 在工具输入输出无路径时用 `dirtyFiles` key 兜底 | `git-ai/src/commands/checkpoint_agent/presets/github_copilot/mod.rs`、`git-ai/src/commands/checkpoint_agent/presets/github_copilot/ide.rs`、`git-ai/src/commands/checkpoint_agent/presets/github_copilot/cli.rs`、`git-ai/docs/design-doc/git-ai看板方案.md` | 当 `tool_input` / `tool_response` 只有文本片段、执行结果或脱敏内容，没有 `file_path/path/files` 时，使用当前 hook 顶层 `dirtyFiles` / `dirty_files` 的 key 作为文件路径兜底；修复 `rj-ltc-contract-web`、`ai-cr-manage-service`、`op-api` 这类 AI 生成文件大量掉到 `unknown` 的路径缺失问题 |
+| 2.43 | recent `KnownHuman` 保存不再覆盖已有 AI 行 | `git-ai/src/daemon/checkpoint.rs`、`git-ai/tests/integration/pending_ai_edit_suppression.rs`、`git-ai/docs/design-doc/git-ai看板方案.md` | `AI Edited` 后 IDE 保存 / 文件监听触发的 `known_human` 是正常竞态；1 秒内仍拒绝，30 秒内 recent AI save 只对真实 changed lines 写 `h_*`，已有 AI 行保持 AI，用户后续手工补充的行仍能计入人工 |
+| 2.44 | commit 后自动更新先让本次 commit 上传落地 | `git-ai/src/commands/git_handlers.rs`、`git-ai/src/integration/upload_stats.rs`、`git-ai/docs/design-doc/git-ai看板方案.md` | `git commit` 成功后先 spawn fallback `upload-stats --wait-for-authorship-note-ms 5000 --skip-if-already-uploaded --acquire-activity-lock-before-stats`，再调度后台自更新；自动更新功能不受影响，但不会先重启 / 替换 runtime 导致远程看板看不到本次 commit |
 
 ### Phase 3（2-3 天）：Code Review 自动上传
 
@@ -2946,6 +2953,61 @@ env:
 - `cargo test --lib -q repair_vscode_git_path_settings` 通过，覆盖删除不存在 git-ai shim、删除 `git-ai-test-home-*` 泄漏、保留系统 Git。
 - `cargo test --lib -q test_install_extras_repairs_vscode_settings_for_copilot_hooks` 通过，覆盖 Copilot 安装器独立修复 VS Code settings 的端到端行为。
 - `cargo test --lib -q github_copilot` 通过，Copilot 模块 57 个测试全部通过。
+
+### 2026-06-17：现场日志治理、Copilot `dirtyFiles` 路径兜底、recent `KnownHuman` 保护与自动更新上传顺序修复
+
+**变更原因：**
+
+6 月 16 日到 6 月 17 日的现场日志暴露出四类问题混在一起，必须拆开处理：
+
+| 现场样本 | 表现 | 结论 |
+|------|------|------|
+| `张艺锋.jsonl` | 日志文件异常膨胀，6 月 15 / 6 月 16 以外的历史噪音影响判断 | 先做日志治理，只保留目标日期窗口；历史异常内容移入备份，不再参与本轮归因判断 |
+| `庞福泽.jsonl` / `rj-ltc-contract-web`、`徐建丰.jsonl` / `ai-cr-manage-service`、`胡晴琨.jsonl` / `op-api` | 代码实际由 Copilot / AI 生成，但大量文件落入 `unknown` 或部分被误算为人工 | Copilot hook 有时没有在 `tool_input` / `tool_response` 中提供路径，真实路径只存在于顶层 `dirtyFiles` / `dirty_files` 的 key；旧代码没有用这些 key 兜底 |
+| `胡晴琨.jsonl` / `op-api` / `feature-20260601-ebg-ecp-h` / `2026-06-17 16:29:36` | 提交 `23a81b7cc8a45fbc849630b957681f884b856c5f` 实际应全部为 AI，统计为 `aiAdditions=20`、`humanAdditions=43`、`unknownAdditions=0` | 用户使用的是 `2.2.39`，不是旧版本问题；`AI Edited` 后紧跟 IDE `known_human` 保存事件，旧归因会让保存事件重新占有已有 AI 行 |
+| `张彪.jsonl` / `contract` / `2.2.37` | `2026-06-16 15:17:43`、`15:02:23`、`14:59:24` 代码实际人工写入，但归因为 `unknown` | 这是 legacy `Human` checkpoint 明确人工新增未生成 `h_*` attestation 的一类问题，应由“legacy Human checkpoint 明确人工新增不再落入 unknown”修复覆盖；旧用户必须升级到实际包含该修复的 release asset |
+| commit 后自动更新 | 自动更新在 commit 后启动，可能重启 / 替换 runtime，导致本次 commit 的远程看板记录缺失 | commit 主流程必须先给本次 commit 的上传留出机会，再调度后台自更新；自动更新功能仍保留，但不能抢在本次 commit 上传之前扰动 runtime |
+
+**为什么 hook 的 `tool_input` / `tool_response` 没抽到文件路径：**
+
+Copilot native hook 和 Copilot CLI hook 的 payload 并不总是把编辑文件放在 `tool_input.file_path`、`tool_input.path`、`files[]` 或 `tool_response` 里。真实现场里，`tool_input` / `tool_response` 可能只包含旧文本、新文本、执行结果、脱敏后的 `...`，或者只表达“这次工具调用做了编辑”，不带可直接解析的路径。与此同时，hook 顶层会带 `dirtyFiles` 或 `dirty_files`，其中 key 就是当前 dirty 文件的绝对 / 相对路径，value 是文件快照内容。旧实现只把这份 map 传给 daemon 当内容快照使用，没有在路径抽取失败时把 map 的 key 当作编辑路径，因此会出现“内容在 payload 里，但 file_paths 为空，checkpoint 被跳过”的漏归因。
+
+本次修复把 `dirtyFiles` / `dirty_files` 的 key 作为严格兜底：只有 `tool_input` / `tool_response` 路径抽取为空时才启用；仍然只使用当前 hook payload 中携带的 dirty 文件，不扫描会话历史，也不把非当前工具调用的路径合并进来。
+
+**为什么 `AI Edited` 后会紧跟 IDE `known_human`：**
+
+`AI Edited` 是 Copilot hook 对“AI 工具完成编辑”的记录；`known_human` 来自 VS Code / IDE 的保存、文档变更或文件系统监听。AI 把内容写进编辑器或磁盘后，IDE 会像普通保存一样触发这类监听，所以两条事件紧挨着出现是正常竞态，不代表用户在几百毫秒内手工重写了整块代码。旧逻辑只看到了“IDE known_human 保存发生在后面”，就可能把已经由 AI 写入的行重新归到人工。
+
+当前修复保留两个边界：
+
+- 1 秒内紧随 AI checkpoint 的 `KnownHuman` 仍按原策略拒绝，避免保存事件直接抢占 AI 编辑。
+- 30 秒内出现 recent AI file state 时，`KnownHuman` 不再重领已有 AI 行，只对相对上一状态真正新增 / 改动的行生成 `h_*` 人工归因。这样用户确实在 AI 后手动补了一两行时仍能计入人工，但 AI 已有大块不会被 IDE 保存事件改成人工。
+
+**本次代码级修改：**
+
+| 文件 | 修改点 | 影响 |
+|------|--------|------|
+| `git-ai/src/commands/checkpoint_agent/presets/github_copilot/mod.rs` | 新增 `file_paths_from_dirty_files(...)`，把 `dirtyFiles` / `dirty_files` map 的 key 规范化、排序、去重后作为路径兜底 | 当 Copilot payload 的 `tool_input` / `tool_response` 没有路径时，仍能把当前 dirty 文件送入 AI checkpoint |
+| `git-ai/src/commands/checkpoint_agent/presets/github_copilot/ide.rs` | VS Code native hook 在 `extract_filepaths_from_vscode_hook_payload(...)` 为空时回退到 `file_paths_from_dirty_files(...)` | 覆盖 `op-api`、`rj-ltc-contract-web`、`ai-cr-manage-service` 中 Copilot native 编辑后大量 unknown 的场景 |
+| `git-ai/src/commands/checkpoint_agent/presets/github_copilot/cli.rs` | Copilot CLI hook 同步使用 `dirty_files` 路径兜底 | terminal / CLI 型 Copilot 编辑在工具结果无路径时不再直接丢 checkpoint |
+| `git-ai/src/daemon/checkpoint.rs` | `PreviousFileState` 增加 `timestamp`；新增 `KNOWN_HUMAN_RECENT_AI_SAVE_LIMIT_SECS=30` 和 `has_recent_ai_file_state(...)`；recent AI 后的 `KnownHuman` 只限制到真实 changed lines | 修复 `AI Edited` 后 IDE 保存事件把已有 AI 行抢成人工的问题，同时保留用户后续手动补充行的人工归因 |
+| `git-ai/src/commands/git_handlers.rs` | `run_post_commit_followups(...)` 先启动本次 commit 的 fallback `upload-stats`，再调用 `maybe_schedule_background_update_check_after_commit()` | 自动更新功能继续正常执行，但不会先重启 / 替换 runtime，导致本次 commit 的远程看板记录丢失 |
+| `git-ai/tests/integration/pending_ai_edit_suppression.rs` | 新增 `test_recent_known_human_save_after_ai_does_not_reclaim_ai_lines` | 锁定“AI 两行 + IDE 保存补一行”时，已有 AI 行仍为 AI，新增手工行计入 human |
+
+**版本与历史数据口径：**
+
+- `胡晴琨.jsonl` 已只保留 `2026-06-17` 日志，过滤前备份为 `logs/胡晴琨.jsonl.bak-before-20260617-filter`；`徐建丰.jsonl`、`张彪.jsonl` 同样按 `2026-06-16` 做日期窗口清理。清理只影响本地排查样本，不会修改已经上传到远程看板的历史记录。
+- 张彪机器仍使用 `2.2.37` 时，不能用当前源码结论直接推断用户机已修复；必须以用户机 `git-ai --version`、`debug.jsonl` 中的 version、实际下载的 release asset 自报版本共同确认。若 `2.2.38` 的发布 asset 未包含 legacy `Human` checkpoint 修复，仍需要升级到包含 2.35/2.42/2.43/2.44 这些修复点的后续版本。
+- 对已经提交且本地 authorship note 缺少 AI checkpoint 的历史 commit，客户端不会凭用户口头说明把 `unknown` 硬改成 AI；只能通过重新触发正确 checkpoint 后再提交，或按人工确认流程做显式历史修复 / 回补，避免破坏审计语义。
+- 看板侧对历史脏数据应区分三类：没有 authorship note 的 metadata-only 记录保持 `unknownAdditions`；旧 IDE 保存误归因记录需要结合版本和日志确认；安装探活 / 旧外部 producer 脏数据继续按前述 `installTestProducer` / `installerScript` 隔离。
+
+**验证结论：**
+
+- `cargo test test_copilot_native_uses_dirty_files_when_tool_paths_missing`
+- `cargo test cli_post_uses_dirty_files_when_tool_paths_missing`
+- `cargo test test_recent_known_human_save_after_ai_does_not_reclaim_ai_lines --test integration`
+- `cargo fmt --check`
+- `git diff --check`
 
 ### 2026-05-10：补充 Windows 真机验证结论与 GitHub latest / asset 修正流程
 

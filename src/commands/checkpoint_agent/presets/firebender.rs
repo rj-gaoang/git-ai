@@ -226,6 +226,7 @@ impl AgentPreset for FirebenderPreset {
                 context,
                 tool_use_id: tool_use_id_str,
                 stream_source: None,
+                dirty_files: None,
             }),
             (_, false) => ParsedHookEvent::PostFileEdit(PostFileEdit {
                 context,

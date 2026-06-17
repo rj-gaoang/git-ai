@@ -133,6 +133,7 @@ impl AgentPreset for CursorPreset {
                 context,
                 tool_use_id,
                 stream_source,
+                dirty_files: None,
             }),
             (ToolClass::FileEdit, true) => ParsedHookEvent::PreFileEdit(PreFileEdit {
                 context,

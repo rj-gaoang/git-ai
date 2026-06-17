@@ -113,6 +113,7 @@ impl AgentPreset for ClaudePreset {
                 context,
                 tool_use_id: tool_use_id.to_string(),
                 stream_source,
+                dirty_files: None,
             }),
             (_, false) => ParsedHookEvent::PostFileEdit(PostFileEdit {
                 context,

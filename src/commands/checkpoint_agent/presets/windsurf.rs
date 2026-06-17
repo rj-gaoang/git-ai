@@ -143,6 +143,7 @@ impl AgentPreset for WindsurfPreset {
                     context,
                     tool_use_id: execution_id,
                     stream_source,
+                    dirty_files: None,
                 })
             }
         } else if is_pre_write {

@@ -165,6 +165,7 @@ impl AgentPreset for CodexPreset {
                         context,
                         tool_use_id: tool_use_id.to_string(),
                         stream_source,
+                        dirty_files: None,
                     })
                 } else if is_file_edit {
                     let tool_input = data.get("tool_input").or_else(|| data.get("toolInput"));

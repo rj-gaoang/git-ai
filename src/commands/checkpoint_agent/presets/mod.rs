@@ -90,6 +90,8 @@ pub struct PostBashCall {
     pub context: PresetContext,
     pub tool_use_id: String,
     pub stream_source: Option<StreamSource>,
+    #[serde(default)]
+    pub dirty_files: Option<HashMap<PathBuf, String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

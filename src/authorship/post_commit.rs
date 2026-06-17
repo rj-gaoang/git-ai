@@ -711,29 +711,47 @@ fn fill_ai_attribution_gaps_for_commit(
             .unwrap_or(0)
     };
     let missing_added_count = all_added_count.saturating_sub(pathspec_added_count);
-    if missing_added_count == 0 {
-        return;
-    }
 
     let attested_ai_added_count =
         attested_ai_added_count(authorship_log, &all_added_lines, &ai_attestation_hashes);
+    let landed_ai_files =
+        collect_current_ai_attested_files(authorship_log, &all_added_lines, &ai_attestation_hashes);
     let total_ai_additions = authorship_log
         .metadata
         .prompts
         .values()
         .map(|prompt| prompt.total_additions as usize)
         .sum::<usize>();
-    if total_ai_additions < attested_ai_added_count.saturating_add(missing_added_count) {
-        return;
-    }
 
     let committed_hunks: HashMap<String, Vec<LineRange>> = all_added_lines
         .into_iter()
         .filter(|(path, lines)| {
-            !lines.is_empty() && (pathspecs.is_empty() || !pathspecs.contains(path))
+            if lines.is_empty() {
+                return false;
+            }
+
+            if pathspecs.is_empty() || !pathspecs.contains(path) {
+                return true;
+            }
+
+            landed_ai_files.contains(path)
         })
         .map(|(path, lines)| (path, LineRange::compress_lines(&lines)))
         .collect();
+    if committed_hunks.is_empty() {
+        return;
+    }
+
+    let unattributed_added_count = crate::authorship::attribution_gap::count_unattributed_hunks(
+        authorship_log,
+        &committed_hunks,
+    );
+    if unattributed_added_count == 0 {
+        return;
+    }
+    if total_ai_additions < attested_ai_added_count.saturating_add(unattributed_added_count) {
+        return;
+    }
 
     let filled_line_count = crate::authorship::attribution_gap::fill_unattributed_hunks(
         authorship_log,
@@ -755,9 +773,11 @@ fn fill_ai_attribution_gaps_for_commit(
             "allAddedLineCount": all_added_count,
             "pathspecAddedLineCount": pathspec_added_count,
             "missingAddedLineCount": missing_added_count,
+            "unattributedAddedLineCount": unattributed_added_count,
             "pathspecCount": pathspecs.len(),
             "totalAiAdditions": total_ai_additions,
             "attestedAiAddedLineCount": attested_ai_added_count,
+            "landedAiFileCount": landed_ai_files.len(),
             "attestationHash": attestation_hash,
             "humanAuthor": human_author,
         }),
@@ -1061,6 +1081,37 @@ fn attested_ai_added_count(
     }
 
     counted_by_file.values().map(HashSet::len).sum()
+}
+
+fn collect_current_ai_attested_files(
+    authorship_log: &AuthorshipLog,
+    added_lines_by_file: &HashMap<String, Vec<u32>>,
+    ai_attestation_hashes: &[String],
+) -> HashSet<String> {
+    let ai_hashes: HashSet<&str> = ai_attestation_hashes.iter().map(String::as_str).collect();
+    let mut files = HashSet::new();
+
+    for file_attestation in &authorship_log.attestations {
+        let Some(added_lines) = added_lines_by_file.get(&file_attestation.file_path) else {
+            continue;
+        };
+
+        let has_current_ai_added_line = file_attestation.entries.iter().any(|entry| {
+            ai_hashes.contains(entry.hash.as_str())
+                && entry.line_ranges.iter().any(|range| {
+                    range
+                        .expand()
+                        .into_iter()
+                        .any(|line| added_lines.binary_search(&line).is_ok())
+                })
+        });
+
+        if has_current_ai_added_line {
+            files.insert(file_attestation.file_path.clone());
+        }
+    }
+
+    files
 }
 
 fn checkpoint_input_debug_summary(checkpoints: &[Checkpoint]) -> serde_json::Value {

@@ -97,6 +97,7 @@ pub(super) fn parse_cli_hooks(
             context,
             tool_use_id,
             stream_source,
+            dirty_files,
         })]),
         ("PreToolUse", ToolClass::FileEdit) => {
             // `create` PreToolUse: synthesize empty dirty_files for the new path

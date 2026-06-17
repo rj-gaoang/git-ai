@@ -73,6 +73,7 @@ impl AgentPreset for GeminiPreset {
                 context,
                 tool_use_id: tool_use_id.to_string(),
                 stream_source,
+                dirty_files: None,
             }),
             (false, false) => ParsedHookEvent::PostFileEdit(PostFileEdit {
                 context,

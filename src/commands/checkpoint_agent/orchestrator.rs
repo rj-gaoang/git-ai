@@ -201,6 +201,81 @@ fn build_checkpoint_files(file_paths: &[PathBuf]) -> Result<Vec<CheckpointFile>,
     Ok(files)
 }
 
+fn apply_dirty_file_overrides(
+    files: &mut [CheckpointFile],
+    dirty_files: &HashMap<PathBuf, String>,
+) {
+    let normalized_dirty_files: HashMap<String, String> = dirty_files
+        .iter()
+        .map(|(path, content)| (checkpoint_path_lookup_key(path), content.clone()))
+        .collect();
+
+    for f in files {
+        if let Some(override_content) = dirty_files.get(&f.path).cloned().or_else(|| {
+            normalized_dirty_files
+                .get(&checkpoint_path_lookup_key(&f.path))
+                .cloned()
+        }) {
+            f.content = Some(override_content);
+        }
+    }
+}
+
+fn checkpoint_path_lookup_key(path: &Path) -> String {
+    let normalized_path = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let normalized = normalized_path.to_string_lossy().replace('\\', "/");
+
+    #[cfg(windows)]
+    {
+        normalized.to_ascii_lowercase()
+    }
+
+    #[cfg(not(windows))]
+    {
+        normalized
+    }
+}
+
+fn normalize_bash_relative_paths(repo_work_dir: &Path, paths: &[String]) -> Vec<PathBuf> {
+    paths
+        .iter()
+        .map(|p| {
+            let joined = repo_work_dir.join(p);
+            fs::canonicalize(&joined).unwrap_or(joined)
+        })
+        .collect()
+}
+
+fn sorted_display_paths(paths: &[PathBuf]) -> Vec<String> {
+    let mut values: Vec<String> = paths
+        .iter()
+        .map(|path| path.to_string_lossy().replace('\\', "/"))
+        .collect();
+    values.sort();
+    values
+}
+
+fn merge_paths_from_dirty_files(
+    file_paths: &mut Vec<PathBuf>,
+    dirty_files: &HashMap<PathBuf, String>,
+) {
+    let mut seen: std::collections::HashSet<String> = file_paths
+        .iter()
+        .map(|path| checkpoint_path_lookup_key(path))
+        .collect();
+
+    let mut dirty_paths: Vec<PathBuf> = dirty_files.keys().cloned().collect();
+    dirty_paths.sort();
+    for path in dirty_paths {
+        let key = checkpoint_path_lookup_key(&path);
+        if seen.insert(key) {
+            file_paths.push(path);
+        }
+    }
+
+    file_paths.sort();
+}
+
 pub fn execute_preset_checkpoint(
     preset_name: &str,
     hook_input: &str,
@@ -361,11 +436,7 @@ fn split_files_into_requests(
 fn execute_pre_file_edit(e: PreFileEdit) -> Result<Vec<CheckpointRequest>, GitAiError> {
     let mut files = build_checkpoint_files(&e.file_paths)?;
     if let Some(ref dirty) = e.dirty_files {
-        for f in &mut files {
-            if let Some(override_content) = dirty.get(&f.path) {
-                f.content = Some(override_content.clone());
-            }
-        }
+        apply_dirty_file_overrides(&mut files, dirty);
     }
     let mut metadata = e.context.metadata;
     if let Some(tuid) = e.tool_use_id {
@@ -388,11 +459,7 @@ fn execute_post_file_edit(
 ) -> Result<Vec<CheckpointRequest>, GitAiError> {
     let mut files = build_checkpoint_files(&e.file_paths)?;
     if let Some(ref dirty) = e.dirty_files {
-        for f in &mut files {
-            if let Some(override_content) = dirty.get(&f.path) {
-                f.content = Some(override_content.clone());
-            }
-        }
+        apply_dirty_file_overrides(&mut files, dirty);
     }
     let checkpoint_kind = match preset_name {
         "ai_tab" => CheckpointKind::AiTab,
@@ -419,11 +486,7 @@ fn execute_post_file_edit(
 fn execute_known_human_edit(e: KnownHumanEdit) -> Result<Vec<CheckpointRequest>, GitAiError> {
     let mut files = build_checkpoint_files(&e.file_paths)?;
     if let Some(ref dirty) = e.dirty_files {
-        for f in &mut files {
-            if let Some(override_content) = dirty.get(&f.path) {
-                f.content = Some(override_content.clone());
-            }
-        }
+        apply_dirty_file_overrides(&mut files, dirty);
     }
     Ok(split_files_into_requests(
         files,
@@ -512,9 +575,9 @@ fn execute_post_bash_call(e: PostBashCall) -> Result<Vec<CheckpointRequest>, Git
 
     let mut action_name = "error";
     let mut detected_paths: Vec<String> = Vec::new();
-    let mut fallback_reason: Option<&'static str> = None;
+    let mut fallback_reason: Option<String> = None;
     let mut error_message: Option<String> = None;
-    let file_paths: Vec<PathBuf> = match &bash_result {
+    let mut file_paths: Vec<PathBuf> = match &bash_result {
         Ok(result) => {
             action_name = match &result.action {
                 bash_tool::BashCheckpointAction::Checkpoint(_) => "checkpoint",
@@ -527,13 +590,7 @@ fn execute_post_bash_call(e: PostBashCall) -> Result<Vec<CheckpointRequest>, Git
             match &result.action {
                 bash_tool::BashCheckpointAction::Checkpoint(paths) => {
                     detected_paths = paths.clone();
-                    paths
-                        .iter()
-                        .map(|p| {
-                            let joined = repo_work_dir.join(p);
-                            fs::canonicalize(&joined).unwrap_or(joined)
-                        })
-                        .collect()
+                    normalize_bash_relative_paths(&repo_work_dir, paths)
                 }
                 bash_tool::BashCheckpointAction::NoChanges => vec![],
                 bash_tool::BashCheckpointAction::HookTimeout
@@ -541,15 +598,9 @@ fn execute_post_bash_call(e: PostBashCall) -> Result<Vec<CheckpointRequest>, Git
                 | bash_tool::BashCheckpointAction::MissingPreSnapshot => {
                     match bash_tool::git_status_fallback(&repo_work_dir) {
                         Ok(paths) if !paths.is_empty() => {
-                            fallback_reason = Some("git_status_fallback");
+                            fallback_reason = Some("git_status_fallback".to_string());
                             detected_paths = paths.clone();
-                            paths
-                                .into_iter()
-                                .map(|p| {
-                                    let joined = repo_work_dir.join(p);
-                                    fs::canonicalize(&joined).unwrap_or(joined)
-                                })
-                                .collect()
+                            normalize_bash_relative_paths(&repo_work_dir, &paths)
                         }
                         Ok(_) => vec![],
                         Err(err) => {
@@ -565,15 +616,9 @@ fn execute_post_bash_call(e: PostBashCall) -> Result<Vec<CheckpointRequest>, Git
             error_message = Some(err.to_string());
             match bash_tool::git_status_fallback(&repo_work_dir) {
                 Ok(paths) if !paths.is_empty() => {
-                    fallback_reason = Some("git_status_fallback_after_error");
+                    fallback_reason = Some("git_status_fallback_after_error".to_string());
                     detected_paths = paths.clone();
-                    paths
-                        .into_iter()
-                        .map(|p| {
-                            let joined = repo_work_dir.join(p);
-                            fs::canonicalize(&joined).unwrap_or(joined)
-                        })
-                        .collect()
+                    normalize_bash_relative_paths(&repo_work_dir, &paths)
                 }
                 Ok(_) => vec![],
                 Err(fallback_err) => {
@@ -583,6 +628,26 @@ fn execute_post_bash_call(e: PostBashCall) -> Result<Vec<CheckpointRequest>, Git
             }
         }
     };
+
+    let dirty_file_paths: Vec<PathBuf> = e
+        .dirty_files
+        .as_ref()
+        .map(|dirty| dirty.keys().cloned().collect())
+        .unwrap_or_default();
+    let dirty_file_paths_display = sorted_display_paths(&dirty_file_paths);
+    let before_dirty_merge_file_count = file_paths.len();
+    if let Some(ref dirty) = e.dirty_files
+        && !dirty.is_empty()
+    {
+        merge_paths_from_dirty_files(&mut file_paths, dirty);
+        if file_paths.len() > before_dirty_merge_file_count {
+            fallback_reason = match fallback_reason {
+                Some(reason) => Some(format!("{}+dirty_files_merge", reason)),
+                None => Some("dirty_files_merge".to_string()),
+            };
+        }
+    }
+    let merged_from_dirty_files = file_paths.len() > before_dirty_merge_file_count;
 
     crate::diagnostics::append_debug_event(
         "bash_post_checkpoint_resolved",
@@ -596,12 +661,18 @@ fn execute_post_bash_call(e: PostBashCall) -> Result<Vec<CheckpointRequest>, Git
             "fallbackReason": fallback_reason,
             "detectedPathCount": detected_paths.len(),
             "detectedPaths": detected_paths,
+            "dirtyFilePathCount": dirty_file_paths_display.len(),
+            "dirtyFilePaths": dirty_file_paths_display,
+            "mergedFromDirtyFiles": merged_from_dirty_files,
             "finalFileCount": file_paths.len(),
             "error": error_message,
         }),
     );
 
-    let files = build_checkpoint_files(&file_paths)?;
+    let mut files = build_checkpoint_files(&file_paths)?;
+    if let Some(ref dirty) = e.dirty_files {
+        apply_dirty_file_overrides(&mut files, dirty);
+    }
     let mut metadata = e.context.metadata;
     metadata
         .entry("tool_use_id".to_string())
