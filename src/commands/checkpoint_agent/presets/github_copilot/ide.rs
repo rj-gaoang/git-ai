@@ -170,8 +170,11 @@ pub(super) fn parse_vscode_native_hooks(
         .or_else(|| data.get("toolResponse"));
 
     // Extract file paths from tool_input and tool_response only (not session-level data)
-    let extracted_paths =
+    let mut extracted_paths =
         super::extract_filepaths_from_vscode_hook_payload(tool_input, tool_response, cwd);
+    if extracted_paths.is_empty() {
+        extracted_paths = super::file_paths_from_dirty_files(&dirty_files);
+    }
 
     let transcript_path = transcript_path_from_hook_data(data).map(|s| s.to_string());
 
@@ -717,6 +720,44 @@ mod tests {
         .to_string();
         let result = GithubCopilotPreset.parse(&input, "t_test123456789a");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_copilot_native_uses_dirty_files_when_tool_paths_missing() {
+        let input = json!({
+            "hook_event_name": "PostToolUse",
+            "cwd": "/home/user/project",
+            "tool_name": "replace_string_in_file",
+            "session_id": "sess-456",
+            "tool_input": {"old_string": "before", "new_string": "after"},
+            "tool_response": {"result": "ok"},
+            "dirtyFiles": {
+                "/home/user/project/src/main.rs": "fn main() {}\n"
+            },
+            "transcript_path": "/home/user/.vscode/data/github.copilot-chat/transcripts/sess-456.json"
+        })
+        .to_string();
+
+        let events = GithubCopilotPreset
+            .parse(&input, "t_test123456789a")
+            .unwrap();
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            ParsedHookEvent::PostFileEdit(e) => {
+                assert_eq!(
+                    e.file_paths,
+                    vec![PathBuf::from("/home/user/project/src/main.rs")]
+                );
+                assert_eq!(
+                    e.dirty_files
+                        .as_ref()
+                        .unwrap()
+                        .get(&PathBuf::from("/home/user/project/src/main.rs")),
+                    Some(&"fn main() {}\n".to_string())
+                );
+            }
+            other => panic!("Expected PostFileEdit, got {:?}", other),
+        }
     }
 
     #[test]

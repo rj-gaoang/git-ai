@@ -109,6 +109,31 @@ fn test_known_human_works_after_ai_edit_cycle_completes() {
     ]);
 }
 
+#[test]
+fn test_recent_known_human_save_after_ai_does_not_reclaim_ai_lines() {
+    let repo = TestRepo::new();
+    let file_path = repo.path().join("post_ai_save.txt");
+
+    fs::write(&file_path, "base\n").unwrap();
+    repo.stage_all_and_commit("Initial commit").unwrap();
+
+    fs::write(&file_path, "base\nai one\nai two\n").unwrap();
+    fire_post_edit_checkpoint(&repo, &["post_ai_save.txt"]);
+
+    fs::write(&file_path, "base\nai one\nai two\nhuman note\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "post_ai_save.txt"])
+        .unwrap();
+
+    repo.stage_all_and_commit("AI edit then IDE save").unwrap();
+    let mut file = repo.filename("post_ai_save.txt");
+    file.assert_committed_lines(lines![
+        "base".unattributed_human(),
+        "ai one".ai(),
+        "ai two".ai(),
+        "human note".human(),
+    ]);
+}
+
 /// Multiple files: only the file with a pending AI edit should have its
 /// KnownHuman suppressed; other files should still get KnownHuman attribution.
 #[test]

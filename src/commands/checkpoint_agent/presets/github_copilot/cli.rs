@@ -39,8 +39,11 @@ pub(super) fn parse_cli_hooks(
         .or_else(|| data.get("toolResult"))
         .or_else(|| data.get("tool_response"));
 
-    let extracted_paths =
+    let mut extracted_paths =
         super::extract_filepaths_from_vscode_hook_payload(tool_input, tool_result, cwd);
+    if extracted_paths.is_empty() {
+        extracted_paths = super::file_paths_from_dirty_files(&dirty_files);
+    }
 
     // tool_use_id is absent in CopilotCLI payloads; synthesize a stable id from session+tool_name.
     // CLI bash invocations are sync (one in flight per session) so this id is enough for Pre/Post
@@ -400,6 +403,42 @@ mod tests {
         .to_string();
         let result = GithubCopilotPreset.parse(&input, "t_test123456789a");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn cli_post_uses_dirty_files_when_tool_paths_missing() {
+        let input = json!({
+            "hook_event_name": "PostToolUse",
+            "session_id": "sess-cli",
+            "cwd": "/Users/a/project",
+            "tool_name": "str_replace",
+            "tool_input": {"old_str": "before", "new_str": "after"},
+            "tool_result": {"result_type": "success", "text_result_for_llm": ""},
+            "dirty_files": {
+                "src/main.rs": "fn main() {}\n"
+            }
+        })
+        .to_string();
+
+        let events = GithubCopilotPreset
+            .parse(&input, "t_test123456789a")
+            .unwrap();
+        match &events[0] {
+            ParsedHookEvent::PostFileEdit(e) => {
+                assert_eq!(
+                    e.file_paths,
+                    vec![PathBuf::from("/Users/a/project/src/main.rs")]
+                );
+                assert_eq!(
+                    e.dirty_files
+                        .as_ref()
+                        .unwrap()
+                        .get(&PathBuf::from("/Users/a/project/src/main.rs")),
+                    Some(&"fn main() {}\n".to_string())
+                );
+            }
+            other => panic!("Expected PostFileEdit, got {:?}", other),
+        }
     }
 
     #[test]

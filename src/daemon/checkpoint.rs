@@ -38,6 +38,7 @@ struct PreviousFileState {
     blob_sha: String,
     attributions: Vec<Attribution>,
     kind: CheckpointKind,
+    timestamp: u64,
 }
 
 use crate::authorship::working_log::AgentId;
@@ -46,7 +47,8 @@ use crate::authorship::working_log::AgentId;
 const AGENT_USAGE_MIN_INTERVAL_SECS: u64 = 150;
 
 #[cfg(not(any(test, feature = "test-support")))]
-const KNOWN_HUMAN_MIN_SECS_AFTER_AI: u64 = 1;
+const KNOWN_HUMAN_REJECT_SECS_AFTER_AI: u64 = 1;
+const KNOWN_HUMAN_RECENT_AI_SAVE_LIMIT_SECS: u64 = 30;
 
 #[cfg(not(any(test, feature = "test-support")))]
 pub(crate) fn should_emit_agent_usage(agent_id: &AgentId) -> bool {
@@ -213,26 +215,21 @@ fn execute_resolved_checkpoint(
         read_checkpoints_start.elapsed()
     );
 
-    // Reject KnownHuman checkpoints that arrive within KNOWN_HUMAN_MIN_SECS_AFTER_AI
+    // Reject KnownHuman checkpoints that arrive immediately after an AI checkpoint
     // seconds of an AI checkpoint on any of the same files. These are likely spurious
     // IDE save events triggered by the AI completing its edit, not genuine human keystrokes.
-    // Only compiled in non-test builds where the constant is non-zero; under --all-targets
-    // clippy would otherwise flag the comparisons as always-false for u64.
     #[cfg(not(any(test, feature = "test-support")))]
     if kind == CheckpointKind::KnownHuman {
-        let now_secs = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
+        let now_secs = (resolved.ts / 1000) as u64;
         let too_soon = checkpoints.iter().rev().any(|cp| {
             cp.kind.is_ai()
-                && now_secs.saturating_sub(cp.timestamp) < KNOWN_HUMAN_MIN_SECS_AFTER_AI
+                && now_secs.saturating_sub(cp.timestamp) < KNOWN_HUMAN_REJECT_SECS_AFTER_AI
                 && cp.entries.iter().any(|e| resolved.files.contains(&e.file))
         });
         if too_soon {
             tracing::debug!(
                 "[KnownHuman] Rejected: fired within {}s of an AI checkpoint on the same file",
-                KNOWN_HUMAN_MIN_SECS_AFTER_AI
+                KNOWN_HUMAN_REJECT_SECS_AFTER_AI
             );
             return Ok((0, 0, 0));
         }
@@ -598,6 +595,7 @@ fn build_previous_file_state_maps(
                     blob_sha: entry.blob_sha.clone(),
                     attributions: entry.attributions.clone(),
                     kind: checkpoint.kind,
+                    timestamp: checkpoint.timestamp,
                 });
 
             if checkpoint.kind.is_ai() || working_log_entry_has_non_human_attribution(entry) {
@@ -637,6 +635,14 @@ fn select_previous_state_for_ai_checkpoint(
     None
 }
 
+fn has_recent_ai_file_state(file_history: &[PreviousFileState], ts: u128) -> bool {
+    let now_secs = (ts / 1000) as u64;
+    file_history.iter().rev().any(|state| {
+        state.kind.is_ai()
+            && now_secs.saturating_sub(state.timestamp) < KNOWN_HUMAN_RECENT_AI_SAVE_LIMIT_SECS
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn get_checkpoint_entry_for_file(
     file_path: String,
@@ -667,6 +673,8 @@ fn get_checkpoint_entry_for_file(
         .unwrap_or_default();
     let previous_state = previous_file_history.last().cloned();
     let has_prior_ai_edits = ai_touched_files.contains(&file_path);
+    let limit_to_changed_lines_for_recent_known_human_save =
+        kind == CheckpointKind::KnownHuman && has_recent_ai_file_state(&previous_file_history, ts);
 
     let current_content = working_log
         .read_current_file_content(&file_path)
@@ -849,7 +857,8 @@ fn get_checkpoint_entry_for_file(
         blob_sha: &file_content_hash,
         author_id: author_id.as_ref(),
         is_ai_checkpoint: kind.is_ai(),
-        limit_current_author_to_changed_lines,
+        limit_current_author_to_changed_lines: limit_current_author_to_changed_lines
+            || limit_to_changed_lines_for_recent_known_human_save,
         previous_content: &previous_content,
         previous_attributions: &prev_attributions,
         content: &current_content,

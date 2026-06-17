@@ -90,6 +90,18 @@ pub(super) fn dirty_files_from_hook_data(
 
 /// Extract file paths from VS Code / CLI hook payload (tool_input + tool_response/tool_result).
 /// Only paths from the current tool call are extracted — no session-level data.
+pub(super) fn file_paths_from_dirty_files(
+    dirty_files: &Option<HashMap<PathBuf, String>>,
+) -> Vec<PathBuf> {
+    let mut paths: Vec<PathBuf> = dirty_files
+        .as_ref()
+        .map(|files| files.keys().cloned().collect())
+        .unwrap_or_default();
+    paths.sort();
+    paths.dedup();
+    paths
+}
+
 pub(super) fn extract_filepaths_from_vscode_hook_payload(
     tool_input: Option<&serde_json::Value>,
     tool_response: Option<&serde_json::Value>,
