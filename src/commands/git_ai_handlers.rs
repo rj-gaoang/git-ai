@@ -167,6 +167,9 @@ pub fn handle_git_ai(args: &[String]) {
         "upload-stats" | "upload-ai-stats" => {
             handle_upload_stats(&args[1..]);
         }
+        "repair-authorship-note" => {
+            handle_repair_authorship_note(&args[1..]);
+        }
         "status" => {
             commands::status::handle_status(&args[1..]);
         }
@@ -1274,6 +1277,123 @@ fn handle_upload_stats(args: &[String]) {
     if failed_count > 0 {
         std::process::exit(1);
     }
+}
+
+fn handle_repair_authorship_note(args: &[String]) {
+    let repo = match find_repository(&Vec::<String>::new()) {
+        Ok(repo) => repo,
+        Err(e) => {
+            eprintln!("Failed to find repository: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    let mut commit_rev = "HEAD".to_string();
+    let mut write_note = false;
+    let mut json_output = false;
+    let mut human_author: Option<String> = None;
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--write" => {
+                write_note = true;
+                i += 1;
+            }
+            "--json" => {
+                json_output = true;
+                i += 1;
+            }
+            "--human-author" => {
+                if i + 1 >= args.len() {
+                    eprintln!("repair-authorship-note: --human-author requires a value");
+                    std::process::exit(1);
+                }
+                human_author = Some(args[i + 1].clone());
+                i += 2;
+            }
+            value if value.starts_with("--") => {
+                eprintln!("repair-authorship-note: unknown flag {}", value);
+                std::process::exit(1);
+            }
+            value => {
+                commit_rev = value.to_string();
+                i += 1;
+            }
+        }
+    }
+
+    let resolved_commit = match repo.revparse_single(&commit_rev) {
+        Ok(commit_obj) => commit_obj.id().to_string(),
+        Err(error) => {
+            eprintln!(
+                "repair-authorship-note: failed to resolve commit {}: {}",
+                commit_rev, error
+            );
+            std::process::exit(1);
+        }
+    };
+
+    let resolved_human_author =
+        human_author.unwrap_or_else(|| commit_author_for_repair(&repo, &resolved_commit));
+
+    match crate::authorship::post_commit::repair_authorship_note_from_archived_working_log(
+        &repo,
+        &resolved_commit,
+        resolved_human_author,
+        write_note,
+    ) {
+        Ok(result) => {
+            if json_output {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "commitSha": result.commit_sha,
+                        "parentSha": result.parent_sha,
+                        "wroteNote": result.wrote_note,
+                        "attestationFileCount": result.authorship_log.attestations.len(),
+                        "stats": result.stats,
+                    })
+                );
+            } else {
+                let stats = &result.stats;
+                println!(
+                    "[git-ai] repair-authorship-note: {} {} ai={} human={} unknown={} mixed={} added={}",
+                    if result.wrote_note {
+                        "wrote"
+                    } else {
+                        "dry-run"
+                    },
+                    short_commit_sha(&result.commit_sha),
+                    stats.ai_additions,
+                    stats.human_additions,
+                    stats.unknown_additions,
+                    stats.mixed_additions,
+                    stats.git_diff_added_lines,
+                );
+            }
+        }
+        Err(error) => {
+            eprintln!("repair-authorship-note: {}", error);
+            std::process::exit(1);
+        }
+    }
+}
+
+fn commit_author_for_repair(repo: &Repository, commit_sha: &str) -> String {
+    let mut args = repo.global_args_for_exec();
+    args.extend([
+        "show".to_string(),
+        "-s".to_string(),
+        "--format=%an <%ae>".to_string(),
+        commit_sha.to_string(),
+    ]);
+    crate::git::repository::exec_git(&args)
+        .ok()
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .map(|author| author.trim().to_string())
+        .filter(|author| !author.is_empty())
+        .unwrap_or_else(|| repo.git_author_identity().formatted_or_unknown())
 }
 
 fn parse_upload_stats_args(args: &[String]) -> Result<UploadStatsArgs, String> {

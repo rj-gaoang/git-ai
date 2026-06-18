@@ -14,6 +14,7 @@ use crate::authorship::working_log::{AgentId, Checkpoint, CheckpointKind, Workin
 use crate::config::{Config, PromptStorageMode};
 use crate::error::GitAiError;
 use crate::git::notes_api::write_note as notes_add;
+use crate::git::repo_storage::PersistedWorkingLog;
 use crate::git::repository::Repository;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io::IsTerminal;
@@ -34,6 +35,14 @@ pub const STATS_SKIP_MAX_FILES_WITH_ADDITIONS: usize = 200;
 /// near zero, so the cost was previously invisible to the estimator.
 #[doc(hidden)]
 pub const STATS_SKIP_MAX_DELETED_LINES: usize = 6000;
+
+pub struct RepairAuthorshipNoteResult {
+    pub commit_sha: String,
+    pub parent_sha: String,
+    pub wrote_note: bool,
+    pub stats: crate::authorship::stats::CommitStats,
+    pub authorship_log: AuthorshipLog,
+}
 
 #[derive(Debug, Clone, Copy)]
 #[doc(hidden)]
@@ -60,6 +69,24 @@ fn checkpoint_entry_requires_post_processing(
             .attributions
             .iter()
             .any(|attr| attr.author_id != CheckpointKind::Human.to_str())
+}
+
+fn is_ai_author_id(author_id: &str) -> bool {
+    author_id != CheckpointKind::Human.to_str()
+        && author_id != CheckpointKind::KnownHuman.to_str()
+        && !author_id.starts_with("h_")
+}
+
+fn checkpoint_entry_has_ai_path_evidence(checkpoint: &Checkpoint, entry: &WorkingLogEntry) -> bool {
+    checkpoint.kind.is_ai()
+        || entry
+            .line_attributions
+            .iter()
+            .any(|attr| is_ai_author_id(&attr.author_id))
+        || entry
+            .attributions
+            .iter()
+            .any(|attr| is_ai_author_id(&attr.author_id))
 }
 
 pub fn post_commit(
@@ -162,10 +189,14 @@ pub fn post_commit_with_final_state(
     // Human-only entries with no AI attribution do not affect authorship output and should not
     // trigger expensive post-commit diff work across large commits.
     let mut pathspecs: HashSet<String> = HashSet::new();
+    let mut ai_gap_fill_pathspecs: HashSet<String> = HashSet::new();
     for checkpoint in &parent_working_log {
         for entry in &checkpoint.entries {
             if checkpoint_entry_requires_post_processing(checkpoint, entry) {
                 pathspecs.insert(entry.file.clone());
+            }
+            if checkpoint_entry_has_ai_path_evidence(checkpoint, entry) {
+                ai_gap_fill_pathspecs.insert(entry.file.clone());
             }
         }
     }
@@ -184,6 +215,7 @@ pub fn post_commit_with_final_state(
             "commitSha": commit_sha,
             "parentSha": parent_sha,
             "pathspecCount": pathspecs.len(),
+            "aiGapFillPathspecCount": ai_gap_fill_pathspecs.len(),
             "initialAttributionFileCount": initial_attributions_for_pathspecs.files.len(),
         }),
     );
@@ -202,7 +234,7 @@ pub fn post_commit_with_final_state(
         &parent_sha,
         &commit_sha,
         &mut authorship_log,
-        &pathspecs,
+        &ai_gap_fill_pathspecs,
         &human_author,
     );
     fill_legacy_human_manual_gaps_for_commit(
@@ -592,6 +624,228 @@ pub fn post_commit_with_final_state(
     Ok((commit_sha.to_string(), authorship_log))
 }
 
+pub fn repair_authorship_note_from_archived_working_log(
+    repo: &Repository,
+    commit_sha: &str,
+    human_author: String,
+    write_note: bool,
+) -> Result<RepairAuthorshipNoteResult, GitAiError> {
+    let commit = repo.revparse_single(commit_sha)?.peel_to_commit()?;
+    if commit.parent_count()? > 1 {
+        return Err(GitAiError::Generic(
+            "repair-authorship-note does not support merge commits".to_string(),
+        ));
+    }
+
+    let resolved_commit = commit.id();
+    let parent_sha = if commit.parent_count()? == 0 {
+        "initial".to_string()
+    } else {
+        commit.parent(0)?.id()
+    };
+    let working_log = repo
+        .storage
+        .archived_working_log_for_base_commit(&parent_sha)?;
+    let final_state = final_state_snapshot_for_working_log(repo, &resolved_commit, &working_log)?;
+    let (mut authorship_log, _initial_attributions) = build_authorship_log_from_working_log(
+        repo,
+        &parent_sha,
+        &resolved_commit,
+        &human_author,
+        &working_log,
+        Some(&final_state),
+    )?;
+
+    apply_note_storage_policy(repo, &mut authorship_log)?;
+
+    let ignore_patterns = effective_ignore_patterns(repo, &[], &[]);
+    let diff_base = if parent_sha == "initial" {
+        "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+    } else {
+        &parent_sha
+    };
+    let diff_hunks =
+        crate::commands::diff::get_diff_with_line_numbers(repo, diff_base, &resolved_commit)?;
+    let stats = stats_for_commit_stats_from_hunks(
+        repo,
+        &resolved_commit,
+        &ignore_patterns,
+        &diff_hunks,
+        Some(&authorship_log),
+    )?;
+
+    if write_note {
+        let authorship_note_str = authorship_log
+            .serialize_to_string()
+            .map_err(|_| GitAiError::Generic("Failed to serialize authorship log".to_string()))?;
+        notes_add(repo, &resolved_commit, &authorship_note_str)?;
+        crate::diagnostics::append_debug_event(
+            "repair_authorship_note_written",
+            serde_json::json!({
+                "repo": repo.canonical_workdir().to_string_lossy().to_string(),
+                "commitSha": resolved_commit,
+                "parentSha": parent_sha,
+                "authorshipJsonBytes": authorship_note_str.len(),
+                "statsSummary": commit_stats_debug_summary(&stats),
+                "promptSummary": prompt_debug_summary(&authorship_log),
+                "attestationFileCount": authorship_log.attestations.len(),
+            }),
+        );
+    }
+
+    Ok(RepairAuthorshipNoteResult {
+        commit_sha: resolved_commit,
+        parent_sha,
+        wrote_note: write_note,
+        stats,
+        authorship_log,
+    })
+}
+
+fn build_authorship_log_from_working_log(
+    repo: &Repository,
+    parent_sha: &str,
+    commit_sha: &str,
+    human_author: &str,
+    working_log: &PersistedWorkingLog,
+    final_state_override: Option<&HashMap<String, String>>,
+) -> Result<(AuthorshipLog, crate::git::repo_storage::InitialAttributions), GitAiError> {
+    let parent_working_log = working_log.read_all_checkpoints().unwrap_or_default();
+    let mut pathspecs: HashSet<String> = HashSet::new();
+    let mut ai_gap_fill_pathspecs: HashSet<String> = HashSet::new();
+    for checkpoint in &parent_working_log {
+        for entry in &checkpoint.entries {
+            if checkpoint_entry_requires_post_processing(checkpoint, entry) {
+                pathspecs.insert(entry.file.clone());
+            }
+            if checkpoint_entry_has_ai_path_evidence(checkpoint, entry) {
+                ai_gap_fill_pathspecs.insert(entry.file.clone());
+            }
+        }
+    }
+
+    let initial_attributions_for_pathspecs = working_log.read_initial_attributions();
+    for file_path in initial_attributions_for_pathspecs.files.keys() {
+        pathspecs.insert(file_path.clone());
+    }
+
+    let working_va = if let Some(snapshot) = final_state_override {
+        VirtualAttributions::from_working_log_snapshot_with_log(
+            repo.clone(),
+            parent_sha.to_string(),
+            Some(human_author.to_string()),
+            snapshot,
+            working_log,
+        )?
+    } else {
+        VirtualAttributions::from_just_working_log(
+            repo.clone(),
+            parent_sha.to_string(),
+            Some(human_author.to_string()),
+        )?
+    };
+
+    let (mut authorship_log, initial_attributions) = working_va
+        .to_authorship_log_and_initial_working_log(
+            repo,
+            parent_sha,
+            commit_sha,
+            Some(&pathspecs),
+            final_state_override,
+        )?;
+
+    fill_ai_attribution_gaps_for_commit(
+        repo,
+        parent_sha,
+        commit_sha,
+        &mut authorship_log,
+        &ai_gap_fill_pathspecs,
+        human_author,
+    );
+    fill_legacy_human_manual_gaps_for_commit(
+        repo,
+        parent_sha,
+        commit_sha,
+        &mut authorship_log,
+        &parent_working_log,
+        human_author,
+    );
+    fill_legacy_human_ai_gaps_for_commit(
+        repo,
+        parent_sha,
+        commit_sha,
+        &mut authorship_log,
+        &parent_working_log,
+        human_author,
+    );
+
+    authorship_log.metadata.base_commit_sha = commit_sha.to_string();
+    authorship_log.ensure_x_user_id_from_repo(repo);
+
+    Ok((authorship_log, initial_attributions))
+}
+
+fn final_state_snapshot_for_working_log(
+    repo: &Repository,
+    commit_sha: &str,
+    working_log: &PersistedWorkingLog,
+) -> Result<HashMap<String, String>, GitAiError> {
+    let checkpoints = working_log.read_all_checkpoints().unwrap_or_default();
+    let initial_attributions = working_log.read_initial_attributions();
+    let mut paths: HashSet<String> = initial_attributions.files.keys().cloned().collect();
+    for checkpoint in checkpoints {
+        for entry in checkpoint.entries {
+            paths.insert(entry.file);
+        }
+    }
+
+    let mut snapshot = HashMap::new();
+    for path in paths {
+        let content = match repo.get_file_content(&path, commit_sha) {
+            Ok(bytes) => String::from_utf8(bytes).unwrap_or_default(),
+            Err(_) => String::new(),
+        };
+        snapshot.insert(path, content);
+    }
+    Ok(snapshot)
+}
+
+fn apply_note_storage_policy(
+    repo: &Repository,
+    authorship_log: &mut AuthorshipLog,
+) -> Result<(), GitAiError> {
+    let config = Config::fresh();
+    let effective_storage = config.effective_prompt_storage(&Some(repo.clone()));
+    let custom_attrs = config.custom_attributes().clone();
+
+    if !custom_attrs.is_empty() {
+        for pr in authorship_log.metadata.prompts.values_mut() {
+            pr.custom_attributes = Some(custom_attrs.clone());
+        }
+        for sr in authorship_log.metadata.sessions.values_mut() {
+            sr.custom_attributes = Some(custom_attrs.clone());
+        }
+    }
+
+    retain_user_prompt_messages(&mut authorship_log.metadata.prompts);
+
+    match effective_storage {
+        PromptStorageMode::Local => {
+            strip_prompt_messages(&mut authorship_log.metadata.prompts);
+        }
+        PromptStorageMode::Notes => {
+            redact_secrets_from_prompts(&mut authorship_log.metadata.prompts);
+        }
+        PromptStorageMode::Default => {
+            // Repair/rebuild is intentionally side-effect-free: do not enqueue
+            // prompt CAS uploads from a dry run or note rewrite.
+            strip_prompt_messages(&mut authorship_log.metadata.prompts);
+        }
+    }
+
+    Ok(())
+}
+
 #[derive(Debug, Clone)]
 enum StatsSkipReason {
     MergeCommit,
@@ -676,6 +930,13 @@ fn commit_stats_debug_summary(stats: &crate::authorship::stats::CommitStats) -> 
     })
 }
 
+fn sorted_path_sample(paths: impl IntoIterator<Item = String>, limit: usize) -> Vec<String> {
+    let mut paths = paths.into_iter().collect::<Vec<_>>();
+    paths.sort();
+    paths.truncate(limit);
+    paths
+}
+
 fn fill_ai_attribution_gaps_for_commit(
     repo: &Repository,
     parent_sha: &str,
@@ -722,6 +983,20 @@ fn fill_ai_attribution_gaps_for_commit(
         .values()
         .map(|prompt| prompt.total_additions as usize)
         .sum::<usize>();
+    let included_candidate_files = all_added_lines
+        .iter()
+        .filter(|(path, lines)| {
+            !lines.is_empty() && (pathspecs.contains(*path) || landed_ai_files.contains(*path))
+        })
+        .map(|(path, _)| path.clone())
+        .collect::<Vec<_>>();
+    let excluded_candidate_files = all_added_lines
+        .iter()
+        .filter(|(path, lines)| {
+            !lines.is_empty() && !pathspecs.contains(*path) && !landed_ai_files.contains(*path)
+        })
+        .map(|(path, _)| path.clone())
+        .collect::<Vec<_>>();
 
     let committed_hunks: HashMap<String, Vec<LineRange>> = all_added_lines
         .into_iter()
@@ -730,15 +1005,35 @@ fn fill_ai_attribution_gaps_for_commit(
                 return false;
             }
 
-            if pathspecs.is_empty() || !pathspecs.contains(path) {
-                return true;
-            }
-
-            landed_ai_files.contains(path)
+            pathspecs.contains(path) || landed_ai_files.contains(path)
         })
         .map(|(path, lines)| (path, LineRange::compress_lines(&lines)))
         .collect();
     if committed_hunks.is_empty() {
+        if !excluded_candidate_files.is_empty() {
+            crate::diagnostics::append_debug_event(
+                "post_commit_ai_attribution_gap_fill_skipped",
+                serde_json::json!({
+                    "repo": repo.canonical_workdir().to_string_lossy().to_string(),
+                    "commitSha": commit_sha,
+                    "parentSha": parent_sha,
+                    "reason": "no_ai_path_evidence",
+                    "allAddedLineCount": all_added_count,
+                    "pathspecAddedLineCount": pathspec_added_count,
+                    "missingAddedLineCount": missing_added_count,
+                    "pathspecCount": pathspecs.len(),
+                    "pathspecSample": sorted_path_sample(pathspecs.iter().cloned(), 20),
+                    "landedAiFileCount": landed_ai_files.len(),
+                    "landedAiFileSample": sorted_path_sample(landed_ai_files.iter().cloned(), 20),
+                    "includedCandidateFileCount": included_candidate_files.len(),
+                    "includedCandidateFileSample": sorted_path_sample(included_candidate_files.clone(), 20),
+                    "excludedCandidateFileCount": excluded_candidate_files.len(),
+                    "excludedCandidateFileSample": sorted_path_sample(excluded_candidate_files.clone(), 20),
+                    "attestationHash": attestation_hash,
+                    "humanAuthor": human_author,
+                }),
+            );
+        }
         return;
     }
 
@@ -750,6 +1045,31 @@ fn fill_ai_attribution_gaps_for_commit(
         return;
     }
     if total_ai_additions < attested_ai_added_count.saturating_add(unattributed_added_count) {
+        crate::diagnostics::append_debug_event(
+            "post_commit_ai_attribution_gap_fill_skipped",
+            serde_json::json!({
+                "repo": repo.canonical_workdir().to_string_lossy().to_string(),
+                "commitSha": commit_sha,
+                "parentSha": parent_sha,
+                "reason": "not_enough_ai_generated_lines",
+                "allAddedLineCount": all_added_count,
+                "pathspecAddedLineCount": pathspec_added_count,
+                "missingAddedLineCount": missing_added_count,
+                "unattributedAddedLineCount": unattributed_added_count,
+                "pathspecCount": pathspecs.len(),
+                "pathspecSample": sorted_path_sample(pathspecs.iter().cloned(), 20),
+                "totalAiAdditions": total_ai_additions,
+                "attestedAiAddedLineCount": attested_ai_added_count,
+                "landedAiFileCount": landed_ai_files.len(),
+                "landedAiFileSample": sorted_path_sample(landed_ai_files.iter().cloned(), 20),
+                "includedCandidateFileCount": included_candidate_files.len(),
+                "includedCandidateFileSample": sorted_path_sample(included_candidate_files.clone(), 20),
+                "excludedCandidateFileCount": excluded_candidate_files.len(),
+                "excludedCandidateFileSample": sorted_path_sample(excluded_candidate_files.clone(), 20),
+                "attestationHash": attestation_hash,
+                "humanAuthor": human_author,
+            }),
+        );
         return;
     }
 
@@ -775,9 +1095,15 @@ fn fill_ai_attribution_gaps_for_commit(
             "missingAddedLineCount": missing_added_count,
             "unattributedAddedLineCount": unattributed_added_count,
             "pathspecCount": pathspecs.len(),
+            "pathspecSample": sorted_path_sample(pathspecs.iter().cloned(), 20),
             "totalAiAdditions": total_ai_additions,
             "attestedAiAddedLineCount": attested_ai_added_count,
             "landedAiFileCount": landed_ai_files.len(),
+            "landedAiFileSample": sorted_path_sample(landed_ai_files.iter().cloned(), 20),
+            "includedCandidateFileCount": included_candidate_files.len(),
+            "includedCandidateFileSample": sorted_path_sample(included_candidate_files, 20),
+            "excludedCandidateFileCount": excluded_candidate_files.len(),
+            "excludedCandidateFileSample": sorted_path_sample(excluded_candidate_files, 20),
             "attestationHash": attestation_hash,
             "humanAuthor": human_author,
         }),

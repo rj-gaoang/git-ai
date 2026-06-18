@@ -571,11 +571,12 @@ fn test_run_in_terminal_merges_dirty_files_when_stat_diff_is_narrow() {
     ]);
 }
 
-/// Regression: Copilot sessions can generate more files than a native hook
-/// reports. If post-commit materialization is scoped only to checkpoint
-/// pathspecs, those extra AI-generated files become unknown additions.
+/// Guardrail: Copilot sessions can generate more files than a native hook
+/// reports, but post-commit gap filling must not turn files with no path
+/// evidence into AI. Missing checkpoint paths are fixed at hook capture time
+/// (for example via dirtyFiles), not by guessing from session totals.
 #[test]
-fn test_copilot_ai_session_fills_uncheckpointed_committed_file_gaps() {
+fn test_copilot_ai_session_does_not_fill_uncheckpointed_committed_file_gaps() {
     let repo = TestRepo::new();
 
     std::fs::write(repo.path().join("seed.txt"), "seed\n").unwrap();
@@ -624,7 +625,8 @@ fn test_copilot_ai_session_fills_uncheckpointed_committed_file_gaps() {
     .unwrap();
 
     // This file was produced by the same AI session, but no checkpoint path
-    // was emitted for it. It should not remain unknown after commit.
+    // was emitted for it. Without path evidence, post-commit must leave it
+    // unknown instead of guessing that every unattributed line is AI.
     std::fs::write(&missed_file, "export const missed = true;\n").unwrap();
 
     repo.sync_daemon();
@@ -636,11 +638,94 @@ fn test_copilot_ai_session_fills_uncheckpointed_committed_file_gaps() {
 
     let stats = repo.stats().unwrap();
     assert_eq!(stats.git_diff_added_lines, 3);
-    assert_eq!(stats.ai_additions, 3);
-    assert_eq!(stats.unknown_additions, 0);
+    assert_eq!(stats.ai_additions, 2);
+    assert_eq!(stats.unknown_additions, 1);
 
     let mut missed = repo.filename("missed_by_hook.ts");
-    missed.assert_lines_and_blame(crate::lines!["export const missed = true;".ai()]);
+    missed.assert_lines_and_blame(crate::lines![
+        "export const missed = true;".unattributed_human()
+    ]);
+}
+
+/// Regression: an AI-heavy commit can also contain a tiny manual version bump
+/// in files outside the AI checkpoint pathspec. The AI gap-fill budget may be
+/// large enough to cover those lines, but they must not be attributed to AI
+/// unless the file itself had current AI path evidence.
+#[test]
+fn test_copilot_gap_fill_does_not_claim_manual_files_outside_ai_pathspec() {
+    let repo = TestRepo::new();
+
+    std::fs::write(repo.path().join("Cargo.toml"), "version = \"2.2.40\"\n").unwrap();
+    std::fs::write(repo.path().join("Cargo.lock"), "version = \"2.2.40\"\n").unwrap();
+    std::fs::write(repo.path().join("src.rs"), "pub fn old() {}\n").unwrap();
+    repo.git(&["add", "Cargo.toml", "Cargo.lock", "src.rs"])
+        .unwrap();
+    repo.git(&["commit", "-m", "Initial"]).unwrap();
+
+    let ai_file = repo.path().join("src.rs");
+    let checkpointed_content =
+        "pub fn old() {}\npub fn generated() {}\npub fn generated_not_committed() {}\n";
+    let final_ai_content = "pub fn old() {}\npub fn generated() {}\npub fn generated_tail() {}\n";
+
+    std::fs::write(&ai_file, checkpointed_content).unwrap();
+    let post_hook_input = json!({
+        "timestamp": "2026-06-17T23:46:04.000+08:00",
+        "hook_event_name": "PostToolUse",
+        "session_id": "manual-version-bump-guard",
+        "transcript_path": fake_copilot_transcript_path(&repo),
+        "tool_name": "edit_file",
+        "tool_input": {
+            "filePath": ai_file.to_str().unwrap(),
+            "content": checkpointed_content
+        },
+        "tool_response": "",
+        "tool_use_id": "toolu_manual_version_bump_guard__vscode-1781711164000",
+        "cwd": repo.path().to_str().unwrap()
+    });
+    repo.git_ai(&[
+        "checkpoint",
+        "github-copilot",
+        "--hook-input",
+        &post_hook_input.to_string(),
+    ])
+    .unwrap();
+
+    // AI tail line has no direct line-range attestation but the same file is
+    // in the AI pathspec, so gap-fill may safely cover it.
+    std::fs::write(&ai_file, final_ai_content).unwrap();
+
+    // These version bumps are manual and outside the AI pathspec. They used
+    // to be swallowed by the broad post-commit AI gap fill.
+    std::fs::write(repo.path().join("Cargo.toml"), "version = \"2.2.41\"\n").unwrap();
+    std::fs::write(repo.path().join("Cargo.lock"), "version = \"2.2.41\"\n").unwrap();
+
+    repo.sync_daemon();
+    repo.git(&["add", "Cargo.toml", "Cargo.lock", "src.rs"])
+        .unwrap();
+    repo.git(&["commit", "-m", "AI edit plus manual version bump"])
+        .unwrap();
+    repo.sync_daemon();
+
+    let stats = repo.stats().unwrap();
+    // stats ignores lockfiles by default, so this counts the two source lines
+    // plus Cargo.toml; Cargo.lock is checked below via blame/note behavior.
+    assert_eq!(stats.git_diff_added_lines, 3);
+    assert_eq!(stats.ai_additions, 2);
+    assert_eq!(stats.human_additions, 0);
+    assert_eq!(stats.unknown_additions, 1);
+
+    let mut ai_file = repo.filename("src.rs");
+    ai_file.assert_lines_and_blame(crate::lines![
+        "pub fn old() {}".human(),
+        "pub fn generated() {}".ai(),
+        "pub fn generated_tail() {}".ai()
+    ]);
+
+    let mut manifest = repo.filename("Cargo.toml");
+    manifest.assert_lines_and_blame(crate::lines!["version = \"2.2.41\"".unattributed_human()]);
+
+    let mut lockfile = repo.filename("Cargo.lock");
+    lockfile.assert_lines_and_blame(crate::lines!["version = \"2.2.41\"".unattributed_human()]);
 }
 
 /// Regression: a Copilot session can land some AI-attributed lines in a file,

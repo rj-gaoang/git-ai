@@ -427,12 +427,14 @@ pub fn stats_from_authorship_log(
         tool_stats.ai_accepted = *accepted;
     }
 
-    // AI additions are the sum of mixed and accepted lines.
-    commit_stats.ai_additions = commit_stats.mixed_additions + commit_stats.ai_accepted;
+    // Main AI additions only count lines that landed with AI attribution.
+    // Mixed lines are tracked separately because they represent human-edited
+    // AI output and must not inflate the dashboard's AI-authored line count.
+    commit_stats.ai_additions = commit_stats.ai_accepted;
 
     // Set ai_additions for each tool using the same contract.
     for tool_stats in commit_stats.tool_model_breakdown.values_mut() {
-        tool_stats.ai_additions = tool_stats.ai_accepted + tool_stats.mixed_additions;
+        tool_stats.ai_additions = tool_stats.ai_accepted;
     }
 
     // KnownHuman-attested additions (positively identified as human-authored)
@@ -2039,7 +2041,7 @@ mod tests {
         let stats = stats_for_commit_stats(tmp_repo.gitai_repo(), &merge_sha, &[]).unwrap();
 
         assert_eq!(stats.ai_accepted, 0);
-        assert_eq!(stats.ai_additions, stats.mixed_additions);
+        assert_eq!(stats.ai_additions, 0);
     }
 
     #[test]
@@ -2317,7 +2319,7 @@ mod tests {
 
         // Mixed should be capped to max possible: 10 - 5 = 5
         assert_eq!(stats.mixed_additions, 5);
-        assert_eq!(stats.ai_additions, 10); // 5 accepted + 5 mixed
+        assert_eq!(stats.ai_additions, 5); // ai_accepted; mixed is tracked separately
         assert_eq!(stats.human_additions, 0); // 10 - 5 accepted = 5, but mixed takes it
     }
 

@@ -33,6 +33,41 @@ Speckit 是团队使用的「规范驱动开发」框架，通过 `.specify/` �
 
 > **文档更新说明（2026-04-24）**：本文最初主要从“Speckit 如何集成 git-ai”的视角写，当前已经补充 `git-ai` 本身的源码改动，包括 `post_commit` 挂接点、原生上传模块、feature flag、环境变量约定、失败降级策略，以及代码级验证结果。也就是说，这份文档现在同时覆盖 Speckit 侧改造和 git-ai 侧改造，不再只是一份脚本集成方案。
 
+## 最近一周归因不准问题总览（2026-06-11 至 2026-06-17）
+
+最近一周看板“统计不准”不是同一个公式错误，而是归因输入、checkpoint 落盘、post-commit gap-fill、上传补算和安装生效几个环节分别暴露问题。排查时必须先判断本地 `post_commit_stats_computed.statsSummary` 是否已经算错：如果本地 `aiAdditions` / `humanAdditions` / `unknownAdditions` 已经异常，根因在归因链路；如果本地正确但看板不对，再查上传 payload、后端响应和逐文件路径匹配。
+
+| 症状 | 最近一周根因 | 典型现场 | 修复/判断口径 |
+|------|--------------|----------|---------------|
+| AI 生成被识别为人工 | AI 工具写入后触发 IDE / VS Code 保存事件，弱 `KnownHuman` 或 recent `KnownHuman` 抢先写入 `h_*` 人工 attestation；旧逻辑把“保存”当成“人手写完整文件” | 王治尧 `2026-06-12` 全 AI 代码被算出大量 `humanAdditions`；胡晴琨 `op-api` `2026-06-17 16:29:36` 提交中 AI Edited 后紧跟 `known_human` | 弱 `KnownHuman` 缺少有效 `kh_editor` 时降级，不再强归人工；recent AI 后 1 秒内拒绝保存抢占，30 秒内只归因真实新增/改动行 |
+| AI 生成完全未识别，落入 `unknown` | Copilot native / CLI hook 的 `tool_input` / `tool_response` 不带路径，真实路径只在顶层 `dirtyFiles` / `dirty_files` 的 key；旧代码只把 `dirtyFiles` 当快照内容，没把 key 当路径兜底 | `rj-ltc-contract-web`、`ai-cr-manage-service`、`op-api`，以及 `rj-ltc-web` 这种“代码全是 AI，最终只识别少量行”的场景 | GitHub Copilot `ide` / `cli` preset 已用 `file_paths_from_dirty_files(...)` 做路径兜底；看 `bash_post_checkpoint_resolved.dirtyFilePathCount` / `mergedFromDirtyFiles` / `finalFileCount` |
+| AI 生成部分未识别，文件已经进了 AI checkpoint 但尾段是 `unknown` | 旧 gap-fill 只补“完全没进 pathspec 的漏文件”，没有补“同一个文件已有部分 AI line range，但本次新增尾段没有任何 line-range attestation”的缺口 | 王江龙 `ltc-platform` `2026-06-17 22:00:44`，`CrAiParseFlowServiceImpl.java` 新增 298 行，159 行 AI，139 行 unknown | 新 gap-fill 在已有当前 AI attestation 落地的文件内补未归因新增行，并受 `totalAiAdditions >= 已落地 AI 行 + 待补缺口行` 预算保护；看 `post_commit_ai_attribution_gaps_filled.unattributedAddedLineCount` / `landedAiFileCount` |
+| 人工文件被误补成 AI | 旧 AI gap-fill 用“整次 commit 新增行”补 AI 缺口，遇到同一提交里同时有 AI 文件和人工文件时，可能跨文件把没有 AI 证据的新增行也补到当前 AI attestation | `git-ai` 最近提交中 `Cargo.toml` / `Cargo.lock` 本应为人工或未归因，却被看板显示为 AI | AI gap-fill 只能处理有 AI checkpoint 路径证据或已有当前 AI attestation 落地的文件；主指标按最终落地 attestation 归因，`mixedAdditions` 不再并入 `aiAdditions`；日志新增 `includedCandidateFileSample` / `excludedCandidateFileSample` / `pathspecSample` |
+| AI 生成部分未识别，bash / terminal 场景漏文件 | Copilot terminal / bash post 在 `MissingPreSnapshot`、`SnapshotFailed`、`HookTimeout` 或 post-hook error 时旧逻辑直接放弃 post checkpoint；或者只用窄 stat diff，没合并 `dirtyFiles` 里的真实文件路径 | 张一峰 `op-api` `2026-06-11 13:58:10`、`rj-ltc-web` Copilot bash dirty files 漏归因 | `PostBashCall` 已携带 `dirty_files`，post 阶段合并 dirty file paths，并在异常时回退 `git_status_fallback`；看 `bash_post_checkpoint_resolved.fallbackReason`、`detectedPathCount`、`dirtyFilePathCount`、`finalFileCount` |
+| 路径已发现，但 checkpoint 文件被 daemon 过滤，最终 `unknown` | 既有文本文件含非 UTF-8 字节，旧 checkpoint 用 `read_to_string(...).ok()` 读取失败后 `content=None`，daemon 又只保留带内容的文件 | `op-return-exchange` 多个 `.java` / `.properties` 文件，`bash_post_checkpoint_resolved` 已发现 90 个文件，但 daemon 只解析 79 个 | checkpoint 改为字节读取并用 `String::from_utf8_lossy` 生成文本快照，daemon 对 `content=None` 增加 workdir 兜底读取 |
+| 人工新增被识别不出来，落入 `unknown` | legacy `Human` checkpoint 的语义历史上偏“基线/未知”，明确人工新增没有稳定生成 `h_*` attestation | 张彪 `contract` `2026-06-16` 多次人工提交被归为 `unknown` | 已区分 explicit manual 与 AI pre-edit baseline；排查时看 `checkpoint_attribution_decision.kind=human/known_human` 是否真的写入人工 attestation |
+| 空白行或中文路径导致逐文件看起来不准 | whitespace-only 新增行不在 note line range 内会被直接算 unknown；`core.quotepath=true` 会把中文路径转义，导致逐文件 numstat 与 note 路径对不上 | 方法尾部空白行差 1 行；中文文件名逐文件 `aiAdditions` 掉到 `unknownAdditions` | stats / upload 已对相邻空白新增行做归并；逐文件 numstat 显式使用 `git -c core.quotepath=false diff-tree --numstat` |
+| 上传/看板看起来不准，但归因本体没错 | post-commit 没运行、stats 被大提交保护跳过后上传没补算、自动更新先重启导致本次 commit 未上传、HTTP 200 但后端业务 `code != 200` 被误当成功 | 坏 `core.hooksPath` 指向旧目录、`post_commit_stats_skipped(reason=expensive_commit)` 后 `upload_stats_skipped(reason=stats_unavailable)`、安装/更新期间 daemon 新旧混跑 | 先确认 `git_proxy_entered` / `post_commit_*` 是否存在；大提交上传已支持后台补算；commit 成功后先 fallback upload 再调度自更新；上传成功必须同时校验 HTTP 和响应体 `code=200` |
+| 模型被统一显示成 `gpt-5.3-codex` | Copilot VS Code native transcript 没有写实际请求模型时，旧逻辑回退读取 `debug-logs/<session>/models.json` 的聊天默认模型；默认模型不是本次请求实际模型 | `C:\Users\admin\.git-ai\logs` 中 `github-copilot` 记录出现 `copilot/gpt-5.3-codex`，但当前 `git-ai` HEAD note 实际是 `codex::gpt-5.5` | 归因链路不再使用 `models.json` 默认模型兜底；transcript 有实际模型才写入，否则写 `unknown`，并记录 `checkpoint_copilot_model_resolved.modelSource` 与 `checkpoint_copilot_models_json_default_ignored` |
+
+当前最容易混淆的是三件事：
+
+1. `unknownAdditions` 不是人工行，只表示“本次 commit 新增行没有被任何 AI 或人工 attestation 覆盖”。没有 AI checkpoint 时，即使用户事后确认是 AI，也不能直接把历史 unknown 硬改成 AI，否则会破坏审计语义。
+2. “AI 被识别成人工”和“AI 没识别出来”要分开看。前者通常能在 `checkpoint_attribution_decision.kind=known_human`、`decision=human`、`h_*` attestation 中看到证据；后者通常表现为 `aiCheckpointCount=0`、路径为空、daemon 解析文件数少于 hook 检测文件数，或同文件存在未覆盖的新增 line range。
+3. “本地统计不准”和“远程看板不准”也要分开看。若 `post_commit_stats_computed.statsSummary` 已经异常，优先查 checkpoint / authorship note；若本地 stats 正确但远程异常，优先查 `upload_stats_payload_build_succeeded`、`upload_stats_response_*`、逐文件 path key、`hasAuthorshipNote` 和后端业务响应。
+
+现场日志建议按下面顺序看：
+
+| 要判断什么 | 优先看哪些事件 |
+|------------|----------------|
+| 本次提交有没有归因输入 | `post_commit_working_log_loaded.checkpointSummary`，尤其是 `aiCheckpointCount`、`promptCount`、`sessionCount`、`attestationFileCount` |
+| Copilot / bash 是否拿到了文件路径 | `bash_post_checkpoint_resolved` 的 `detectedPathCount`、`dirtyFilePathCount`、`mergedFromDirtyFiles`、`fallbackReason`、`finalFileCount` |
+| checkpoint 是否被写入或被过滤 | `checkpoint_request_send`、`checkpoint_request_started`、`checkpoint_request_finished`、`daemon_checkpoint_request_resolved_files`、`checkpoint_no_entries` |
+| AI 是否被 IDE 保存抢成人工 | `checkpoint_attribution_decision`、`known_human_checkpoint_rejected`、`diagnosticHints`、`previousCheckpoint.kind`、`fileDiagnostics[].reason` |
+| AI 文件内部是否还有未覆盖尾段 | `post_commit_ai_attribution_gaps_filled` 的 `missingAddedLineCount`、`unattributedAddedLineCount`、`landedAiFileCount` |
+| 本地最终统计是否已经异常 | `post_commit_stats_computed.statsSummary.gitDiffAddedLines`、`aiAdditions`、`humanAdditions`、`unknownAdditions` |
+| 是不是上传/看板链路异常 | `post_commit_stats_skipped`、`upload_stats_skipped`、`upload_stats_ready`、`upload_stats_payload_build_succeeded`、`upload_stats_response_*`、`hasAuthorshipNote` |
+
 > **实施补充（2026-06-15，Windows 手动安装指定旧版本后的入口版本分裂修复）**：针对管理员 PowerShell 执行 `https://github.com/rj-gaoang/git-ai/releases/download/v2.2.32/install.ps1` 后输出“Successfully installed git-ai into `C:\Users\admin\.git-ai\bin`”，但同一窗口 `git-ai --version` 仍可能显示 `2.2.33` 的现象，本轮确认这不是 2.2.32 二进制下载失败。现场文件状态是：`.git-ai\bin\git-ai.exe` 已经被旧 GitHub release 安装器写成 `2.2.32`，但 `.git-ai\launcher\git-ai.exe` 仍是 `2.2.33`，`.git-ai\current-exe` 也仍指向 launcher；同时 machine PATH 中 `.git-ai\launcher` 位于 `.git-ai\bin` 前面，不同 PowerShell 会话 / PATH 合并顺序会解析到不同入口。根因是旧手动安装器只维护 legacy `.git-ai\bin`，而 windows-update-service 和当前安装完整性检测已经把 `.git-ai\launcher` / `current-exe` 作为权威入口，导致“bin 是 2.2.32、launcher 是 2.2.33”的半安装状态。修复方案落在 `git-ai/install.ps1`：Windows 直接安装也改为先把下载并校验后的二进制安装到 `.git-ai\launcher\git-ai.exe`，原子写入 `.git-ai\current-exe` 指向 launcher，再从 launcher 同步一份兼容副本到 `.git-ai\bin\git-ai.exe`，`exchange-nonce`、`install-hooks` 和 daemon restart 都优先使用 launcher；`.git-ai\bin` 继续保留给既有 PATH 与旧 agent hook 配置，避免破坏历史安装。新增回归测试 `windows_install_script_synchronizes_launcher_current_exe_and_compat_bin` 和 `windows_install_script_writes_current_exe_pointer_to_launcher`，真实 PowerShell 安装测试断言 launcher、current-exe、compat bin 三者同时存在且 launcher / bin `--version` 完全一致。需要注意：已经发布出去的 `v2.2.32 install.ps1` 不能靠当前源码自动改变，除非重新替换该 release asset；当前修复覆盖后续发布版本，并可通过重新运行修复后的安装脚本把本机入口分裂修回一致。
 
 > **实施补充（2026-06-15，`-BestEffort` 探活脏数据彻底切断）**：针对看板仍出现 `author=-BestEffort`、`customAttributes.source=-GitPath` 的安装成功测试数据，本轮确认直接根因不是 git-ai Rust 探活，而是 Windows Update Service 的旧外部探活链路。wrapper 使用 `$scriptArgs = @('-GitAiExe', $GitAiExe, '-Source', 'installTest', '-BestEffort', '-GitPath', ...)` 后执行 `& $scriptPath @scriptArgs`，这里 PowerShell 数组 splatting 并不会按命名参数绑定，而是把数组元素按位置传给脚本；于是 `-BestEffort` 可能落入 `UserId`，后续变成 `author=-BestEffort` / `X-USER-ID=-BestEffort`，`-GitPath` 可能落入 `Source`，后续变成 `source=-GitPath`。同时 service 默认关闭安装脚本内置 Rust 探活，再由 `upload-install-test.ps1` 直连同一个看板接口，因此 git-ai 本身正常也会被旧外部 producer 的脏数据污染共享看板。修复分三层：第一，Windows Update Service 默认不再设置 `GIT_AI_SKIP_INSTALL_TEST_UPLOAD=1`，也不再默认执行外部 `upload-install-test.ps1`，安装成功探活以 git-ai Rust 内置 `installTestProducer=git-ai-rust` 为权威；第二，外部脚本仅在显式设置 `GIT_AI_SERVICE_RUN_LEGACY_INSTALL_TEST_UPLOAD=1` 时作为兼容入口运行；第三，兼容入口改用 hashtable 命名参数 splatting，且 `upload-install-test.ps1` 自身拒绝 `-BestEffort`、`-GitPath`、`-Source` 这类参数形 user/source 候选，避免再进入 `author`、`source`、`X-USER-ID`。线上 `172.16.37.100:8888/ruijie-ai-update-service/upload-install-test.ps1` 当前仍是旧哈希 `8613F17D...`，本地修复版为 `7904EDC5...`；必须发布新的 Windows Update Service 包和脚本后，后续用户才不会再产生这类 `BestEffort` 探活数据。历史数据应按 `installerScript=upload-install-test.ps1` 或 `author/source` 以 `-` 开头隔离。
@@ -1784,7 +1819,7 @@ if ($Json) {
 | 总新增行 | `stats.gitDiffAddedLines` | git diff 统计的新增行数 |
 | 已知人工 | `stats.humanAdditions` | 有明确 KnownHuman 归因的新增行数 |
 | 未知/未归因 | `stats.unknownAdditions` | 当前没有 attestation 的新增行数；无 note 时通常会占大头 |
-| AI归因新增 | `stats.aiAdditions` | 当前默认对外展示的 AI 新增行数，已包含 mixedAdditions |
+| AI归因新增 | `stats.aiAdditions` | 当前默认对外展示的 AI 新增行数，只统计最终落地且带 AI attestation 的新增行，不包含 `mixedAdditions` |
 | AI 占比 | 计算值 | `stats.aiAdditions / stats.gitDiffAddedLines × 100%` |
 | Note | `hasAuthorshipNote` | 当前 commit 是否真的带有 `refs/notes/ai` |
 | 主要工具 | `stats.toolModelBreakdown` 中 `aiAdditions` 最大的项，展示为 `tool / model` | 如 `copilot / gpt-4o` |
@@ -1993,9 +2028,9 @@ if ($Json) {
 |------------|------|------|
 | `humanAdditions` | 已知有人类 attestation 的新增行数（KnownHuman） | 105 行 |
 | `unknownAdditions` | 当前没有 attestation 的新增行数；没有 note 时通常会很高 | 15 行 |
-| `aiAdditions` | 带有 AI 归因的新增行数，等于 `aiAccepted + mixedAdditions` | 80 行 |
+| `aiAdditions` | 带有 AI 归因的新增行数；按最终落地 attestation 统计，当前等于 `aiAccepted`，不再并入 `mixedAdditions` | 80 行 |
 | `aiAccepted` | AI 生成且最终未被人工改动的行数 | 65 行 |
-| `mixedAdditions` | AI 和人工混合编辑的行数 | 15 行 |
+| `mixedAdditions` | 过程指标，表示 AI 输出在提交前被人工覆盖/混合编辑过的行数；不是最终 AI 归因新增行 | 15 行 |
 | `totalAiAdditions` | 本次开发过程中 AI 一共生成过多少行，可能大于最终提交中的 `aiAdditions` | 95 行 |
 | `totalAiDeletions` | AI 参与的删除行数 | 10 行 |
 | `gitDiffAddedLines` | git diff 统计的总新增行数 | 200 行 |
@@ -2035,7 +2070,7 @@ if ($Json) {
 | `aiAdditions` | 高（有 note 且 checkpoint 链完整时） | 是 | 来自 authorship note attestation 中非 `h_*` 的归因条目，表示该 commit 中可归因到 AI 的新增行 |
 | `humanAdditions` | 高（有 note 且 checkpoint 链完整时） | 是 | 来自 `h_*` / `KnownHuman` 等人工归因条目，表示已知人工新增行 |
 | `unknownAdditions` | 高，但含义要谨慎 | 是，需单独展示 | 可靠含义是“未归因新增行”，不是“人工行”；没有 note 或 checkpoint 缺失时会升高 |
-| `aiAccepted` / `mixedAdditions` | 中高 | 可展示 | 依赖 line attribution 的完整性；`mixedAdditions` 表示 AI 和人工混合编辑，不应等同纯 AI 新增 |
+| `aiAccepted` / `mixedAdditions` | 中高 | `aiAccepted` 可参与主指标，`mixedAdditions` 仅辅助展示 | `aiAccepted` 是最终落地的 AI 行；`mixedAdditions` 是过程指标，不应并入 AI 或人工主计数 |
 | `toolModelBreakdown.tool` / `model` | 中高 | 可展示 | 来自 note JSON 元数据里的 `prompts.<hash>.agent_id`；没有 prompt 元数据或旧 note 时可能为空 |
 | `prompts[]` / `promptText` | 中 | 可展示，不建议做强 KPI | 只有 `prompt_storage=notes` 且脱敏后 messages 保留在 note 中时稳定；`default` / `local` 下可能为空 |
 | `timeWaitingForAi` | 低到中 | 仅辅助参考 | 依赖工具 transcript / telemetry 是否提供等待时间，缺失或口径不一时不适合横向考核 |
@@ -2046,7 +2081,8 @@ if ($Json) {
 1. AI 占比主指标使用 `aiAdditions / gitDiffAddedLines`，并单独展示 `unknownAdditions`。
 2. 人工占比主指标只统计 `humanAdditions`，不要把 `unknownAdditions` 自动并入人工。
 3. 逐文件详情使用 `stats.files[]`，因为它已经明确是 commit-local 语义。
-4. prompt 明细只作为排查和上下文展示；若 `promptText` 为空，先检查本机 `prompt_storage` 是否为 `notes`。
+4. `mixedAdditions` 只作为“AI 输出曾被人工改写”的过程参考，不参与 AI 占比、人工占比和文件最终归因。
+5. prompt 明细只作为排查和上下文展示；若 `promptText` 为空，先检查本机 `prompt_storage` 是否为 `notes`。
 
 **响应体 `results[]` 字段说明：**
 

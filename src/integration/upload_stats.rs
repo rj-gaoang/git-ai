@@ -1589,6 +1589,16 @@ fn upload_payload_summary(payload: &Value) -> Value {
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
+    let commit_tool_model_breakdown = first_commit
+        .and_then(|commit| commit.get("toolModelBreakdown"))
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let stats_tool_model_breakdown = stats
+        .and_then(|stats| stats.get("toolModelBreakdown"))
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
     let prompt_text_count = prompts
         .iter()
         .filter(|prompt| {
@@ -1613,7 +1623,42 @@ fn upload_payload_summary(payload: &Value) -> Value {
             "gitDiffAddedLines": stats.get("gitDiffAddedLines").and_then(Value::as_u64).unwrap_or(0),
             "gitDiffDeletedLines": stats.get("gitDiffDeletedLines").and_then(Value::as_u64).unwrap_or(0),
         })),
+        "commitToolModelBreakdownCount": commit_tool_model_breakdown.len(),
+        "commitToolModelBreakdownSample": tool_model_breakdown_sample(&commit_tool_model_breakdown, 5),
+        "statsToolModelBreakdownCount": stats_tool_model_breakdown.len(),
+        "statsToolModelBreakdownSample": tool_model_breakdown_sample(&stats_tool_model_breakdown, 5),
+        "promptToolModelSample": prompt_tool_model_sample(&prompts, 5),
     })
+}
+
+fn tool_model_breakdown_sample(entries: &[Value], limit: usize) -> Vec<Value> {
+    entries
+        .iter()
+        .take(limit)
+        .map(|entry| {
+            json!({
+                "tool": entry.get("tool").and_then(Value::as_str).unwrap_or(""),
+                "model": entry.get("model").and_then(Value::as_str).unwrap_or(""),
+                "aiAdditions": entry.get("aiAdditions").and_then(Value::as_u64).unwrap_or(0),
+                "aiAccepted": entry.get("aiAccepted").and_then(Value::as_u64).unwrap_or(0),
+                "mixedAdditions": entry.get("mixedAdditions").and_then(Value::as_u64).unwrap_or(0),
+            })
+        })
+        .collect()
+}
+
+fn prompt_tool_model_sample(prompts: &[Value], limit: usize) -> Vec<Value> {
+    prompts
+        .iter()
+        .take(limit)
+        .map(|prompt| {
+            json!({
+                "tool": prompt.get("tool").and_then(Value::as_str).unwrap_or(""),
+                "model": prompt.get("model").and_then(Value::as_str).unwrap_or(""),
+                "acceptedLines": prompt.get("acceptedLines").and_then(Value::as_u64).unwrap_or(0),
+            })
+        })
+        .collect()
 }
 
 fn perform_upload_with_lock_held(
@@ -2793,6 +2838,60 @@ mod tests {
         let payload = stats_to_camel_case(&stats, Vec::new());
         assert_eq!(payload["toolModelBreakdown"][0]["tool"], "cursor");
         assert_eq!(payload["toolModelBreakdown"][0]["model"], "unknown");
+    }
+
+    #[test]
+    fn upload_payload_summary_includes_tool_model_samples() {
+        let payload = json!({
+            "commits": [{
+                "commitSha": "abc123",
+                "hasAuthorshipNote": true,
+                "toolModelBreakdown": [{
+                    "tool": "codex",
+                    "model": "gpt-5.5",
+                    "aiAdditions": 4,
+                    "aiAccepted": 4,
+                    "mixedAdditions": 0
+                }],
+                "stats": {
+                    "humanAdditions": 0,
+                    "unknownAdditions": 1,
+                    "aiAdditions": 4,
+                    "gitDiffAddedLines": 5,
+                    "gitDiffDeletedLines": 0,
+                    "files": [],
+                    "toolModelBreakdown": [{
+                        "tool": "github-copilot",
+                        "model": "unknown",
+                        "aiAdditions": 2,
+                        "aiAccepted": 2,
+                        "mixedAdditions": 0
+                    }]
+                },
+                "prompts": [{
+                    "tool": "github-copilot",
+                    "model": "unknown",
+                    "acceptedLines": 2,
+                    "promptText": "hello"
+                }]
+            }]
+        });
+
+        let summary = upload_payload_summary(&payload);
+        assert_eq!(summary["commitToolModelBreakdownCount"], 1);
+        assert_eq!(
+            summary["commitToolModelBreakdownSample"][0]["model"],
+            "gpt-5.5"
+        );
+        assert_eq!(summary["statsToolModelBreakdownCount"], 1);
+        assert_eq!(
+            summary["statsToolModelBreakdownSample"][0]["model"],
+            "unknown"
+        );
+        assert_eq!(
+            summary["promptToolModelSample"][0]["tool"],
+            "github-copilot"
+        );
     }
 
     #[test]

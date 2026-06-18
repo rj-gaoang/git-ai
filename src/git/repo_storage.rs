@@ -97,17 +97,39 @@ impl RepoStorage {
     ) -> Result<PersistedWorkingLog, GitAiError> {
         let working_log_dir = self.working_logs.join(sha);
         fs::create_dir_all(&working_log_dir)?;
+        Ok(self.persisted_working_log_from_dir(working_log_dir, sha))
+    }
+
+    pub fn archived_working_log_for_base_commit(
+        &self,
+        sha: &str,
+    ) -> Result<PersistedWorkingLog, GitAiError> {
+        let working_log_dir = self.working_logs.join(format!("old-{}", sha));
+        if !working_log_dir.exists() {
+            return Err(GitAiError::Generic(format!(
+                "archived working log not found for {}",
+                sha
+            )));
+        }
+        Ok(self.persisted_working_log_from_dir(working_log_dir, sha))
+    }
+
+    fn persisted_working_log_from_dir(
+        &self,
+        working_log_dir: PathBuf,
+        sha: &str,
+    ) -> PersistedWorkingLog {
         let canonical_workdir = self
             .repo_workdir
             .canonicalize()
             .unwrap_or_else(|_| self.repo_workdir.clone());
-        Ok(PersistedWorkingLog::new(
+        PersistedWorkingLog::new(
             working_log_dir,
             sha,
             self.repo_workdir.clone(),
             canonical_workdir,
             None,
-        ))
+        )
     }
 
     pub fn delete_working_log_for_base_commit(&self, sha: &str) -> Result<(), GitAiError> {

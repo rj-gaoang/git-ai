@@ -649,6 +649,22 @@ impl VirtualAttributions {
         final_state_snapshot: &HashMap<String, String>,
     ) -> Result<Self, GitAiError> {
         let working_log = repo.storage.working_log_for_base_commit(&base_commit)?;
+        Self::from_working_log_snapshot_with_log(
+            repo,
+            base_commit,
+            human_author,
+            final_state_snapshot,
+            &working_log,
+        )
+    }
+
+    pub fn from_working_log_snapshot_with_log(
+        repo: Repository,
+        base_commit: String,
+        human_author: Option<String>,
+        final_state_snapshot: &HashMap<String, String>,
+        working_log: &crate::git::repo_storage::PersistedWorkingLog,
+    ) -> Result<Self, GitAiError> {
         let initial_attributions = working_log.read_initial_attributions();
         let checkpoints = working_log.read_all_checkpoints().unwrap_or_default();
 
