@@ -49,6 +49,13 @@ pub enum ControlRequest {
         session_id: String,
         tool_use_id: String,
     },
+    #[serde(rename = "ai_pre_edit.close")]
+    AiPreEditClose {
+        repo_work_dir: String,
+        tool_use_id: String,
+        trace_id: String,
+        reason: String,
+    },
     #[serde(rename = "bash_session.query")]
     BashSessionQuery { repo_work_dir: String },
     #[serde(rename = "bash_snapshot.query")]

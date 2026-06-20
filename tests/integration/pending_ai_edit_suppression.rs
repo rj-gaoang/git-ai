@@ -1,12 +1,31 @@
 use crate::repos::test_file::ExpectedLineExt;
 use crate::repos::test_repo::TestRepo;
+use git_ai::daemon::checkpoint::{AiPreEditCloseExecution, close_ai_pre_edit_from_daemon};
+use git_ai::git::repository::discover_repository_in_path_no_git_exec;
 use serde_json::json;
 use std::fs;
 
-/// Uses the agent-v1 preset to fire a generic PreFileEdit (with agent_id),
-/// which registers pending AI edit state. This is agent-agnostic: it tests
-/// the daemon's suppression logic independent of any specific agent preset.
+/// Uses a real AI pre-edit preset so pending AI edit state is registered
+/// only from an AI tool context, not from the legacy agent-v1 human hook.
 fn fire_pre_edit_checkpoint(repo: &TestRepo, file_paths: &[&str]) {
+    let abs_paths: Vec<String> = file_paths
+        .iter()
+        .map(|p| repo.path().join(p).to_string_lossy().to_string())
+        .collect();
+    let payload = json!({
+        "hook_event_name": "before_edit",
+        "tool": "supermaven",
+        "model": "supermaven-v1",
+        "repo_working_dir": repo.path().to_string_lossy().to_string(),
+        "completion_id": "pending-ai-edit-test",
+        "will_edit_filepaths": abs_paths
+    })
+    .to_string();
+    repo.git_ai(&["checkpoint", "ai_tab", "--hook-input", &payload])
+        .unwrap();
+}
+
+fn fire_agent_v1_human_pre_edit(repo: &TestRepo, file_paths: &[&str]) {
     let abs_paths: Vec<String> = file_paths
         .iter()
         .map(|p| repo.path().join(p).to_string_lossy().to_string())
@@ -14,11 +33,49 @@ fn fire_pre_edit_checkpoint(repo: &TestRepo, file_paths: &[&str]) {
     let payload = json!({
         "type": "human",
         "repo_working_dir": repo.path().to_string_lossy().to_string(),
-        "will_edit_filepaths": abs_paths,
+        "will_edit_filepaths": abs_paths
     })
     .to_string();
     repo.git_ai(&["checkpoint", "agent-v1", "--hook-input", &payload])
         .unwrap();
+}
+
+fn fire_pre_edit_checkpoint_with_tool_use_id(
+    repo: &TestRepo,
+    file_paths: &[&str],
+    tool_use_id: &str,
+) {
+    fire_pre_edit_checkpoint(repo, file_paths);
+    let working_log = repo.current_working_logs();
+    let mut checkpoints = working_log.read_all_checkpoints().unwrap();
+    let checkpoint = checkpoints
+        .last_mut()
+        .expect("pre-edit checkpoint should be present");
+    let metadata = checkpoint
+        .agent_metadata
+        .as_mut()
+        .expect("pre-edit checkpoint should carry agent metadata");
+    metadata.insert("tool_use_id".to_string(), tool_use_id.to_string());
+    metadata.insert("ai_pre_edit".to_string(), "true".to_string());
+    metadata.insert("edit_kind".to_string(), "file_edit".to_string());
+    working_log.write_all_checkpoints(&checkpoints).unwrap();
+}
+
+fn close_ai_pre_edit(repo: &TestRepo, tool_use_id: &str) {
+    let repository =
+        discover_repository_in_path_no_git_exec(repo.path()).expect("test repo should open");
+    let author = repository.git_author_identity().formatted_or_unknown();
+    close_ai_pre_edit_from_daemon(
+        &repository,
+        &author,
+        AiPreEditCloseExecution {
+            tool_use_id: tool_use_id.to_string(),
+            trace_id: "t_close".to_string(),
+            reason: "test_no_changes".to_string(),
+            ts: 1_780_000_000_000,
+        },
+    )
+    .expect("ai pre-edit close should be written");
 }
 
 fn fire_post_edit_checkpoint(repo: &TestRepo, file_paths: &[&str]) {
@@ -80,6 +137,29 @@ fn test_known_human_not_suppressed_without_pending_ai_edit() {
     ]);
 }
 
+#[test]
+fn test_agent_v1_human_pre_edit_does_not_register_pending_ai_edit() {
+    let repo = TestRepo::new();
+    let file_path = repo.path().join("manual_after_human_pre_edit.txt");
+
+    fs::write(&file_path, "base\n").unwrap();
+    repo.stage_all_and_commit("Initial commit").unwrap();
+
+    fire_agent_v1_human_pre_edit(&repo, &["manual_after_human_pre_edit.txt"]);
+    fs::write(&file_path, "base\nmanual line\n").unwrap();
+    repo.git_ai(&[
+        "checkpoint",
+        "mock_known_human",
+        "manual_after_human_pre_edit.txt",
+    ])
+    .unwrap();
+
+    repo.stage_all_and_commit("Manual edit after human pre-edit")
+        .unwrap();
+    let mut file = repo.filename("manual_after_human_pre_edit.txt");
+    file.assert_committed_lines(lines!["base".unattributed_human(), "manual line".human(),]);
+}
+
 /// After a full AI edit cycle completes (pre + post), subsequent KnownHuman
 /// checkpoints on the same file must NOT be suppressed.
 #[test]
@@ -132,6 +212,159 @@ fn test_recent_known_human_save_after_ai_does_not_reclaim_ai_lines() {
         "ai two".ai(),
         "human note".human(),
     ]);
+}
+
+#[test]
+fn test_delayed_known_human_save_after_ai_does_not_reclaim_ai_lines() {
+    let repo = TestRepo::new();
+    let file_path = repo.path().join("delayed_post_ai_save.txt");
+
+    fs::write(&file_path, "base\n").unwrap();
+    repo.stage_all_and_commit("Initial commit").unwrap();
+
+    fs::write(&file_path, "base\nai one\nai two\n").unwrap();
+    fire_post_edit_checkpoint(&repo, &["delayed_post_ai_save.txt"]);
+
+    let working_log = repo.current_working_logs();
+    let mut checkpoints = working_log.read_all_checkpoints().unwrap();
+    assert!(
+        checkpoints.iter().any(|checkpoint| checkpoint.kind.is_ai()),
+        "test setup should have an AI checkpoint"
+    );
+    for checkpoint in &mut checkpoints {
+        if checkpoint.kind.is_ai() {
+            checkpoint.timestamp = checkpoint.timestamp.saturating_sub(24 * 60 * 60);
+        }
+    }
+    working_log.write_all_checkpoints(&checkpoints).unwrap();
+
+    fs::write(&file_path, "base\nai one\nai two\nhuman note\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "delayed_post_ai_save.txt"])
+        .unwrap();
+
+    repo.stage_all_and_commit("AI edit then delayed IDE save")
+        .unwrap();
+    let mut file = repo.filename("delayed_post_ai_save.txt");
+    file.assert_committed_lines(lines![
+        "base".unattributed_human(),
+        "ai one".ai(),
+        "ai two".ai(),
+        "human note".human(),
+    ]);
+}
+
+#[test]
+fn test_known_human_after_unclosed_ai_pre_edit_does_not_claim_ai_lines_as_human() {
+    let repo = TestRepo::new();
+    let file_path = repo.path().join("unclosed_pre_edit.txt");
+
+    fs::write(&file_path, "base\n").unwrap();
+    repo.stage_all_and_commit("Initial commit").unwrap();
+
+    fire_pre_edit_checkpoint(&repo, &["unclosed_pre_edit.txt"]);
+    fs::write(&file_path, "base\nai line without post hook\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "unclosed_pre_edit.txt"])
+        .unwrap();
+
+    repo.stage_all_and_commit("AI pre-edit then IDE save without post hook")
+        .unwrap();
+    let mut file = repo.filename("unclosed_pre_edit.txt");
+    file.assert_committed_lines(lines![
+        "base".unattributed_human(),
+        "ai line without post hook".unattributed_human(),
+    ]);
+}
+
+#[test]
+fn test_ai_post_edit_after_unclosed_known_human_still_claims_ai_lines() {
+    let repo = TestRepo::new();
+    let file_path = repo.path().join("pre_known_human_then_post.txt");
+
+    fs::write(&file_path, "base\n").unwrap();
+    repo.stage_all_and_commit("Initial commit").unwrap();
+
+    fire_pre_edit_checkpoint(&repo, &["pre_known_human_then_post.txt"]);
+    fs::write(&file_path, "base\nai line after save race\n").unwrap();
+    repo.git_ai(&[
+        "checkpoint",
+        "mock_known_human",
+        "pre_known_human_then_post.txt",
+    ])
+    .unwrap();
+    fire_post_edit_checkpoint(&repo, &["pre_known_human_then_post.txt"]);
+
+    repo.stage_all_and_commit("AI pre-edit then IDE save then post hook")
+        .unwrap();
+    let mut file = repo.filename("pre_known_human_then_post.txt");
+    file.assert_committed_lines(lines![
+        "base".unattributed_human(),
+        "ai line after save race".ai(),
+    ]);
+}
+
+#[test]
+fn test_no_changes_close_allows_later_known_human_properties_attribution() {
+    let repo = TestRepo::new();
+    let files = [
+        "src/main/resources/application-dev.properties",
+        "src/main/resources/application-test.properties",
+        "src/main/resources/application-uat.properties",
+        "src/main/java/com/example/Flow.java",
+    ];
+
+    for file in files {
+        let path = repo.path().join(file);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, "base=true\n").unwrap();
+    }
+    repo.stage_all_and_commit("Initial commit").unwrap();
+
+    let tool_use_id = "call_properties_no_changes";
+    fire_pre_edit_checkpoint_with_tool_use_id(&repo, &files, tool_use_id);
+    close_ai_pre_edit(&repo, tool_use_id);
+
+    for file in files.iter().take(3) {
+        fs::write(repo.path().join(file), "base=true\nmanual=true\n").unwrap();
+    }
+    repo.git_ai(&[
+        "checkpoint",
+        "mock_known_human",
+        "src/main/resources/application-dev.properties",
+        "src/main/resources/application-test.properties",
+        "src/main/resources/application-uat.properties",
+    ])
+    .unwrap();
+
+    repo.stage_all_and_commit("Manual properties after no-change AI pre-edit")
+        .unwrap();
+
+    for file in files.iter().take(3) {
+        let mut tracked = repo.filename(file);
+        tracked.assert_committed_lines(lines![
+            "base=true".unattributed_human(),
+            "manual=true".human(),
+        ]);
+    }
+
+    let raw = repo
+        .git_ai(&["stats", "--json"])
+        .expect("stats should succeed");
+    let json_start = raw.find('{').unwrap_or(0);
+    let json_end = raw.rfind('}').unwrap_or(raw.len().saturating_sub(1));
+    let stats: serde_json::Value =
+        serde_json::from_str(&raw[json_start..=json_end]).expect("valid stats json");
+    assert_eq!(
+        stats["human_additions"],
+        3,
+        "manual properties additions should be known-human after no_changes close. Stats: {}",
+        serde_json::to_string_pretty(&stats).unwrap()
+    );
+    assert_eq!(
+        stats["unknown_additions"],
+        0,
+        "properties additions should not fall through to unknown after no_changes close. Stats: {}",
+        serde_json::to_string_pretty(&stats).unwrap()
+    );
 }
 
 /// Multiple files: only the file with a pending AI edit should have its

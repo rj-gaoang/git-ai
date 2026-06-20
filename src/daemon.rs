@@ -1491,6 +1491,30 @@ fn apply_checkpoint_side_effect(request: CheckpointRequest) -> Result<(), GitAiE
     )
 }
 
+fn apply_ai_pre_edit_close_side_effect(
+    repo_work_dir: &str,
+    tool_use_id: &str,
+    trace_id: &str,
+    reason: &str,
+) -> Result<(), GitAiError> {
+    let repo = discover_repository_in_path_no_git_exec(Path::new(repo_work_dir))?;
+    let author = repo.git_author_identity().formatted_or_unknown();
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    crate::daemon::checkpoint::close_ai_pre_edit_from_daemon(
+        &repo,
+        &author,
+        crate::daemon::checkpoint::AiPreEditCloseExecution {
+            tool_use_id: tool_use_id.to_string(),
+            trace_id: trace_id.to_string(),
+            reason: reason.to_string(),
+            ts,
+        },
+    )
+}
+
 fn resolve_checkpoint_request(
     repo: &crate::git::repository::Repository,
     request: &CheckpointRequest,
@@ -1626,6 +1650,7 @@ fn append_checkpoint_request_resolution_debug_event(
             "traceId": request.trace_id,
             "checkpointKind": request.checkpoint_kind.to_str(),
             "toolUseId": request.metadata.get("tool_use_id"),
+            "baseCommit": checkpoint_request_base_commit_for_debug(request),
             "requestFileCount": requested_filepaths.len(),
             "requestFilepaths": requested_filepaths,
             "resolvedFileCount": resolved_files.len(),
@@ -1633,6 +1658,15 @@ fn append_checkpoint_request_resolution_debug_event(
             "reason": reason,
         }),
     );
+}
+
+fn checkpoint_request_base_commit_for_debug(request: &CheckpointRequest) -> Option<String> {
+    request.files.first().map(|file| match &file.base_commit {
+        crate::commands::checkpoint_agent::orchestrator::BaseCommit::Initial => {
+            "initial".to_string()
+        }
+        crate::commands::checkpoint_agent::orchestrator::BaseCommit::Sha(sha) => sha.clone(),
+    })
 }
 
 fn append_checkpoint_lifecycle_debug_event(
@@ -1659,6 +1693,7 @@ fn append_checkpoint_lifecycle_debug_event(
             "checkpointKind": request.checkpoint_kind.to_str(),
             "pathRole": format!("{:?}", request.path_role),
             "toolUseId": request.metadata.get("tool_use_id"),
+            "baseCommit": checkpoint_request_base_commit_for_debug(request),
             "requestFileCount": requested_filepaths.len(),
             "requestFilepaths": requested_filepaths,
             "status": status,
@@ -1689,6 +1724,7 @@ pub(crate) fn append_checkpoint_send_debug_event(
             "checkpointKind": request.checkpoint_kind.to_str(),
             "pathRole": format!("{:?}", request.path_role),
             "toolUseId": request.metadata.get("tool_use_id"),
+            "baseCommit": checkpoint_request_base_commit_for_debug(request),
             "requestFileCount": request.files.len(),
             "sent": sent,
             "error": error.map(|err| err.to_string()),
@@ -4073,6 +4109,13 @@ enum FamilySequencerEntry {
         request: Box<CheckpointRequest>,
         respond_to: Option<oneshot::Sender<Result<u64, GitAiError>>>,
     },
+    AiPreEditClose {
+        repo_work_dir: String,
+        tool_use_id: String,
+        trace_id: String,
+        reason: String,
+        respond_to: Option<oneshot::Sender<Result<u64, GitAiError>>>,
+    },
     Canceled,
 }
 
@@ -4193,7 +4236,6 @@ pub struct ActorDaemonCoordinator {
     inflight_effects_by_family: Mutex<HashMap<String, usize>>,
     /// Files with an in-flight AI edit (PreFileEdit received, PostFileEdit not yet completed).
     /// Outer key: family. Inner key: absolute file path string. Value: registration timestamp (nanos).
-    pending_ai_edits_by_family: Mutex<HashMap<String, HashMap<String, u128>>>,
     family_sequencers_by_family: Mutex<HashMap<String, FamilySequencerState>>,
     pending_root_slots_by_root: Mutex<HashMap<String, PendingRootSlot>>,
     recent_replay_prerequisites_by_family:
@@ -4286,7 +4328,6 @@ impl ActorDaemonCoordinator {
             pending_rebase_original_head_by_worktree: Mutex::new(HashMap::new()),
             pending_cherry_pick_sources_by_worktree: Mutex::new(HashMap::new()),
             inflight_effects_by_family: Mutex::new(HashMap::new()),
-            pending_ai_edits_by_family: Mutex::new(HashMap::new()),
             family_sequencers_by_family: Mutex::new(HashMap::new()),
             pending_root_slots_by_root: Mutex::new(HashMap::new()),
             recent_replay_prerequisites_by_family: Mutex::new(HashMap::new()),
@@ -4460,19 +4501,6 @@ impl ActorDaemonCoordinator {
         if let Ok(mut map) = self.queued_trace_payloads_by_root.lock() {
             map.retain(|_, count| *count > 0);
         }
-        // Clean expired pending AI edit entries (older than 10s).
-        {
-            const PENDING_AI_EDIT_TIMEOUT_NS: u128 = 10_000_000_000;
-            let gc_now_ns = now_unix_nanos();
-            if let Ok(mut map) = self.pending_ai_edits_by_family.lock() {
-                for family_map in map.values_mut() {
-                    family_map.retain(|_, registered_at| {
-                        gc_now_ns.saturating_sub(*registered_at) < PENDING_AI_EDIT_TIMEOUT_NS
-                    });
-                }
-                map.retain(|_, family_map| !family_map.is_empty());
-            }
-        }
         // Clean wrapper_states entries older than 60s — these represent wrapper
         // pre/post states that were never consumed by a matching trace2 event.
         let stale_threshold_ns = 60_000_000_000u128; // 60 seconds in nanoseconds
@@ -4480,49 +4508,6 @@ impl ActorDaemonCoordinator {
         if let Ok(mut map) = self.wrapper_states.lock() {
             map.retain(|_, entry| now_ns.saturating_sub(entry.received_at_ns) < stale_threshold_ns);
         }
-    }
-
-    fn canonicalize_path(path: &str) -> String {
-        std::fs::canonicalize(path)
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_else(|_| path.to_string())
-    }
-
-    fn register_pending_ai_edits(&self, family: &str, file_paths: &[String]) {
-        let now_ns = now_unix_nanos();
-        if let Ok(mut map) = self.pending_ai_edits_by_family.lock() {
-            let family_map = map.entry(family.to_string()).or_default();
-            for file in file_paths {
-                family_map.insert(Self::canonicalize_path(file), now_ns);
-            }
-        }
-    }
-
-    fn clear_pending_ai_edits(&self, family: &str, file_paths: &[String]) {
-        if let Ok(mut map) = self.pending_ai_edits_by_family.lock()
-            && let Some(family_map) = map.get_mut(family)
-        {
-            for file in file_paths {
-                family_map.remove(&Self::canonicalize_path(file));
-            }
-            if family_map.is_empty() {
-                map.remove(family);
-            }
-        }
-    }
-
-    fn file_has_pending_ai_edit(&self, family: &str, file_path: &str) -> bool {
-        const PENDING_AI_EDIT_TIMEOUT_NS: u128 = 10_000_000_000; // 10 seconds
-        let now_ns = now_unix_nanos();
-        let canonical = Self::canonicalize_path(file_path);
-        if let Ok(map) = self.pending_ai_edits_by_family.lock()
-            && let Some(family_map) = map.get(family)
-        {
-            return family_map.get(&canonical).is_some_and(|registered_at| {
-                now_ns.saturating_sub(*registered_at) < PENDING_AI_EDIT_TIMEOUT_NS
-            });
-        }
-        false
     }
 
     fn trace_command_participates_in_family_sequencer(primary_command: Option<&str>) -> bool {
@@ -6053,6 +6038,50 @@ impl ActorDaemonCoordinator {
             .await
     }
 
+    async fn append_ai_pre_edit_close_to_family_sequencer(
+        &self,
+        family: &str,
+        repo_work_dir: String,
+        tool_use_id: String,
+        trace_id: String,
+        reason: String,
+        respond_to: Option<oneshot::Sender<Result<u64, GitAiError>>>,
+    ) -> Result<(), GitAiError> {
+        let exec_lock = self.side_effect_exec_lock(family)?;
+        let _guard = exec_lock.lock().await;
+
+        {
+            let mut sequencers = self.family_sequencers_by_family.lock().map_err(|_| {
+                GitAiError::Generic("family sequencer map lock poisoned".to_string())
+            })?;
+            let state =
+                sequencers
+                    .entry(family.to_string())
+                    .or_insert_with(|| FamilySequencerState {
+                        next_ordinal: 1,
+                        entries: BTreeMap::new(),
+                    });
+            let order = FamilySequencerOrder {
+                started_at_ns: now_unix_nanos(),
+                ordinal: state.next_ordinal,
+            };
+            state.next_ordinal = state.next_ordinal.saturating_add(1);
+            state.entries.insert(
+                order,
+                FamilySequencerEntry::AiPreEditClose {
+                    repo_work_dir,
+                    tool_use_id,
+                    trace_id,
+                    reason,
+                    respond_to,
+                },
+            );
+        }
+
+        self.drain_ready_family_sequencer_entries_locked(family)
+            .await
+    }
+
     async fn drain_ready_family_sequencer_entries_locked(
         &self,
         family: &str,
@@ -6173,7 +6202,7 @@ impl ActorDaemonCoordinator {
                     }
                 }
                 FamilySequencerEntry::Checkpoint {
-                    mut request,
+                    request,
                     respond_to,
                 } => {
                     let repo_wd = request
@@ -6187,66 +6216,9 @@ impl ActorDaemonCoordinator {
                         .map(|f| f.path.to_string_lossy().to_string())
                         .collect();
                     let checkpoint_kind = request.checkpoint_kind;
-                    let checkpoint_path_role = request.path_role;
-                    let checkpoint_has_agent = request.agent_id.is_some();
                     let checkpoint_kind_str = format!("{:?}", checkpoint_kind);
                     let is_human_checkpoint = checkpoint_kind == CheckpointKind::Human;
                     let request_debug = (*request).clone();
-
-                    // Register pending AI edit state when an AI agent fires its
-                    // pre-edit snapshot. This signals that an AI edit is in-flight.
-                    // Identified by: WillEdit path_role + agent_id present (only AI
-                    // agent presets have an agent_id on their pre-edit checkpoints).
-                    if checkpoint_path_role == PreparedPathRole::WillEdit && checkpoint_has_agent {
-                        self.register_pending_ai_edits(family, &checkpoint_file_paths);
-                    }
-
-                    // Filter out files with pending AI edits from KnownHuman checkpoints.
-                    // These are spurious IDE save events that fire between pre/post-edit.
-                    if checkpoint_kind == CheckpointKind::KnownHuman {
-                        let pending_files: Vec<String> = checkpoint_file_paths
-                            .iter()
-                            .filter(|f| self.file_has_pending_ai_edit(family, f))
-                            .cloned()
-                            .collect();
-                        if !pending_files.is_empty() {
-                            request.files.retain(|f| {
-                                let path_str = f.path.to_string_lossy().to_string();
-                                !pending_files.contains(&path_str)
-                            });
-                            tracing::debug!(
-                                "[KnownHuman] Filtered {} file(s) with pending AI edits",
-                                pending_files.len()
-                            );
-                            if request.files.is_empty() {
-                                let log_entry = TestCompletionLogEntry {
-                                    seq: 0,
-                                    family_key: family.to_string(),
-                                    kind: "checkpoint".to_string(),
-                                    primary_command: Some("checkpoint".to_string()),
-                                    test_sync_session: None,
-                                    exit_code: None,
-                                    sync_tracked: true,
-                                    status: "suppressed".to_string(),
-                                    error: None,
-                                };
-                                let _ = self.maybe_append_test_completion_log(family, &log_entry);
-                                if let Some(respond_to) = respond_to {
-                                    let _ = respond_to.send(Ok(0));
-                                }
-                                continue;
-                            }
-                        }
-                    }
-
-                    // Recompute file paths after potential KnownHuman filtering so
-                    // watermark computation and clear_pending_ai_edits use the actual
-                    // files that will be checkpointed.
-                    let checkpoint_file_paths: Vec<String> = request
-                        .files
-                        .iter()
-                        .map(|f| f.path.to_string_lossy().to_string())
-                        .collect();
 
                     let should_log_completion = true; // Always log for test sync
                     tracing::info!(kind = %checkpoint_kind_str, repo = %repo_wd, "checkpoint start");
@@ -6339,12 +6311,6 @@ impl ActorDaemonCoordinator {
                         );
                     }
                     if result.is_ok() {
-                        // Clear pending AI edit state once the PostFileEdit completes.
-                        if checkpoint_kind.is_ai()
-                            && checkpoint_path_role == PreparedPathRole::Edited
-                        {
-                            self.clear_pending_ai_edits(family, &checkpoint_file_paths);
-                        }
                         let per_file = if !checkpoint_file_paths.is_empty() {
                             compute_watermarks_from_stat(&repo_wd, &checkpoint_file_paths)
                         } else {
@@ -6409,6 +6375,54 @@ impl ActorDaemonCoordinator {
                                 "checkpoint completion log write failed"
                             );
                         }
+                    }
+                    if let Some(respond_to) = respond_to {
+                        let _ = respond_to.send(result);
+                    }
+                }
+                FamilySequencerEntry::AiPreEditClose {
+                    repo_work_dir,
+                    tool_use_id,
+                    trace_id,
+                    reason,
+                    respond_to,
+                } => {
+                    let close_start = std::time::Instant::now();
+                    tracing::info!(
+                        %repo_work_dir,
+                        %tool_use_id,
+                        %reason,
+                        "ai pre-edit close start"
+                    );
+                    let result = apply_ai_pre_edit_close_side_effect(
+                        &repo_work_dir,
+                        &tool_use_id,
+                        &trace_id,
+                        &reason,
+                    )
+                    .map(|_| order);
+                    let duration_ms = close_start.elapsed().as_millis();
+                    crate::diagnostics::append_debug_event(
+                        "ai_pre_edit_close_finished",
+                        serde_json::json!({
+                            "repo": repo_work_dir,
+                            "family": family,
+                            "toolUseId": tool_use_id,
+                            "traceId": trace_id,
+                            "reason": reason,
+                            "status": if result.is_ok() { "succeeded" } else { "failed" },
+                            "durationMs": duration_ms,
+                            "error": result.as_ref().err().map(|error| error.to_string()),
+                        }),
+                    );
+                    if let Err(error) = &result {
+                        let _ = self.record_side_effect_error(family, order, error);
+                        tracing::error!(
+                            %error,
+                            %family,
+                            order,
+                            "ai pre-edit close side effect failed"
+                        );
                     }
                     if let Some(respond_to) = respond_to {
                         let _ = respond_to.send(result);
@@ -7934,6 +7948,37 @@ impl ActorDaemonCoordinator {
                 state.end_session(&session_id, &tool_use_id);
                 Ok(ControlResponse::ok(None, None))
             }
+            ControlRequest::AiPreEditClose {
+                repo_work_dir,
+                tool_use_id,
+                trace_id,
+                reason,
+            } => match self.backend.resolve_family(Path::new(&repo_work_dir)) {
+                Ok(family) => {
+                    let (tx, rx) = oneshot::channel();
+                    match self
+                        .append_ai_pre_edit_close_to_family_sequencer(
+                            &family.0,
+                            repo_work_dir,
+                            tool_use_id,
+                            trace_id,
+                            reason,
+                            Some(tx),
+                        )
+                        .await
+                    {
+                        Ok(()) => match rx.await {
+                            Ok(Ok(seq)) => Ok(ControlResponse::ok(Some(seq), None)),
+                            Ok(Err(error)) => Err(error),
+                            Err(_) => Err(GitAiError::Generic(
+                                "ai pre-edit close response channel closed".to_string(),
+                            )),
+                        },
+                        Err(error) => Err(error),
+                    }
+                }
+                Err(error) => Err(error),
+            },
             ControlRequest::BashSessionQuery { repo_work_dir } => {
                 let state = self.bash_sessions.lock().unwrap();
                 let response = match state.query_active_for_repo(&repo_work_dir) {

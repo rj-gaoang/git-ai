@@ -102,6 +102,97 @@ pub(super) fn file_paths_from_dirty_files(
     paths
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum HookPathSource {
+    ToolPayload,
+    DirtyFilesFallback,
+    None,
+}
+
+impl HookPathSource {
+    fn as_str(self) -> &'static str {
+        match self {
+            HookPathSource::ToolPayload => "tool_payload",
+            HookPathSource::DirtyFilesFallback => "dirty_files_fallback",
+            HookPathSource::None => "none",
+        }
+    }
+}
+
+pub(super) struct HookPathResolution {
+    pub paths: Vec<PathBuf>,
+    pub payload_paths: Vec<PathBuf>,
+    pub dirty_file_paths: Vec<PathBuf>,
+    pub source: HookPathSource,
+}
+
+pub(super) fn resolve_filepaths_from_hook_payload_or_dirty_files(
+    tool_input: Option<&serde_json::Value>,
+    tool_response: Option<&serde_json::Value>,
+    dirty_files: &Option<HashMap<PathBuf, String>>,
+    cwd: &str,
+) -> HookPathResolution {
+    let payload_paths = extract_filepaths_from_vscode_hook_payload(tool_input, tool_response, cwd);
+    let dirty_file_paths = file_paths_from_dirty_files(dirty_files);
+
+    let (paths, source) = if !payload_paths.is_empty() {
+        (payload_paths.clone(), HookPathSource::ToolPayload)
+    } else if !dirty_file_paths.is_empty() {
+        (dirty_file_paths.clone(), HookPathSource::DirtyFilesFallback)
+    } else {
+        (Vec::new(), HookPathSource::None)
+    };
+
+    HookPathResolution {
+        paths,
+        payload_paths,
+        dirty_file_paths,
+        source,
+    }
+}
+
+pub(super) fn append_path_resolution_debug_event(
+    tool: &str,
+    hook_event_name: &str,
+    trace_id: &str,
+    tool_name: &str,
+    tool_use_id: &str,
+    has_tool_input: bool,
+    has_tool_response: bool,
+    resolution: &HookPathResolution,
+) {
+    crate::diagnostics::append_debug_event(
+        "checkpoint_copilot_paths_resolved",
+        serde_json::json!({
+            "tool": tool,
+            "hookEventName": hook_event_name,
+            "traceId": trace_id,
+            "toolName": tool_name,
+            "toolUseId": tool_use_id,
+            "hasToolInput": has_tool_input,
+            "hasToolResponse": has_tool_response,
+            "pathSource": resolution.source.as_str(),
+            "usedDirtyFilesFallback": resolution.source == HookPathSource::DirtyFilesFallback,
+            "payloadPathCount": resolution.payload_paths.len(),
+            "payloadPathSample": pathbuf_sample(&resolution.payload_paths, 20),
+            "dirtyFilePathCount": resolution.dirty_file_paths.len(),
+            "dirtyFilePathSample": pathbuf_sample(&resolution.dirty_file_paths, 20),
+            "finalPathCount": resolution.paths.len(),
+            "finalPathSample": pathbuf_sample(&resolution.paths, 20),
+        }),
+    );
+}
+
+fn pathbuf_sample(paths: &[PathBuf], limit: usize) -> Vec<String> {
+    let mut values = paths
+        .iter()
+        .map(|path| path.to_string_lossy().replace('\\', "/"))
+        .collect::<Vec<_>>();
+    values.sort();
+    values.truncate(limit);
+    values
+}
+
 pub(super) fn extract_filepaths_from_vscode_hook_payload(
     tool_input: Option<&serde_json::Value>,
     tool_response: Option<&serde_json::Value>,
@@ -261,6 +352,29 @@ mod tests {
     fn test_normalize_hook_path_empty() {
         assert_eq!(normalize_hook_path("", "/cwd"), None);
         assert_eq!(normalize_hook_path("   ", "/cwd"), None);
+    }
+
+    #[test]
+    fn dirty_files_are_only_a_fallback_when_payload_has_paths() {
+        let tool_input = json!({"file_path": "src/from_payload.ts"});
+        let dirty_files = Some(HashMap::from([(
+            PathBuf::from("/home/user/project/src/from_dirty.ts"),
+            "content".to_string(),
+        )]));
+
+        let resolution = resolve_filepaths_from_hook_payload_or_dirty_files(
+            Some(&tool_input),
+            None,
+            &dirty_files,
+            "/home/user/project",
+        );
+
+        assert_eq!(resolution.source, HookPathSource::ToolPayload);
+        assert_eq!(
+            resolution.paths,
+            vec![PathBuf::from("/home/user/project/src/from_payload.ts")]
+        );
+        assert_eq!(resolution.dirty_file_paths.len(), 1);
     }
 
     // -----------------------------------------------------------------------

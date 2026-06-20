@@ -348,8 +348,9 @@ fn run_benchmark(repo_root: &Path, label: &str) -> (DurationStats, DurationStats
 
         // Post-hook: daemon query + snapshot walk + in-memory diff
         let post_start = Instant::now();
-        let result = bash_tool::handle_bash_post_tool_use(repo_root, session_id, &tool_use_id)
-            .expect("post-hook should succeed");
+        let result =
+            bash_tool::handle_bash_post_tool_use(repo_root, session_id, &tool_use_id, "t_test")
+                .expect("post-hook should succeed");
         let post_hook_duration = post_start.elapsed();
 
         // Sanity: the marker file must appear as a change
@@ -657,7 +658,7 @@ fn test_bash_tool_snapshot_benchmark_xlarge() {
 
         let post_start = Instant::now();
         let post_result =
-            bash_tool::handle_bash_post_tool_use(&repo_root, session_id, &tool_use_id);
+            bash_tool::handle_bash_post_tool_use(&repo_root, session_id, &tool_use_id, "t_test");
         let post_elapsed = post_start.elapsed();
         let _ = fs::remove_file(&marker);
 

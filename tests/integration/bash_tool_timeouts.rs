@@ -114,7 +114,7 @@ fn test_post_hook_walk_timeout_returns_snapshot_failed() {
     fs::write(root.join("changed.txt"), "new content").expect("file write should succeed");
 
     set_walk_timeout_ms_for_test(0);
-    let result = handle_bash_post_tool_use(&root, "wt-sess", "wt-post-walk");
+    let result = handle_bash_post_tool_use(&root, "wt-sess", "wt-post-walk", "t_test");
     reset_timeout_overrides_for_test();
 
     let r = result.expect("post-hook must not return Err on walk timeout");
@@ -143,7 +143,7 @@ fn test_post_hook_hook_timeout_returns_hook_timeout() {
     fs::write(root.join("ht_changed.txt"), "content").expect("file write should succeed");
 
     set_hook_timeout_ms_for_test(0);
-    let result = handle_bash_post_tool_use(&root, "ht-sess", "ht-post");
+    let result = handle_bash_post_tool_use(&root, "ht-sess", "ht-post", "t_test");
     reset_timeout_overrides_for_test();
 
     let r = result.expect("post-hook must not return Err on hook timeout");
@@ -172,7 +172,7 @@ fn test_timeout_override_reset_restores_normal_operation() {
 
     fs::write(root.join("reset_check.txt"), "hello").expect("write should succeed");
 
-    let result = handle_bash_post_tool_use(&root, "reset-sess", "reset-t1")
+    let result = handle_bash_post_tool_use(&root, "reset-sess", "reset-t1", "t_test")
         .expect("post-hook should succeed after reset");
 
     assert!(

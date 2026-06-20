@@ -39,18 +39,32 @@ pub(super) fn parse_cli_hooks(
         .or_else(|| data.get("toolResult"))
         .or_else(|| data.get("tool_response"));
 
-    let mut extracted_paths =
-        super::extract_filepaths_from_vscode_hook_payload(tool_input, tool_result, cwd);
-    if extracted_paths.is_empty() {
-        extracted_paths = super::file_paths_from_dirty_files(&dirty_files);
-    }
-
     // tool_use_id is absent in CopilotCLI payloads; synthesize a stable id from session+tool_name.
     // CLI bash invocations are sync (one in flight per session) so this id is enough for Pre/Post
     // pairing within the same session.
     let tool_use_id = parse::optional_str_multi(data, &["tool_use_id", "toolUseId"])
         .map(str::to_string)
         .unwrap_or_else(|| format!("cli-{}-{}", session_id, tool_name));
+
+    // Extract paths from the current tool call first. dirty_files is a fallback only:
+    // CLI hooks can carry broad dirty workspace snapshots.
+    let path_resolution = super::resolve_filepaths_from_hook_payload_or_dirty_files(
+        tool_input,
+        tool_result,
+        &dirty_files,
+        cwd,
+    );
+    super::append_path_resolution_debug_event(
+        "github-copilot-cli",
+        hook_event_name,
+        trace_id,
+        tool_name,
+        &tool_use_id,
+        tool_input.is_some(),
+        tool_result.is_some(),
+        &path_resolution,
+    );
+    let extracted_paths = path_resolution.paths;
 
     let session_state_path = resolve_copilot_cli_session_path(&session_id);
 

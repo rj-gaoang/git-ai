@@ -13,16 +13,12 @@ import { getGitRepoRoot } from "./utils/git-api";
  */
 export class KnownHumanCheckpointManager {
   private readonly debounceMs = 500;
-  private readonly aiEditSuppressionMaxAgeMs = 15000;
 
   // per repo root: pending debounce timer
   private pendingTimers = new Map<string, NodeJS.Timeout>();
 
   // per repo root: set of absolute file paths queued in current debounce window
   private pendingPaths = new Map<string, Set<string>>();
-
-  // per file: last time we saw a Copilot chat-editing document for this path
-  private recentAiEditAt = new Map<string, number>();
 
   constructor(
     private readonly editorVersion: string,
@@ -39,8 +35,7 @@ export class KnownHumanCheckpointManager {
       return;
     }
 
-    this.recentAiEditAt.set(filePath, Date.now());
-    console.log("[git-ai] KnownHumanCheckpointManager: Marked next save as AI-associated for", filePath);
+    console.log("[git-ai] KnownHumanCheckpointManager: Saw Copilot chat-editing document for", filePath);
   }
 
   public handleSaveEvent(doc: vscode.TextDocument): void {
@@ -52,11 +47,6 @@ export class KnownHumanCheckpointManager {
 
     if (this.isInternalVSCodePath(filePath)) {
       console.log("[git-ai] KnownHumanCheckpointManager: Ignoring internal VSCode file:", filePath);
-      return;
-    }
-
-    if (this.consumeRecentAiSaveSuppression(filePath)) {
-      console.log("[git-ai] KnownHumanCheckpointManager: Skipping AI-associated save for", filePath);
       return;
     }
 
@@ -179,22 +169,11 @@ export class KnownHumanCheckpointManager {
       || doc.uri.scheme === "chat-editing-text-model";
   }
 
-  private consumeRecentAiSaveSuppression(filePath: string): boolean {
-    const markedAt = this.recentAiEditAt.get(filePath);
-    if (!markedAt) {
-      return false;
-    }
-
-    this.recentAiEditAt.delete(filePath);
-    return Date.now() - markedAt <= this.aiEditSuppressionMaxAgeMs;
-  }
-
   public dispose(): void {
     for (const timer of this.pendingTimers.values()) {
       clearTimeout(timer);
     }
     this.pendingTimers.clear();
     this.pendingPaths.clear();
-    this.recentAiEditAt.clear();
   }
 }

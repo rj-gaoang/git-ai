@@ -114,6 +114,33 @@ impl RepoStorage {
         Ok(self.persisted_working_log_from_dir(working_log_dir, sha))
     }
 
+    pub fn archived_working_logs(&self) -> Vec<PersistedWorkingLog> {
+        let mut logs = Vec::new();
+        let Ok(entries) = fs::read_dir(&self.working_logs) else {
+            return logs;
+        };
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            let Some(base_commit) = name.strip_prefix("old-") else {
+                continue;
+            };
+            if base_commit.trim().is_empty() {
+                continue;
+            }
+
+            logs.push(self.persisted_working_log_from_dir(path, base_commit));
+        }
+
+        logs
+    }
+
     fn persisted_working_log_from_dir(
         &self,
         working_log_dir: PathBuf,
@@ -164,7 +191,7 @@ impl RepoStorage {
     }
 
     /// Number of seconds to retain archived working logs in production builds (7 days).
-    const OLD_WORKING_LOG_RETENTION_SECS: u64 = 7 * 24 * 60 * 60;
+    pub(crate) const OLD_WORKING_LOG_RETENTION_SECS: u64 = 7 * 24 * 60 * 60;
 
     /// Remove archived (`old-*`) working log directories whose `.archived_at`
     /// timestamp is older than `OLD_WORKING_LOG_RETENTION_SECS`.

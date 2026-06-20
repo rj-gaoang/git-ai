@@ -16,7 +16,7 @@ use crate::git::repository::Repository;
 use futures::stream::{self, StreamExt};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
 #[cfg(not(any(test, feature = "test-support")))]
@@ -33,12 +33,14 @@ pub struct FileLineStats {
 }
 
 /// Latest checkpoint state needed to process a file in the next checkpoint.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct PreviousFileState {
     blob_sha: String,
     attributions: Vec<Attribution>,
     kind: CheckpointKind,
     timestamp: u64,
+    skip_as_ai_baseline: bool,
+    source_working_log: PersistedWorkingLog,
 }
 
 use crate::authorship::working_log::AgentId;
@@ -49,6 +51,7 @@ const AGENT_USAGE_MIN_INTERVAL_SECS: u64 = 150;
 #[cfg(not(any(test, feature = "test-support")))]
 const KNOWN_HUMAN_REJECT_SECS_AFTER_AI: u64 = 1;
 const KNOWN_HUMAN_RECENT_AI_SAVE_LIMIT_SECS: u64 = 30;
+const ARCHIVED_AI_STATE_LOOKBACK_SECS: u64 = 24 * 60 * 60;
 
 #[cfg(not(any(test, feature = "test-support")))]
 pub(crate) fn should_emit_agent_usage(agent_id: &AgentId) -> bool {
@@ -88,6 +91,14 @@ pub struct ResolvedCheckpointExecution {
     pub ts: u128,
     pub files: Vec<String>,
     pub dirty_files: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AiPreEditCloseExecution {
+    pub tool_use_id: String,
+    pub trace_id: String,
+    pub reason: String,
+    pub ts: u128,
 }
 
 /// Build EventAttributes for AgentUsage events.
@@ -185,6 +196,71 @@ pub fn execute_resolved_checkpoint_from_daemon(
     .map(|_| ())
 }
 
+pub fn close_ai_pre_edit_from_daemon(
+    repo: &Repository,
+    author: &str,
+    close: AiPreEditCloseExecution,
+) -> Result<(), GitAiError> {
+    let base_commit = match crate::git::repo_state::read_head_state_for_worktree(&repo.workdir()?) {
+        Some(state) => match state.head {
+            Some(sha) => sha,
+            None => "initial".to_string(),
+        },
+        None => "initial".to_string(),
+    };
+    let working_log = repo.storage.working_log_for_base_commit(&base_commit)?;
+    let mut checkpoints = working_log.read_all_checkpoints()?;
+    let entries = entries_for_unclosed_ai_pre_edit_tool_use(&checkpoints, &close.tool_use_id);
+    if entries.is_empty() {
+        crate::diagnostics::append_debug_event(
+            "ai_pre_edit_close_noop",
+            serde_json::json!({
+                "repo": repo.canonical_workdir().to_string_lossy().to_string(),
+                "baseCommit": base_commit,
+                "toolUseId": close.tool_use_id,
+                "traceId": close.trace_id,
+                "reason": close.reason,
+            }),
+        );
+        return Ok(());
+    }
+
+    let files = entries
+        .iter()
+        .map(|entry| entry.file.clone())
+        .collect::<Vec<_>>();
+    let mut metadata = HashMap::new();
+    metadata.insert("ai_pre_edit_closed".to_string(), "true".to_string());
+    metadata.insert("tool_use_id".to_string(), close.tool_use_id.clone());
+    metadata.insert("close_reason".to_string(), close.reason.clone());
+
+    let mut checkpoint = Checkpoint::new(
+        CheckpointKind::Human,
+        String::new(),
+        author.to_string(),
+        entries,
+    );
+    checkpoint.timestamp = (close.ts / 1000) as u64;
+    checkpoint.trace_id = Some(close.trace_id.clone());
+    checkpoint.agent_metadata = Some(metadata);
+
+    working_log.append_checkpoint(&checkpoint)?;
+    checkpoints.push(checkpoint);
+    crate::diagnostics::append_debug_event(
+        "ai_pre_edit_closed",
+        serde_json::json!({
+            "repo": repo.canonical_workdir().to_string_lossy().to_string(),
+            "baseCommit": base_commit,
+            "toolUseId": close.tool_use_id,
+            "traceId": close.trace_id,
+            "reason": close.reason,
+            "fileCount": files.len(),
+            "files": files,
+        }),
+    );
+    Ok(())
+}
+
 fn execute_resolved_checkpoint(
     repo: &Repository,
     author: &str,
@@ -258,14 +334,24 @@ fn execute_resolved_checkpoint(
         hash_compute_start.elapsed()
     );
 
+    let unclosed_ai_pre_edit_files = if kind == CheckpointKind::KnownHuman {
+        unclosed_ai_pre_edit_files(&checkpoints, &resolved.files)
+    } else {
+        HashSet::new()
+    };
+    let has_unclosed_ai_pre_edit = !unclosed_ai_pre_edit_files.is_empty();
     let trace_id = checkpoint_request.trace_id.clone();
     let effective_kind = effective_checkpoint_kind(kind, &checkpoint_request);
+    let downgraded_known_human =
+        kind == CheckpointKind::KnownHuman && effective_kind == CheckpointKind::Human;
+    let is_ai_pre_edit = is_ai_pre_edit_request(effective_kind, &checkpoint_request);
     let attest_human_lines = kind == CheckpointKind::Human
         && effective_kind == CheckpointKind::Human
         && checkpoint_request.agent_id.is_none()
         && checkpoint_request.metadata.is_empty();
     let limit_current_author_to_changed_lines = effective_kind.is_ai()
         || attest_human_lines
+        || has_unclosed_ai_pre_edit
         || checkpoint_request
             .metadata
             .get("git_ai_replay_checkpoint")
@@ -286,6 +372,8 @@ fn execute_resolved_checkpoint(
         trace_id.clone(),
         attest_human_lines,
         limit_current_author_to_changed_lines,
+        is_ai_pre_edit,
+        unclosed_ai_pre_edit_files,
     ))?;
     tracing::debug!(
         "[BENCHMARK] get_checkpoint_entries generated {} entries, took {:?}",
@@ -312,6 +400,18 @@ fn execute_resolved_checkpoint(
             } else {
                 Some(checkpoint_request.metadata.clone())
             };
+        } else if is_ai_pre_edit {
+            checkpoint.agent_metadata = Some(checkpoint_request.metadata.clone());
+        } else if downgraded_known_human {
+            let mut metadata = checkpoint_request.metadata.clone();
+            metadata.insert("known_human_downgraded".to_string(), "true".to_string());
+            if has_unclosed_ai_pre_edit {
+                metadata.insert(
+                    "known_human_after_unclosed_ai_pre_edit".to_string(),
+                    "true".to_string(),
+                );
+            }
+            checkpoint.agent_metadata = Some(metadata);
         } else if effective_kind == CheckpointKind::KnownHuman
             && !checkpoint_request.metadata.is_empty()
         {
@@ -566,6 +666,250 @@ fn has_known_human_editor_metadata(request: &CheckpointRequest) -> bool {
         .is_some_and(|value| !value.trim().is_empty() && !value.eq_ignore_ascii_case("unknown"))
 }
 
+fn is_human_tool_name(tool: &str) -> bool {
+    let tool = tool.trim();
+    tool.eq_ignore_ascii_case("human") || tool.eq_ignore_ascii_case("known_human")
+}
+
+fn request_has_ai_pre_edit_agent(checkpoint_request: &CheckpointRequest) -> bool {
+    checkpoint_request
+        .agent_id
+        .as_ref()
+        .is_some_and(|agent_id| !is_human_tool_name(&agent_id.tool))
+}
+
+fn metadata_allows_ai_pre_edit(metadata: &HashMap<String, String>) -> bool {
+    !metadata
+        .get("agent_tool")
+        .is_some_and(|tool| is_human_tool_name(tool))
+}
+
+fn is_ai_pre_edit_request(
+    effective_kind: CheckpointKind,
+    checkpoint_request: &CheckpointRequest,
+) -> bool {
+    effective_kind == CheckpointKind::Human
+        && checkpoint_request.path_role == PreparedPathRole::WillEdit
+        && request_has_ai_pre_edit_agent(checkpoint_request)
+        && checkpoint_request
+            .metadata
+            .get("ai_pre_edit")
+            .is_some_and(|value| value.eq_ignore_ascii_case("true"))
+        && metadata_allows_ai_pre_edit(&checkpoint_request.metadata)
+}
+
+fn checkpoint_tool_use_id(checkpoint: &Checkpoint) -> Option<&str> {
+    checkpoint
+        .agent_metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("tool_use_id"))
+        .map(String::as_str)
+        .filter(|tool_use_id| !tool_use_id.trim().is_empty())
+}
+
+fn checkpoint_is_ai_pre_edit(checkpoint: &Checkpoint) -> bool {
+    checkpoint.kind == CheckpointKind::Human
+        && checkpoint.agent_metadata.as_ref().is_some_and(|metadata| {
+            metadata
+                .get("ai_pre_edit")
+                .is_some_and(|value| value.eq_ignore_ascii_case("true"))
+                && metadata_allows_ai_pre_edit(metadata)
+                && !metadata
+                    .get("edit_kind")
+                    .is_some_and(|edit_kind| edit_kind.eq_ignore_ascii_case("bash"))
+        })
+}
+
+fn checkpoint_is_ai_pre_edit_close(checkpoint: &Checkpoint) -> bool {
+    checkpoint.kind == CheckpointKind::Human
+        && checkpoint.agent_metadata.as_ref().is_some_and(|metadata| {
+            metadata
+                .get("ai_pre_edit_closed")
+                .is_some_and(|value| value.eq_ignore_ascii_case("true"))
+        })
+}
+
+fn checkpoint_should_be_skipped_as_ai_baseline(checkpoint: &Checkpoint) -> bool {
+    checkpoint_is_ai_pre_edit(checkpoint)
+        || checkpoint_is_ai_pre_edit_close(checkpoint)
+        || checkpoint.agent_metadata.as_ref().is_some_and(|metadata| {
+            metadata
+                .get("known_human_downgraded")
+                .is_some_and(|value| value.eq_ignore_ascii_case("true"))
+                || metadata
+                    .get("known_human_after_unclosed_ai_pre_edit")
+                    .is_some_and(|value| value.eq_ignore_ascii_case("true"))
+        })
+}
+
+fn checkpoint_is_non_bash_ai_edit(checkpoint: &Checkpoint) -> bool {
+    checkpoint.kind.is_ai()
+        && !checkpoint
+            .agent_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("edit_kind"))
+            .is_some_and(|edit_kind| edit_kind.eq_ignore_ascii_case("bash"))
+}
+
+fn close_pending_ai_pre_edit(
+    checkpoint: &Checkpoint,
+    target_files: &HashSet<&str>,
+    pending_file_tool_uses: &mut HashSet<(String, String)>,
+    pending_files_without_tool_use: &mut HashSet<String>,
+) {
+    let Some(tool_use_id) = checkpoint_tool_use_id(checkpoint) else {
+        return;
+    };
+    let mut files_for_tool = pending_file_tool_uses
+        .iter()
+        .filter_map(|(pending_tool_use_id, file)| {
+            (pending_tool_use_id == tool_use_id && target_files.contains(file.as_str()))
+                .then(|| file.clone())
+        })
+        .collect::<Vec<_>>();
+
+    if files_for_tool.is_empty() {
+        files_for_tool = checkpoint
+            .entries
+            .iter()
+            .map(|entry| entry.file.clone())
+            .filter(|file| target_files.contains(file.as_str()))
+            .collect();
+    }
+
+    for file in files_for_tool {
+        pending_file_tool_uses.remove(&(tool_use_id.to_string(), file.clone()));
+        pending_files_without_tool_use.remove(&file);
+    }
+}
+
+#[cfg(test)]
+fn has_unclosed_ai_pre_edit_for_files(
+    previous_checkpoints: &[Checkpoint],
+    files: &[String],
+) -> bool {
+    !unclosed_ai_pre_edit_files(previous_checkpoints, files).is_empty()
+}
+
+fn unclosed_ai_pre_edit_files(
+    previous_checkpoints: &[Checkpoint],
+    files: &[String],
+) -> HashSet<String> {
+    let target_files: HashSet<&str> = files.iter().map(String::as_str).collect();
+    let mut pending_file_tool_uses: HashSet<(String, String)> = HashSet::new();
+    let mut pending_files_without_tool_use: HashSet<String> = HashSet::new();
+
+    for checkpoint in previous_checkpoints {
+        let touched_target_files: Vec<&str> = checkpoint
+            .entries
+            .iter()
+            .map(|entry| entry.file.as_str())
+            .filter(|file| target_files.contains(file))
+            .collect();
+        if touched_target_files.is_empty() {
+            continue;
+        }
+
+        if checkpoint_is_ai_pre_edit_close(checkpoint) {
+            close_pending_ai_pre_edit(
+                checkpoint,
+                &target_files,
+                &mut pending_file_tool_uses,
+                &mut pending_files_without_tool_use,
+            );
+            continue;
+        }
+
+        if checkpoint_is_non_bash_ai_edit(checkpoint) {
+            if let Some(tool_use_id) = checkpoint_tool_use_id(checkpoint) {
+                for file in &touched_target_files {
+                    pending_file_tool_uses.remove(&(tool_use_id.to_string(), (*file).to_string()));
+                }
+            } else {
+                for file in &touched_target_files {
+                    pending_files_without_tool_use.remove(*file);
+                }
+            }
+            continue;
+        }
+
+        if checkpoint_is_ai_pre_edit(checkpoint) {
+            if let Some(tool_use_id) = checkpoint_tool_use_id(checkpoint) {
+                for file in &touched_target_files {
+                    pending_file_tool_uses.insert((tool_use_id.to_string(), (*file).to_string()));
+                }
+            } else {
+                for file in &touched_target_files {
+                    pending_files_without_tool_use.insert((*file).to_string());
+                }
+            }
+        }
+    }
+
+    pending_files_without_tool_use
+        .into_iter()
+        .chain(pending_file_tool_uses.into_iter().map(|(_, file)| file))
+        .collect()
+}
+
+fn entries_for_unclosed_ai_pre_edit_tool_use(
+    previous_checkpoints: &[Checkpoint],
+    tool_use_id: &str,
+) -> Vec<WorkingLogEntry> {
+    if tool_use_id.trim().is_empty() {
+        return Vec::new();
+    }
+
+    let mut pending: BTreeMap<String, WorkingLogEntry> = BTreeMap::new();
+    let mut latest_entry_by_file: BTreeMap<String, WorkingLogEntry> = BTreeMap::new();
+    for checkpoint in previous_checkpoints {
+        let Some(checkpoint_tool_use_id) = checkpoint_tool_use_id(checkpoint) else {
+            for entry in &checkpoint.entries {
+                latest_entry_by_file.insert(entry.file.clone(), entry.clone());
+            }
+            continue;
+        };
+        if checkpoint_tool_use_id != tool_use_id {
+            for entry in &checkpoint.entries {
+                latest_entry_by_file.insert(entry.file.clone(), entry.clone());
+            }
+            continue;
+        }
+
+        if checkpoint_is_ai_pre_edit(checkpoint) {
+            for entry in &checkpoint.entries {
+                let prior = latest_entry_by_file.get(&entry.file);
+                let inherited = prior.filter(|prior| {
+                    prior.blob_sha == entry.blob_sha
+                        && (!prior.attributions.is_empty() || !prior.line_attributions.is_empty())
+                });
+                let source = inherited.unwrap_or(entry);
+                pending.insert(
+                    entry.file.clone(),
+                    WorkingLogEntry::new(
+                        entry.file.clone(),
+                        entry.blob_sha.clone(),
+                        source.attributions.clone(),
+                        source.line_attributions.clone(),
+                    ),
+                );
+            }
+        } else if checkpoint_is_non_bash_ai_edit(checkpoint)
+            || checkpoint_is_ai_pre_edit_close(checkpoint)
+        {
+            for entry in &checkpoint.entries {
+                pending.remove(&entry.file);
+            }
+        }
+
+        for entry in &checkpoint.entries {
+            latest_entry_by_file.insert(entry.file.clone(), entry.clone());
+        }
+    }
+
+    pending.into_values().collect()
+}
+
 fn effective_checkpoint_kind(
     kind: CheckpointKind,
     checkpoint_request: &CheckpointRequest,
@@ -578,6 +922,7 @@ fn effective_checkpoint_kind(
 }
 
 fn build_previous_file_state_maps(
+    working_log: &PersistedWorkingLog,
     previous_checkpoints: &[Checkpoint],
     initial_attributions: &HashMap<String, Vec<LineAttribution>>,
 ) -> (HashMap<String, Vec<PreviousFileState>>, HashSet<String>) {
@@ -593,9 +938,15 @@ fn build_previous_file_state_maps(
                 .or_default()
                 .push(PreviousFileState {
                     blob_sha: entry.blob_sha.clone(),
-                    attributions: entry.attributions.clone(),
+                    attributions: previous_file_state_attributions(
+                        entry,
+                        working_log,
+                        checkpoint.timestamp as u128,
+                    ),
                     kind: checkpoint.kind,
                     timestamp: checkpoint.timestamp,
+                    skip_as_ai_baseline: checkpoint_should_be_skipped_as_ai_baseline(checkpoint),
+                    source_working_log: working_log.clone(),
                 });
 
             if checkpoint.kind.is_ai() || working_log_entry_has_non_human_attribution(entry) {
@@ -607,15 +958,116 @@ fn build_previous_file_state_maps(
     (previous_file_state_by_file, ai_touched_files)
 }
 
+fn previous_file_state_content(state: &PreviousFileState) -> String {
+    state
+        .source_working_log
+        .get_file_version(&state.blob_sha)
+        .unwrap_or_default()
+}
+
+fn collect_recent_archived_ai_states(
+    repo: &Repository,
+    files: &[String],
+    ts: u128,
+) -> HashMap<String, PreviousFileState> {
+    let target_files: HashSet<&str> = files.iter().map(String::as_str).collect();
+    let now_secs = (ts / 1000) as u64;
+    let mut latest_by_file: HashMap<String, PreviousFileState> = HashMap::new();
+
+    for archived_log in repo.storage.archived_working_logs() {
+        let Ok(checkpoints) = archived_log.read_all_checkpoints() else {
+            continue;
+        };
+
+        for checkpoint in checkpoints {
+            if !checkpoint_is_non_bash_ai_edit(&checkpoint)
+                || now_secs.saturating_sub(checkpoint.timestamp) > ARCHIVED_AI_STATE_LOOKBACK_SECS
+            {
+                continue;
+            }
+
+            for entry in &checkpoint.entries {
+                if !target_files.contains(entry.file.as_str()) {
+                    continue;
+                }
+
+                let state = PreviousFileState {
+                    blob_sha: entry.blob_sha.clone(),
+                    attributions: previous_file_state_attributions(
+                        entry,
+                        &archived_log,
+                        checkpoint.timestamp as u128,
+                    ),
+                    kind: checkpoint.kind,
+                    timestamp: checkpoint.timestamp,
+                    skip_as_ai_baseline: checkpoint_should_be_skipped_as_ai_baseline(&checkpoint),
+                    source_working_log: archived_log.clone(),
+                };
+
+                let should_replace = latest_by_file
+                    .get(&entry.file)
+                    .map(|existing| existing.timestamp < state.timestamp)
+                    .unwrap_or(true);
+                if should_replace {
+                    latest_by_file.insert(entry.file.clone(), state);
+                }
+            }
+        }
+    }
+
+    latest_by_file
+}
+
+fn merge_recent_archived_ai_states(
+    previous_file_state_by_file: &mut HashMap<String, Vec<PreviousFileState>>,
+    ai_touched_files: &mut HashSet<String>,
+    archived_ai_states: HashMap<String, PreviousFileState>,
+) -> usize {
+    let mut merged = 0usize;
+
+    for (file, state) in archived_ai_states {
+        let already_has_ai = previous_file_state_by_file
+            .get(&file)
+            .is_some_and(|states| {
+                states.iter().any(|state| {
+                    state.kind.is_ai()
+                        || state
+                            .attributions
+                            .iter()
+                            .any(|attr| is_ai_author_id(&attr.author_id))
+                })
+            });
+        if already_has_ai {
+            continue;
+        }
+
+        previous_file_state_by_file
+            .entry(file.clone())
+            .or_default()
+            .push(state);
+        ai_touched_files.insert(file);
+        merged += 1;
+    }
+
+    merged
+}
+
 fn select_previous_state_for_ai_checkpoint(
     current_content: &str,
-    working_log: &PersistedWorkingLog,
     file_history: &[PreviousFileState],
 ) -> Option<(String, Vec<Attribution>)> {
     let latest = file_history.last()?;
-    let latest_content = working_log
-        .get_file_version(&latest.blob_sha)
-        .unwrap_or_default();
+    let latest_content = previous_file_state_content(latest);
+
+    if latest.skip_as_ai_baseline && content_eq_normalized(current_content, &latest_content) {
+        for state in file_history.iter().rev().skip(1) {
+            let state_content = previous_file_state_content(state);
+            if !content_eq_normalized(current_content, &state_content) {
+                return Some((state_content, state.attributions.clone()));
+            }
+        }
+        return None;
+    }
 
     if latest.kind != CheckpointKind::KnownHuman
         || !content_eq_normalized(current_content, &latest_content)
@@ -624,15 +1076,36 @@ fn select_previous_state_for_ai_checkpoint(
     }
 
     for state in file_history.iter().rev().skip(1) {
-        let state_content = working_log
-            .get_file_version(&state.blob_sha)
-            .unwrap_or_default();
+        let state_content = previous_file_state_content(state);
         if !content_eq_normalized(current_content, &state_content) {
             return Some((state_content, state.attributions.clone()));
         }
     }
 
     None
+}
+
+fn previous_file_state_attributions(
+    entry: &WorkingLogEntry,
+    working_log: &PersistedWorkingLog,
+    ts: u128,
+) -> Vec<Attribution> {
+    if !entry.attributions.is_empty() {
+        return entry.attributions.clone();
+    }
+
+    if entry.line_attributions.is_empty() {
+        return Vec::new();
+    }
+
+    let content = working_log
+        .get_file_version(&entry.blob_sha)
+        .unwrap_or_default();
+    crate::authorship::attribution_tracker::line_attributions_to_attributions(
+        &entry.line_attributions,
+        &content,
+        ts,
+    )
 }
 
 fn has_recent_ai_file_state(file_history: &[PreviousFileState], ts: u128) -> bool {
@@ -653,11 +1126,13 @@ fn get_checkpoint_entry_for_file(
     ai_touched_files: Arc<HashSet<String>>,
     file_content_hash: String,
     author_id: Arc<String>,
+    weak_known_human_files: Arc<HashSet<String>>,
     head_tree_id: Arc<Option<String>>,
     initial_attributions: Arc<HashMap<String, Vec<LineAttribution>>>,
     initial_snapshot_contents: Arc<HashMap<String, String>>,
     attest_human_lines: bool,
     limit_current_author_to_changed_lines: bool,
+    preserve_same_content_entry: bool,
     ts: u128,
 ) -> Result<Option<(WorkingLogEntry, FileLineStats)>, GitAiError> {
     let file_start = Instant::now();
@@ -672,7 +1147,16 @@ fn get_checkpoint_entry_for_file(
         .cloned()
         .unwrap_or_default();
     let previous_state = previous_file_history.last().cloned();
+    let weak_known_human_for_file =
+        kind == CheckpointKind::KnownHuman && weak_known_human_files.contains(&file_path);
+    let file_author_id = if weak_known_human_for_file {
+        CheckpointKind::Human.to_str()
+    } else {
+        author_id.as_ref().clone()
+    };
     let has_prior_ai_edits = ai_touched_files.contains(&file_path);
+    let limit_to_changed_lines_for_known_human_on_ai_content =
+        kind == CheckpointKind::KnownHuman && has_prior_ai_edits;
     let limit_to_changed_lines_for_recent_known_human_save =
         kind == CheckpointKind::KnownHuman && has_recent_ai_file_state(&previous_file_history, ts);
 
@@ -690,14 +1174,37 @@ fn get_checkpoint_entry_for_file(
         && initial_attrs_for_file.is_empty()
     {
         let previous_content = if let Some(state) = previous_state.as_ref() {
-            working_log
-                .get_file_version(&state.blob_sha)
-                .unwrap_or_default()
+            previous_file_state_content(state)
         } else {
             get_previous_content_from_head(&repo, &file_path, head_tree_id.as_ref())
         };
 
         if content_eq_normalized(&current_content, &previous_content) {
+            if preserve_same_content_entry {
+                let prev_attributions = previous_state
+                    .as_ref()
+                    .map(|state| state.attributions.clone())
+                    .unwrap_or_default();
+                let line_attributions =
+                    crate::authorship::attribution_tracker::attributions_to_line_attributions_for_checkpoint(
+                        &prev_attributions,
+                        &previous_content,
+                        false,
+                    );
+                let remapped_attributions =
+                    crate::authorship::attribution_tracker::line_attributions_to_attributions(
+                        &line_attributions,
+                        &current_content,
+                        ts,
+                    );
+                let entry = WorkingLogEntry::new(
+                    file_path,
+                    file_content_hash,
+                    remapped_attributions,
+                    line_attributions,
+                );
+                return Ok(Some((entry, FileLineStats::default())));
+            }
             return Ok(None);
         }
 
@@ -707,17 +1214,11 @@ fn get_checkpoint_entry_for_file(
     }
 
     let from_checkpoint = if kind.is_ai() {
-        select_previous_state_for_ai_checkpoint(
-            &current_content,
-            &working_log,
-            &previous_file_history,
-        )
+        select_previous_state_for_ai_checkpoint(&current_content, &previous_file_history)
     } else {
         previous_state.as_ref().map(|state| {
             (
-                working_log
-                    .get_file_version(&state.blob_sha)
-                    .unwrap_or_default(),
+                previous_file_state_content(state),
                 state.attributions.clone(),
             )
         })
@@ -737,9 +1238,7 @@ fn get_checkpoint_entry_for_file(
             && let Some(state) = previous_state.as_ref()
             && state.kind == CheckpointKind::KnownHuman
         {
-            let latest_content = working_log
-                .get_file_version(&state.blob_sha)
-                .unwrap_or_default();
+            let latest_content = previous_file_state_content(state);
             if content_eq_normalized(&current_content, &latest_content) {
                 return Ok(None);
             }
@@ -781,7 +1280,7 @@ fn get_checkpoint_entry_for_file(
                     prev_line_attributions.push(LineAttribution {
                         start_line: line_num,
                         end_line: line_num,
-                        author_id: author_id.as_ref().clone(),
+                        author_id: file_author_id.clone(),
                         overrode: None,
                     });
                 }
@@ -823,6 +1322,21 @@ fn get_checkpoint_entry_for_file(
     // For files from previous checkpoints, check if content has changed
     if is_from_checkpoint && content_eq_normalized(&current_content, &previous_content) {
         if current_content == previous_content {
+            if preserve_same_content_entry {
+                let line_attributions =
+                    crate::authorship::attribution_tracker::attributions_to_line_attributions_for_checkpoint(
+                        &prev_attributions,
+                        &current_content,
+                        kind.is_ai(),
+                    );
+                let entry = WorkingLogEntry::new(
+                    file_path,
+                    file_content_hash,
+                    prev_attributions,
+                    line_attributions,
+                );
+                return Ok(Some((entry, FileLineStats::default())));
+            }
             // Byte-identical — truly no change.
             return Ok(None);
         }
@@ -855,9 +1369,11 @@ fn get_checkpoint_entry_for_file(
     let (entry, stats) = make_entry_for_file(FileEntryInput {
         file_path: &file_path,
         blob_sha: &file_content_hash,
-        author_id: author_id.as_ref(),
+        author_id: &file_author_id,
         is_ai_checkpoint: kind.is_ai(),
         limit_current_author_to_changed_lines: limit_current_author_to_changed_lines
+            || weak_known_human_for_file
+            || limit_to_changed_lines_for_known_human_on_ai_content
             || limit_to_changed_lines_for_recent_known_human_save,
         previous_content: &previous_content,
         previous_attributions: &prev_attributions,
@@ -887,6 +1403,8 @@ async fn get_checkpoint_entries(
     trace_id: String,
     attest_human_lines: bool,
     limit_current_author_to_changed_lines: bool,
+    preserve_empty_entries: bool,
+    weak_known_human_files: HashSet<String>,
 ) -> Result<(Vec<WorkingLogEntry>, Vec<FileLineStats>), GitAiError> {
     let entries_fn_start = Instant::now();
 
@@ -925,8 +1443,29 @@ async fn get_checkpoint_entries(
     );
 
     let precompute_start = Instant::now();
-    let (previous_file_state_by_file, ai_touched_files) =
-        build_previous_file_state_maps(previous_checkpoints, &initial_attributions);
+    let (mut previous_file_state_by_file, mut ai_touched_files) =
+        build_previous_file_state_maps(working_log, previous_checkpoints, &initial_attributions);
+    let archived_ai_state_file_count = if effective_kind == CheckpointKind::KnownHuman {
+        let archived_ai_states = collect_recent_archived_ai_states(repo, files, ts);
+        merge_recent_archived_ai_states(
+            &mut previous_file_state_by_file,
+            &mut ai_touched_files,
+            archived_ai_states,
+        )
+    } else {
+        0
+    };
+    if archived_ai_state_file_count > 0 {
+        crate::diagnostics::append_debug_event(
+            "checkpoint_archived_ai_state_merged",
+            serde_json::json!({
+                "repo": repo.canonical_workdir().to_string_lossy().to_string(),
+                "checkpointKind": effective_kind.to_str(),
+                "traceId": trace_id.clone(),
+                "fileCount": archived_ai_state_file_count,
+            }),
+        );
+    }
     tracing::debug!(
         "[BENCHMARK] Precomputing previous state maps took {:?}",
         precompute_start.elapsed()
@@ -979,6 +1518,7 @@ async fn get_checkpoint_entries(
     let previous_file_state_by_file = Arc::new(previous_file_state_by_file);
     let ai_touched_files = Arc::new(ai_touched_files);
     let author_id = Arc::new(author_id);
+    let weak_known_human_files = Arc::new(weak_known_human_files);
     let head_tree_id = Arc::new(head_tree_id);
     let initial_attributions = Arc::new(initial_attributions);
     let initial_snapshot_contents = Arc::new(initial_snapshot_contents);
@@ -994,6 +1534,7 @@ async fn get_checkpoint_entries(
         let previous_file_state_by_file = Arc::clone(&previous_file_state_by_file);
         let ai_touched_files = Arc::clone(&ai_touched_files);
         let author_id = Arc::clone(&author_id);
+        let weak_known_human_files = Arc::clone(&weak_known_human_files);
         let head_tree_id = Arc::clone(&head_tree_id);
         let blob_sha = file_content_hashes
             .get(&file_path)
@@ -1018,11 +1559,13 @@ async fn get_checkpoint_entries(
                     ai_touched_files,
                     blob_sha,
                     author_id.clone(),
+                    weak_known_human_files.clone(),
                     head_tree_id.clone(),
                     initial_attributions.clone(),
                     initial_snapshot_contents.clone(),
                     attest_human_lines,
                     limit_current_author_to_changed_lines,
+                    preserve_empty_entries,
                     ts,
                 )
             })
@@ -1059,6 +1602,25 @@ async fn get_checkpoint_entries(
             }
             Ok(None) => {} // File had no changes
             Err(e) => return Err(e),
+        }
+    }
+    if preserve_empty_entries {
+        let mut existing_files: HashSet<String> =
+            entries.iter().map(|entry| entry.file.clone()).collect();
+        for file_path in files {
+            if !existing_files.insert(file_path.clone()) {
+                continue;
+            }
+            let blob_sha = file_content_hashes
+                .get(file_path)
+                .cloned()
+                .unwrap_or_default();
+            entries.push(WorkingLogEntry::new(
+                file_path.clone(),
+                blob_sha,
+                Vec::new(),
+                Vec::new(),
+            ));
         }
     }
     tracing::debug!(
@@ -1334,4 +1896,438 @@ fn compute_line_stats(
     }
 
     Ok(stats)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::commands::checkpoint_agent::orchestrator::BaseCommit;
+    use crate::commands::checkpoint_agent::orchestrator::CheckpointFile;
+    use std::path::PathBuf;
+
+    fn checkpoint_request_with_metadata(
+        agent_id: Option<AgentId>,
+        path_role: PreparedPathRole,
+        metadata: HashMap<String, String>,
+    ) -> CheckpointRequest {
+        CheckpointRequest {
+            trace_id: "t_test".to_string(),
+            checkpoint_kind: CheckpointKind::Human,
+            agent_id,
+            files: vec![CheckpointFile {
+                path: PathBuf::from("/repo/src/main.rs"),
+                content: Some(String::new()),
+                repo_work_dir: PathBuf::from("/repo"),
+                base_commit: BaseCommit::Sha("head".to_string()),
+            }],
+            path_role,
+            stream_source: None,
+            metadata,
+        }
+    }
+
+    fn checkpoint_with_metadata(
+        kind: CheckpointKind,
+        file: &str,
+        metadata: &[(&str, &str)],
+    ) -> Checkpoint {
+        let mut checkpoint = Checkpoint::new(
+            kind,
+            String::new(),
+            "tester".to_string(),
+            vec![WorkingLogEntry::new(
+                file.to_string(),
+                "sha".to_string(),
+                Vec::new(),
+                Vec::new(),
+            )],
+        );
+        checkpoint.agent_metadata = Some(
+            metadata
+                .iter()
+                .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+                .collect(),
+        );
+        checkpoint
+    }
+
+    #[test]
+    fn ai_pre_edit_request_requires_agent_marker_and_will_edit_role() {
+        let agent = AgentId {
+            tool: "github-copilot".to_string(),
+            id: "session".to_string(),
+            model: "unknown".to_string(),
+        };
+        let metadata = HashMap::from([
+            ("ai_pre_edit".to_string(), "true".to_string()),
+            ("tool_use_id".to_string(), "call_1".to_string()),
+        ]);
+
+        let request = checkpoint_request_with_metadata(
+            Some(agent.clone()),
+            PreparedPathRole::WillEdit,
+            metadata.clone(),
+        );
+        assert!(is_ai_pre_edit_request(CheckpointKind::Human, &request));
+
+        let no_agent =
+            checkpoint_request_with_metadata(None, PreparedPathRole::WillEdit, metadata.clone());
+        assert!(!is_ai_pre_edit_request(CheckpointKind::Human, &no_agent));
+
+        let edited_role =
+            checkpoint_request_with_metadata(Some(agent), PreparedPathRole::Edited, metadata);
+        assert!(!is_ai_pre_edit_request(CheckpointKind::Human, &edited_role));
+    }
+
+    #[test]
+    fn ai_pre_edit_request_rejects_human_agent_tool() {
+        let human_agent = AgentId {
+            tool: "human".to_string(),
+            id: "human".to_string(),
+            model: "human".to_string(),
+        };
+        let request = checkpoint_request_with_metadata(
+            Some(human_agent),
+            PreparedPathRole::WillEdit,
+            HashMap::from([
+                ("ai_pre_edit".to_string(), "true".to_string()),
+                ("agent_tool".to_string(), "human".to_string()),
+                ("tool_use_id".to_string(), "call_human".to_string()),
+            ]),
+        );
+
+        assert!(!is_ai_pre_edit_request(CheckpointKind::Human, &request));
+    }
+
+    #[test]
+    fn unclosed_ai_pre_edit_blocks_known_human_attestation() {
+        let pre_edit = checkpoint_with_metadata(
+            CheckpointKind::Human,
+            "src/main.rs",
+            &[
+                ("ai_pre_edit", "true"),
+                ("edit_kind", "file_edit"),
+                ("tool_use_id", "call_1"),
+            ],
+        );
+        assert!(has_unclosed_ai_pre_edit_for_files(
+            &[pre_edit],
+            &["src/main.rs".to_string()]
+        ));
+
+        let ai_edit = checkpoint_with_metadata(
+            CheckpointKind::AiAgent,
+            "src/main.rs",
+            &[("edit_kind", "file_edit"), ("tool_use_id", "call_1")],
+        );
+        assert!(!has_unclosed_ai_pre_edit_for_files(
+            &[
+                checkpoint_with_metadata(
+                    CheckpointKind::Human,
+                    "src/main.rs",
+                    &[
+                        ("ai_pre_edit", "true"),
+                        ("edit_kind", "file_edit"),
+                        ("tool_use_id", "call_1"),
+                    ],
+                ),
+                ai_edit,
+            ],
+            &["src/main.rs".to_string()]
+        ));
+    }
+
+    #[test]
+    fn human_agent_tool_metadata_is_not_unclosed_ai_pre_edit() {
+        let pre_edit = checkpoint_with_metadata(
+            CheckpointKind::Human,
+            "src/main.rs",
+            &[
+                ("ai_pre_edit", "true"),
+                ("edit_kind", "file_edit"),
+                ("tool_use_id", "call_human"),
+                ("agent_tool", "human"),
+            ],
+        );
+
+        assert!(!has_unclosed_ai_pre_edit_for_files(
+            &[pre_edit],
+            &["src/main.rs".to_string()]
+        ));
+    }
+
+    #[test]
+    fn unclosed_ai_pre_edit_tracks_tool_use_by_file() {
+        let pre_edit_a = checkpoint_with_metadata(
+            CheckpointKind::Human,
+            "src/a.rs",
+            &[
+                ("ai_pre_edit", "true"),
+                ("edit_kind", "file_edit"),
+                ("tool_use_id", "call_1"),
+            ],
+        );
+        let pre_edit_b = checkpoint_with_metadata(
+            CheckpointKind::Human,
+            "src/b.rs",
+            &[
+                ("ai_pre_edit", "true"),
+                ("edit_kind", "file_edit"),
+                ("tool_use_id", "call_1"),
+            ],
+        );
+        let ai_edit_a = checkpoint_with_metadata(
+            CheckpointKind::AiAgent,
+            "src/a.rs",
+            &[("edit_kind", "file_edit"), ("tool_use_id", "call_1")],
+        );
+
+        assert!(!has_unclosed_ai_pre_edit_for_files(
+            &[pre_edit_a.clone(), pre_edit_b.clone(), ai_edit_a.clone()],
+            &["src/a.rs".to_string()]
+        ));
+        assert!(has_unclosed_ai_pre_edit_for_files(
+            &[pre_edit_a, pre_edit_b, ai_edit_a],
+            &["src/b.rs".to_string()]
+        ));
+    }
+
+    #[test]
+    fn ai_pre_edit_close_clears_matching_tool_use() {
+        let pre_edit = checkpoint_with_metadata(
+            CheckpointKind::Human,
+            "src/main.rs",
+            &[
+                ("ai_pre_edit", "true"),
+                ("edit_kind", "file_edit"),
+                ("tool_use_id", "call_1"),
+            ],
+        );
+        let closed = checkpoint_with_metadata(
+            CheckpointKind::Human,
+            "src/main.rs",
+            &[
+                ("ai_pre_edit_closed", "true"),
+                ("tool_use_id", "call_1"),
+                ("close_reason", "bash_no_changes"),
+            ],
+        );
+
+        assert!(!has_unclosed_ai_pre_edit_for_files(
+            &[pre_edit, closed],
+            &["src/main.rs".to_string()]
+        ));
+    }
+
+    #[test]
+    fn ai_pre_edit_close_does_not_clear_other_tool_use() {
+        let pre_edit = checkpoint_with_metadata(
+            CheckpointKind::Human,
+            "src/main.rs",
+            &[
+                ("ai_pre_edit", "true"),
+                ("edit_kind", "file_edit"),
+                ("tool_use_id", "call_1"),
+            ],
+        );
+        let closed = checkpoint_with_metadata(
+            CheckpointKind::Human,
+            "src/main.rs",
+            &[
+                ("ai_pre_edit_closed", "true"),
+                ("tool_use_id", "call_2"),
+                ("close_reason", "bash_no_changes"),
+            ],
+        );
+
+        assert!(has_unclosed_ai_pre_edit_for_files(
+            &[pre_edit, closed],
+            &["src/main.rs".to_string()]
+        ));
+    }
+
+    #[test]
+    fn entries_for_unclosed_ai_pre_edit_close_inherits_prior_attribution() {
+        let prior_ai = {
+            let mut checkpoint = checkpoint_with_metadata(
+                CheckpointKind::AiAgent,
+                "src/main.rs",
+                &[("edit_kind", "file_edit"), ("tool_use_id", "prior")],
+            );
+            checkpoint.entries[0].blob_sha = "same-sha".to_string();
+            checkpoint.entries[0].attributions = vec![Attribution {
+                start: 0,
+                end: 7,
+                author_id: "s_ai::t_ai".to_string(),
+                ts: 1,
+            }];
+            checkpoint
+        };
+        let mut pre_edit = checkpoint_with_metadata(
+            CheckpointKind::Human,
+            "src/main.rs",
+            &[
+                ("ai_pre_edit", "true"),
+                ("edit_kind", "file_edit"),
+                ("tool_use_id", "call_1"),
+            ],
+        );
+        pre_edit.entries[0].blob_sha = "same-sha".to_string();
+
+        let entries = entries_for_unclosed_ai_pre_edit_tool_use(&[prior_ai, pre_edit], "call_1");
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].blob_sha, "same-sha");
+        assert_eq!(entries[0].attributions.len(), 1);
+        assert_eq!(entries[0].attributions[0].author_id, "s_ai::t_ai");
+    }
+
+    #[test]
+    fn unclosed_ai_pre_edit_ignores_other_files() {
+        let pre_edit = checkpoint_with_metadata(
+            CheckpointKind::Human,
+            "src/ai.rs",
+            &[
+                ("ai_pre_edit", "true"),
+                ("edit_kind", "file_edit"),
+                ("tool_use_id", "call_1"),
+            ],
+        );
+        assert!(!has_unclosed_ai_pre_edit_for_files(
+            &[pre_edit],
+            &["src/human.rs".to_string()]
+        ));
+    }
+
+    #[test]
+    fn archived_ai_state_merge_adds_ai_history_for_missing_base() {
+        let working_log = PersistedWorkingLog::new(
+            PathBuf::from("/repo/.git/ai/working_logs/current"),
+            "current",
+            PathBuf::from("/repo"),
+            PathBuf::from("/repo"),
+            None,
+        );
+        let archived_log = PersistedWorkingLog::new(
+            PathBuf::from("/repo/.git/ai/working_logs/old-base"),
+            "old-base",
+            PathBuf::from("/repo"),
+            PathBuf::from("/repo"),
+            None,
+        );
+        let ai_state = PreviousFileState {
+            blob_sha: "sha".to_string(),
+            attributions: vec![Attribution {
+                start: 0,
+                end: 7,
+                author_id: "s_session::t_trace".to_string(),
+                ts: 1,
+            }],
+            kind: CheckpointKind::AiAgent,
+            timestamp: 10,
+            skip_as_ai_baseline: false,
+            source_working_log: archived_log,
+        };
+
+        let (mut states, mut ai_files) =
+            build_previous_file_state_maps(&working_log, &[], &HashMap::new());
+        let merged = merge_recent_archived_ai_states(
+            &mut states,
+            &mut ai_files,
+            HashMap::from([("src/main.rs".to_string(), ai_state)]),
+        );
+
+        assert_eq!(merged, 1);
+        assert!(ai_files.contains("src/main.rs"));
+        assert!(
+            states
+                .get("src/main.rs")
+                .is_some_and(|states| states.iter().any(|state| state.kind.is_ai()))
+        );
+    }
+
+    #[test]
+    fn archived_ai_state_merge_does_not_replace_current_base_ai_history() {
+        let working_log = PersistedWorkingLog::new(
+            PathBuf::from("/repo/.git/ai/working_logs/current"),
+            "current",
+            PathBuf::from("/repo"),
+            PathBuf::from("/repo"),
+            None,
+        );
+        let archived_log = PersistedWorkingLog::new(
+            PathBuf::from("/repo/.git/ai/working_logs/old-base"),
+            "old-base",
+            PathBuf::from("/repo"),
+            PathBuf::from("/repo"),
+            None,
+        );
+        let current_ai = checkpoint_with_metadata(
+            CheckpointKind::AiAgent,
+            "src/main.rs",
+            &[("edit_kind", "file_edit"), ("tool_use_id", "call_current")],
+        );
+        let archived_ai_state = PreviousFileState {
+            blob_sha: "sha".to_string(),
+            attributions: vec![Attribution {
+                start: 0,
+                end: 7,
+                author_id: "s_old::t_old".to_string(),
+                ts: 1,
+            }],
+            kind: CheckpointKind::AiAgent,
+            timestamp: 10,
+            skip_as_ai_baseline: false,
+            source_working_log: archived_log,
+        };
+
+        let (mut states, mut ai_files) =
+            build_previous_file_state_maps(&working_log, &[current_ai], &HashMap::new());
+        let merged = merge_recent_archived_ai_states(
+            &mut states,
+            &mut ai_files,
+            HashMap::from([("src/main.rs".to_string(), archived_ai_state)]),
+        );
+
+        assert_eq!(merged, 0);
+        assert_eq!(states.get("src/main.rs").map(Vec::len), Some(1));
+    }
+
+    #[test]
+    fn archived_ai_state_reconstructs_from_line_attributions_and_source_blob() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let repo_root = temp.path().join("repo");
+        std::fs::create_dir_all(&repo_root).expect("repo dir");
+
+        let archived_log = PersistedWorkingLog::new(
+            temp.path().join("working_logs").join("old-base"),
+            "base",
+            repo_root.clone(),
+            repo_root,
+            None,
+        );
+        let archived_content = "ai line 1\nai line 2\n";
+        let blob_sha = archived_log
+            .persist_file_version(archived_content)
+            .expect("persist archived blob");
+        let entry = WorkingLogEntry::new(
+            "src/main.rs".to_string(),
+            blob_sha,
+            Vec::new(),
+            vec![LineAttribution {
+                start_line: 1,
+                end_line: 2,
+                author_id: "s_archived::t_ai".to_string(),
+                overrode: None,
+            }],
+        );
+
+        let attrs = previous_file_state_attributions(&entry, &archived_log, 1234);
+
+        assert_eq!(attrs.len(), 1);
+        assert_eq!(attrs[0].start, 0);
+        assert_eq!(attrs[0].end, archived_content.len());
+        assert_eq!(attrs[0].author_id, "s_archived::t_ai");
+        assert_eq!(attrs[0].ts, 1234);
+    }
 }

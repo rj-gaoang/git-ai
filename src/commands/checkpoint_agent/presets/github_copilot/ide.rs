@@ -169,13 +169,6 @@ pub(super) fn parse_vscode_native_hooks(
         .get("tool_response")
         .or_else(|| data.get("toolResponse"));
 
-    // Extract file paths from tool_input and tool_response only (not session-level data)
-    let mut extracted_paths =
-        super::extract_filepaths_from_vscode_hook_payload(tool_input, tool_response, cwd);
-    if extracted_paths.is_empty() {
-        extracted_paths = super::file_paths_from_dirty_files(&dirty_files);
-    }
-
     let transcript_path = transcript_path_from_hook_data(data).map(|s| s.to_string());
 
     if let Some(ref path) = transcript_path
@@ -200,6 +193,26 @@ pub(super) fn parse_vscode_native_hooks(
     let tool_use_id = parse::optional_str_multi(data, &["tool_use_id", "toolUseId"])
         .unwrap_or("unknown")
         .to_string();
+
+    // Extract paths from the current tool call first. dirtyFiles is a fallback only:
+    // VS Code can include unrelated dirty workspace files in the same hook payload.
+    let path_resolution = super::resolve_filepaths_from_hook_payload_or_dirty_files(
+        tool_input,
+        tool_response,
+        &dirty_files,
+        cwd,
+    );
+    super::append_path_resolution_debug_event(
+        "github-copilot",
+        hook_event_name,
+        trace_id,
+        tool_name,
+        &tool_use_id,
+        tool_input.is_some(),
+        tool_response.is_some(),
+        &path_resolution,
+    );
+    let extracted_paths = path_resolution.paths;
 
     let mut metadata = HashMap::new();
     if let Some(ref path) = transcript_path {

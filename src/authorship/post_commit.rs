@@ -89,6 +89,97 @@ fn checkpoint_entry_has_ai_path_evidence(checkpoint: &Checkpoint, entry: &Workin
             .any(|attr| is_ai_author_id(&attr.author_id))
 }
 
+fn checkpoint_tool_use_id(checkpoint: &Checkpoint) -> Option<&str> {
+    checkpoint
+        .agent_metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("tool_use_id"))
+        .map(String::as_str)
+        .filter(|tool_use_id| !tool_use_id.trim().is_empty())
+}
+
+fn collect_ai_edited_tool_use_files(checkpoints: &[Checkpoint]) -> HashSet<(String, String)> {
+    let mut tool_use_files = HashSet::new();
+    for checkpoint in checkpoints
+        .iter()
+        .filter(|checkpoint| checkpoint.kind.is_ai())
+        .filter(|checkpoint| {
+            !checkpoint
+                .agent_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("edit_kind"))
+                .is_some_and(|edit_kind| edit_kind.eq_ignore_ascii_case("bash"))
+        })
+    {
+        let Some(tool_use_id) = checkpoint_tool_use_id(checkpoint) else {
+            continue;
+        };
+        for entry in &checkpoint.entries {
+            tool_use_files.insert((tool_use_id.to_string(), entry.file.clone()));
+        }
+    }
+    tool_use_files
+}
+
+fn is_human_tool_name(tool: &str) -> bool {
+    let tool = tool.trim();
+    tool.eq_ignore_ascii_case("human") || tool.eq_ignore_ascii_case("known_human")
+}
+
+fn ai_pre_edit_metadata_allowed(metadata: &HashMap<String, String>) -> bool {
+    !metadata
+        .get("agent_tool")
+        .is_some_and(|tool| is_human_tool_name(tool))
+}
+
+fn checkpoint_has_ai_pre_edit_path_evidence(
+    checkpoint: &Checkpoint,
+    entry: &WorkingLogEntry,
+    ai_edited_tool_use_files: &HashSet<(String, String)>,
+) -> bool {
+    if checkpoint.kind != CheckpointKind::Human {
+        return false;
+    }
+
+    let Some(metadata) = checkpoint.agent_metadata.as_ref() else {
+        return false;
+    };
+
+    if !metadata
+        .get("ai_pre_edit")
+        .is_some_and(|value| value.eq_ignore_ascii_case("true"))
+    {
+        return false;
+    }
+
+    if !ai_pre_edit_metadata_allowed(metadata) {
+        return false;
+    }
+
+    if metadata
+        .get("edit_kind")
+        .is_some_and(|edit_kind| edit_kind.eq_ignore_ascii_case("bash"))
+    {
+        return false;
+    }
+
+    checkpoint_tool_use_id(checkpoint).is_some_and(|tool_use_id| {
+        ai_edited_tool_use_files.contains(&(tool_use_id.to_string(), entry.file.clone()))
+    })
+}
+
+fn is_plain_legacy_human_checkpoint(checkpoint: &Checkpoint) -> bool {
+    if checkpoint.kind != CheckpointKind::Human || checkpoint.agent_id.is_some() {
+        return false;
+    }
+
+    let Some(metadata) = checkpoint.agent_metadata.as_ref() else {
+        return true;
+    };
+
+    metadata.is_empty()
+}
+
 pub fn post_commit(
     repo: &Repository,
     base_commit: Option<String>,
@@ -190,12 +281,19 @@ pub fn post_commit_with_final_state(
     // trigger expensive post-commit diff work across large commits.
     let mut pathspecs: HashSet<String> = HashSet::new();
     let mut ai_gap_fill_pathspecs: HashSet<String> = HashSet::new();
+    let ai_edited_tool_use_files = collect_ai_edited_tool_use_files(&parent_working_log);
     for checkpoint in &parent_working_log {
         for entry in &checkpoint.entries {
             if checkpoint_entry_requires_post_processing(checkpoint, entry) {
                 pathspecs.insert(entry.file.clone());
             }
             if checkpoint_entry_has_ai_path_evidence(checkpoint, entry) {
+                ai_gap_fill_pathspecs.insert(entry.file.clone());
+            } else if checkpoint_has_ai_pre_edit_path_evidence(
+                checkpoint,
+                entry,
+                &ai_edited_tool_use_files,
+            ) {
                 ai_gap_fill_pathspecs.insert(entry.file.clone());
             }
         }
@@ -235,6 +333,7 @@ pub fn post_commit_with_final_state(
         &commit_sha,
         &mut authorship_log,
         &ai_gap_fill_pathspecs,
+        &parent_working_log,
         &human_author,
     );
     fill_legacy_human_manual_gaps_for_commit(
@@ -469,14 +568,14 @@ pub fn post_commit_with_final_state(
                 "statsSummary": commit_stats_debug_summary(&computed),
             }),
         );
-        if should_log_attribution_gap(&computed) {
+        if let Some(gap_reason) = attribution_gap_reason(&computed) {
             crate::diagnostics::append_debug_event(
                 "post_commit_attribution_gap_detected",
                 serde_json::json!({
                     "repo": repo.canonical_workdir().to_string_lossy().to_string(),
                     "commitSha": commit_sha,
                     "parentSha": parent_sha,
-                    "reason": "all_added_lines_unknown",
+                    "reason": gap_reason,
                     "statsSummary": commit_stats_debug_summary(&computed),
                     "promptSummary": prompt_debug_summary(&authorship_log),
                     "sessionCount": authorship_log.metadata.sessions.len(),
@@ -564,6 +663,8 @@ pub fn post_commit_with_final_state(
             "repo": repo.canonical_workdir().to_string_lossy().to_string(),
             "commitSha": commit_sha,
             "parentSha": parent_sha,
+            "archiveBase": format!("old-{}", parent_sha),
+            "archiveRetentionSecs": crate::git::repo_storage::RepoStorage::OLD_WORKING_LOG_RETENTION_SECS,
         }),
     );
 
@@ -713,12 +814,19 @@ fn build_authorship_log_from_working_log(
     let parent_working_log = working_log.read_all_checkpoints().unwrap_or_default();
     let mut pathspecs: HashSet<String> = HashSet::new();
     let mut ai_gap_fill_pathspecs: HashSet<String> = HashSet::new();
+    let ai_edited_tool_use_files = collect_ai_edited_tool_use_files(&parent_working_log);
     for checkpoint in &parent_working_log {
         for entry in &checkpoint.entries {
             if checkpoint_entry_requires_post_processing(checkpoint, entry) {
                 pathspecs.insert(entry.file.clone());
             }
             if checkpoint_entry_has_ai_path_evidence(checkpoint, entry) {
+                ai_gap_fill_pathspecs.insert(entry.file.clone());
+            } else if checkpoint_has_ai_pre_edit_path_evidence(
+                checkpoint,
+                entry,
+                &ai_edited_tool_use_files,
+            ) {
                 ai_gap_fill_pathspecs.insert(entry.file.clone());
             }
         }
@@ -760,6 +868,7 @@ fn build_authorship_log_from_working_log(
         commit_sha,
         &mut authorship_log,
         &ai_gap_fill_pathspecs,
+        &parent_working_log,
         human_author,
     );
     fill_legacy_human_manual_gaps_for_commit(
@@ -943,6 +1052,7 @@ fn fill_ai_attribution_gaps_for_commit(
     commit_sha: &str,
     authorship_log: &mut AuthorshipLog,
     pathspecs: &HashSet<String>,
+    checkpoints: &[Checkpoint],
     human_author: &str,
 ) {
     let ai_attestation_hashes = collect_ai_gap_fill_attestation_hashes(authorship_log);
@@ -997,6 +1107,14 @@ fn fill_ai_attribution_gaps_for_commit(
         })
         .map(|(path, _)| path.clone())
         .collect::<Vec<_>>();
+    let candidate_diagnostics = ai_gap_fill_candidate_diagnostics(
+        &included_candidate_files,
+        &excluded_candidate_files,
+        pathspecs,
+        &landed_ai_files,
+        checkpoints,
+        &collect_ai_edited_tool_use_files(checkpoints),
+    );
 
     let committed_hunks: HashMap<String, Vec<LineRange>> = all_added_lines
         .into_iter()
@@ -1029,6 +1147,7 @@ fn fill_ai_attribution_gaps_for_commit(
                     "includedCandidateFileSample": sorted_path_sample(included_candidate_files.clone(), 20),
                     "excludedCandidateFileCount": excluded_candidate_files.len(),
                     "excludedCandidateFileSample": sorted_path_sample(excluded_candidate_files.clone(), 20),
+                    "candidateDiagnostics": candidate_diagnostics,
                     "attestationHash": attestation_hash,
                     "humanAuthor": human_author,
                 }),
@@ -1066,6 +1185,7 @@ fn fill_ai_attribution_gaps_for_commit(
                 "includedCandidateFileSample": sorted_path_sample(included_candidate_files.clone(), 20),
                 "excludedCandidateFileCount": excluded_candidate_files.len(),
                 "excludedCandidateFileSample": sorted_path_sample(excluded_candidate_files.clone(), 20),
+                "candidateDiagnostics": candidate_diagnostics,
                 "attestationHash": attestation_hash,
                 "humanAuthor": human_author,
             }),
@@ -1104,6 +1224,7 @@ fn fill_ai_attribution_gaps_for_commit(
             "includedCandidateFileSample": sorted_path_sample(included_candidate_files, 20),
             "excludedCandidateFileCount": excluded_candidate_files.len(),
             "excludedCandidateFileSample": sorted_path_sample(excluded_candidate_files, 20),
+            "candidateDiagnostics": candidate_diagnostics,
             "attestationHash": attestation_hash,
             "humanAuthor": human_author,
         }),
@@ -1129,11 +1250,13 @@ fn fill_legacy_human_manual_gaps_for_commit(
     }
 
     let mut file_authors: HashMap<String, String> = HashMap::new();
-    for checkpoint in checkpoints
-        .iter()
-        .filter(|checkpoint| checkpoint.kind == CheckpointKind::Human)
-        .filter(|checkpoint| checkpoint.agent_id.is_none())
-    {
+    for checkpoint in checkpoints.iter().filter(|checkpoint| {
+        is_plain_legacy_human_checkpoint(checkpoint)
+            && checkpoint
+                .entries
+                .iter()
+                .any(|entry| entry.attributions.is_empty() && entry.line_attributions.is_empty())
+    }) {
         let author = if checkpoint.author.trim().is_empty() {
             human_author.to_string()
         } else {
@@ -1251,7 +1374,7 @@ fn fill_legacy_human_ai_gaps_for_commit(
 
     let legacy_human_files: HashSet<String> = checkpoints
         .iter()
-        .filter(|checkpoint| checkpoint.kind == CheckpointKind::Human)
+        .filter(|checkpoint| is_plain_legacy_human_checkpoint(checkpoint))
         .flat_map(|checkpoint| {
             checkpoint.entries.iter().filter_map(|entry| {
                 (entry.attributions.is_empty() && entry.line_attributions.is_empty())
@@ -1440,6 +1563,91 @@ fn collect_current_ai_attested_files(
     files
 }
 
+fn ai_gap_fill_candidate_diagnostics(
+    included_candidate_files: &[String],
+    excluded_candidate_files: &[String],
+    pathspecs: &HashSet<String>,
+    landed_ai_files: &HashSet<String>,
+    checkpoints: &[Checkpoint],
+    ai_edited_tool_use_files: &HashSet<(String, String)>,
+) -> Vec<serde_json::Value> {
+    let mut paths = included_candidate_files
+        .iter()
+        .chain(excluded_candidate_files.iter())
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    while paths.len() > 20 {
+        let Some(last) = paths.iter().next_back().cloned() else {
+            break;
+        };
+        paths.remove(&last);
+    }
+
+    paths
+        .into_iter()
+        .map(|path| {
+            let mut kind_counts: BTreeMap<String, usize> = BTreeMap::new();
+            let mut ai_pre_edit_count = 0usize;
+            let mut tool_use_ids = BTreeSet::new();
+            let mut agent_tools = BTreeSet::new();
+
+            for checkpoint in checkpoints {
+                if !checkpoint.entries.iter().any(|entry| entry.file == path) {
+                    continue;
+                }
+
+                *kind_counts.entry(checkpoint.kind.to_str()).or_insert(0) += 1;
+                for entry in &checkpoint.entries {
+                    if entry.file == path
+                        && checkpoint_has_ai_pre_edit_path_evidence(
+                            checkpoint,
+                            entry,
+                            ai_edited_tool_use_files,
+                        )
+                    {
+                        ai_pre_edit_count += 1;
+                    }
+                }
+                if let Some(agent_id) = &checkpoint.agent_id {
+                    agent_tools.insert(agent_id.tool.clone());
+                }
+                if let Some(agent_tool) = checkpoint
+                    .agent_metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.get("agent_tool"))
+                    .filter(|agent_tool| !agent_tool.trim().is_empty())
+                {
+                    agent_tools.insert(agent_tool.clone());
+                }
+                if let Some(tool_use_id) = checkpoint_tool_use_id(checkpoint) {
+                    tool_use_ids.insert(tool_use_id.to_string());
+                }
+            }
+
+            let has_ai_path_evidence = pathspecs.contains(&path);
+            let has_landed_ai_lines = landed_ai_files.contains(&path);
+            let status = if has_ai_path_evidence || has_landed_ai_lines {
+                "included"
+            } else if kind_counts.is_empty() {
+                "excluded_no_checkpoint_for_added_file"
+            } else {
+                "excluded_no_ai_path_evidence"
+            };
+
+            serde_json::json!({
+                "filePath": path,
+                "status": status,
+                "hasAiPathEvidence": has_ai_path_evidence,
+                "hasLandedAiLines": has_landed_ai_lines,
+                "checkpointKindCounts": kind_counts,
+                "aiPreEditPathEvidenceCount": ai_pre_edit_count,
+                "agentToolSample": sorted_path_sample(agent_tools.into_iter().collect::<Vec<_>>(), 5),
+                "toolUseIdSample": sorted_path_sample(tool_use_ids.into_iter().collect::<Vec<_>>(), 5),
+            })
+        })
+        .collect()
+}
+
 fn checkpoint_input_debug_summary(checkpoints: &[Checkpoint]) -> serde_json::Value {
     let mut checkpoint_kind_counts: BTreeMap<String, usize> = BTreeMap::new();
     let mut checkpoint_kind_files: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
@@ -1498,12 +1706,20 @@ fn sample_checkpoint_files(files: &BTreeSet<String>, limit: usize) -> Vec<String
     files.iter().take(limit).cloned().collect()
 }
 
-fn should_log_attribution_gap(stats: &crate::authorship::stats::CommitStats) -> bool {
-    stats.git_diff_added_lines > 0
-        && stats.ai_additions == 0
+fn attribution_gap_reason(stats: &crate::authorship::stats::CommitStats) -> Option<&'static str> {
+    if stats.git_diff_added_lines == 0 || stats.unknown_additions == 0 {
+        return None;
+    }
+
+    if stats.ai_additions == 0
         && stats.human_additions == 0
         && stats.mixed_additions == 0
         && stats.unknown_additions == stats.git_diff_added_lines
+    {
+        Some("all_added_lines_unknown")
+    } else {
+        Some("partial_added_lines_unknown")
+    }
 }
 
 fn stats_skip_reason_debug(reason: Option<&StatsSkipReason>) -> serde_json::Value {
@@ -2139,14 +2355,201 @@ mod tests {
         assert_eq!(summary["onlySingleFile"], serde_json::json!(false));
     }
 
+    fn checkpoint_with_metadata(
+        kind: CheckpointKind,
+        file: &str,
+        metadata: &[(&str, &str)],
+    ) -> Checkpoint {
+        let mut checkpoint = Checkpoint::new(
+            kind,
+            String::new(),
+            "tester".to_string(),
+            vec![WorkingLogEntry::new(
+                file.to_string(),
+                "sha".to_string(),
+                Vec::new(),
+                Vec::new(),
+            )],
+        );
+        checkpoint.agent_metadata = Some(
+            metadata
+                .iter()
+                .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+                .collect(),
+        );
+        checkpoint
+    }
+
     #[test]
-    fn test_should_log_attribution_gap_only_for_all_unknown_additions() {
+    fn plain_legacy_human_checkpoint_rejects_ai_or_downgraded_metadata() {
+        let plain_human = Checkpoint::new(
+            CheckpointKind::Human,
+            String::new(),
+            "tester".to_string(),
+            vec![WorkingLogEntry::new(
+                "src/plain.ts".to_string(),
+                "sha".to_string(),
+                Vec::new(),
+                Vec::new(),
+            )],
+        );
+        assert!(is_plain_legacy_human_checkpoint(&plain_human));
+
+        let replay_human = checkpoint_with_metadata(
+            CheckpointKind::Human,
+            "src/replay.ts",
+            &[("git_ai_replay_checkpoint", "true")],
+        );
+        assert!(!is_plain_legacy_human_checkpoint(&replay_human));
+
+        let ai_pre_edit = checkpoint_with_metadata(
+            CheckpointKind::Human,
+            "src/pre.ts",
+            &[
+                ("ai_pre_edit", "true"),
+                ("edit_kind", "file_edit"),
+                ("tool_use_id", "call_1"),
+            ],
+        );
+        assert!(!is_plain_legacy_human_checkpoint(&ai_pre_edit));
+
+        let downgraded_known_human = checkpoint_with_metadata(
+            CheckpointKind::Human,
+            "src/save.ts",
+            &[("known_human_downgraded", "true")],
+        );
+        assert!(!is_plain_legacy_human_checkpoint(&downgraded_known_human));
+    }
+
+    #[test]
+    fn ai_pre_edit_path_evidence_requires_matching_ai_edited_tool_use_and_file() {
+        let pre_edit = checkpoint_with_metadata(
+            CheckpointKind::Human,
+            "src/from-pre.ts",
+            &[
+                ("ai_pre_edit", "true"),
+                ("edit_kind", "file_edit"),
+                ("tool_use_id", "call_1"),
+                ("agent_tool", "github-copilot"),
+            ],
+        );
+        let ai_edit = checkpoint_with_metadata(
+            CheckpointKind::AiAgent,
+            "src/from-post.ts",
+            &[("edit_kind", "file_edit"), ("tool_use_id", "call_1")],
+        );
+        let matching_ai_edit = checkpoint_with_metadata(
+            CheckpointKind::AiAgent,
+            "src/from-pre.ts",
+            &[("edit_kind", "file_edit"), ("tool_use_id", "call_1")],
+        );
+        let entry = pre_edit.entries.first().unwrap();
+
+        let same_tool_different_file = collect_ai_edited_tool_use_files(&[ai_edit]);
+        assert!(!checkpoint_has_ai_pre_edit_path_evidence(
+            &pre_edit,
+            entry,
+            &same_tool_different_file
+        ));
+
+        let matched_files = collect_ai_edited_tool_use_files(&[matching_ai_edit]);
+        assert!(checkpoint_has_ai_pre_edit_path_evidence(
+            &pre_edit,
+            entry,
+            &matched_files
+        ));
+
+        let unmatched_files = collect_ai_edited_tool_use_files(&[]);
+        assert!(!checkpoint_has_ai_pre_edit_path_evidence(
+            &pre_edit,
+            entry,
+            &unmatched_files
+        ));
+    }
+
+    #[test]
+    fn ai_pre_edit_path_evidence_rejects_human_agent_tool() {
+        let human_pre_edit = checkpoint_with_metadata(
+            CheckpointKind::Human,
+            "src/from-pre.ts",
+            &[
+                ("ai_pre_edit", "true"),
+                ("edit_kind", "file_edit"),
+                ("tool_use_id", "call_1"),
+                ("agent_tool", "human"),
+            ],
+        );
+        let matching_ai_edit = checkpoint_with_metadata(
+            CheckpointKind::AiAgent,
+            "src/from-pre.ts",
+            &[("edit_kind", "file_edit"), ("tool_use_id", "call_1")],
+        );
+        let matched_files = collect_ai_edited_tool_use_files(&[matching_ai_edit]);
+        let entry = human_pre_edit.entries.first().unwrap();
+
+        assert!(!checkpoint_has_ai_pre_edit_path_evidence(
+            &human_pre_edit,
+            entry,
+            &matched_files
+        ));
+    }
+
+    #[test]
+    fn ai_pre_edit_path_evidence_rejects_bash_and_plain_human() {
+        let pre_edit = checkpoint_with_metadata(
+            CheckpointKind::Human,
+            "src/from-pre.ts",
+            &[
+                ("ai_pre_edit", "true"),
+                ("edit_kind", "file_edit"),
+                ("tool_use_id", "call_1"),
+            ],
+        );
+        let bash_ai = checkpoint_with_metadata(
+            CheckpointKind::AiAgent,
+            "src/from-post.ts",
+            &[("edit_kind", "bash"), ("tool_use_id", "call_1")],
+        );
+        let entry = pre_edit.entries.first().unwrap();
+        let bash_files = collect_ai_edited_tool_use_files(&[bash_ai]);
+        assert!(!checkpoint_has_ai_pre_edit_path_evidence(
+            &pre_edit,
+            entry,
+            &bash_files
+        ));
+
+        let plain_human = Checkpoint::new(
+            CheckpointKind::Human,
+            String::new(),
+            "tester".to_string(),
+            vec![WorkingLogEntry::new(
+                "src/plain.ts".to_string(),
+                "sha".to_string(),
+                Vec::new(),
+                Vec::new(),
+            )],
+        );
+        let mut matched_files = HashSet::new();
+        matched_files.insert(("call_1".to_string(), "src/plain.ts".to_string()));
+        let plain_entry = plain_human.entries.first().unwrap();
+        assert!(!checkpoint_has_ai_pre_edit_path_evidence(
+            &plain_human,
+            plain_entry,
+            &matched_files
+        ));
+    }
+
+    #[test]
+    fn test_attribution_gap_reason_distinguishes_all_and_partial_unknown() {
         let all_unknown = crate::authorship::stats::CommitStats {
             unknown_additions: 849,
             git_diff_added_lines: 849,
             ..Default::default()
         };
-        assert!(should_log_attribution_gap(&all_unknown));
+        assert_eq!(
+            attribution_gap_reason(&all_unknown),
+            Some("all_added_lines_unknown")
+        );
 
         let with_human = crate::authorship::stats::CommitStats {
             human_additions: 1,
@@ -2154,13 +2557,23 @@ mod tests {
             git_diff_added_lines: 849,
             ..Default::default()
         };
-        assert!(!should_log_attribution_gap(&with_human));
+        assert_eq!(
+            attribution_gap_reason(&with_human),
+            Some("partial_added_lines_unknown")
+        );
 
         let deletion_only = crate::authorship::stats::CommitStats {
             git_diff_added_lines: 0,
             unknown_additions: 0,
             ..Default::default()
         };
-        assert!(!should_log_attribution_gap(&deletion_only));
+        assert_eq!(attribution_gap_reason(&deletion_only), None);
+
+        let fully_attributed = crate::authorship::stats::CommitStats {
+            git_diff_added_lines: 10,
+            ai_additions: 10,
+            ..Default::default()
+        };
+        assert_eq!(attribution_gap_reason(&fully_attributed), None);
     }
 }

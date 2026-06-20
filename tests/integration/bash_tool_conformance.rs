@@ -61,7 +61,8 @@ fn pre_hook(root: &std::path::Path, session_id: &str, tool_use_id: &str) {
 }
 
 fn post_hook(root: &std::path::Path, session_id: &str, tool_use_id: &str) -> BashPostHookResult {
-    handle_bash_post_tool_use(root, session_id, tool_use_id).expect("post-hook should succeed")
+    handle_bash_post_tool_use(root, session_id, tool_use_id, "t_test")
+        .expect("post-hook should succeed")
 }
 
 // ===========================================================================

@@ -433,14 +433,35 @@ fn split_files_into_requests(
         .collect()
 }
 
+fn is_human_tool_name(tool: &str) -> bool {
+    let tool = tool.trim();
+    tool.eq_ignore_ascii_case("human") || tool.eq_ignore_ascii_case("known_human")
+}
+
+fn is_ai_pre_edit_context(agent_id: &AgentId) -> bool {
+    !agent_id.tool.trim().is_empty() && !is_human_tool_name(&agent_id.tool)
+}
+
 fn execute_pre_file_edit(e: PreFileEdit) -> Result<Vec<CheckpointRequest>, GitAiError> {
     let mut files = build_checkpoint_files(&e.file_paths)?;
     if let Some(ref dirty) = e.dirty_files {
         apply_dirty_file_overrides(&mut files, dirty);
     }
+    let is_ai_pre_edit = is_ai_pre_edit_context(&e.context.agent_id);
     let mut metadata = e.context.metadata;
     if let Some(tuid) = e.tool_use_id {
         metadata.entry("tool_use_id".to_string()).or_insert(tuid);
+    }
+    if is_ai_pre_edit {
+        metadata
+            .entry("edit_kind".to_string())
+            .or_insert_with(|| "file_edit".to_string());
+        metadata
+            .entry("ai_pre_edit".to_string())
+            .or_insert_with(|| "true".to_string());
+        metadata
+            .entry("agent_tool".to_string())
+            .or_insert_with(|| e.context.agent_id.tool.clone());
     }
     Ok(split_files_into_requests(
         files,
@@ -571,6 +592,7 @@ fn execute_post_bash_call(e: PostBashCall) -> Result<Vec<CheckpointRequest>, Git
         &repo_work_dir,
         &e.context.external_session_id,
         &e.tool_use_id,
+        &trace_id,
     );
 
     let mut action_name = "error";

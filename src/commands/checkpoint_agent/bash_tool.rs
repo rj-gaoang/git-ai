@@ -895,6 +895,37 @@ fn signal_daemon_bash_session_end(session_id: &str, tool_use_id: &str) {
     }
 }
 
+fn signal_daemon_ai_pre_edit_close(
+    repo_root: &Path,
+    tool_use_id: &str,
+    trace_id: &str,
+    reason: &str,
+) {
+    let config = match DaemonConfig::from_env_or_default_paths() {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::debug!(
+                "Failed to resolve daemon config for ai pre-edit close: {}",
+                e
+            );
+            return;
+        }
+    };
+    let request = ControlRequest::AiPreEditClose {
+        repo_work_dir: repo_root.to_string_lossy().to_string(),
+        tool_use_id: tool_use_id.to_string(),
+        trace_id: trace_id.to_string(),
+        reason: reason.to_string(),
+    };
+    if let Err(e) = send_control_request_with_timeout(
+        &config.control_socket_path,
+        &request,
+        Duration::from_millis(500),
+    ) {
+        tracing::debug!("Failed to signal ai pre-edit close: {}", e);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Pre/post hook orchestration
 // ---------------------------------------------------------------------------
@@ -961,6 +992,7 @@ pub fn handle_bash_post_tool_use(
     repo_root: &Path,
     session_id: &str,
     tool_use_id: &str,
+    trace_id: &str,
 ) -> Result<BashPostHookResult, GitAiError> {
     let invocation_key = format!("{}:{}", session_id, tool_use_id);
 
@@ -1014,6 +1046,12 @@ pub fn handle_bash_post_tool_use(
 
                     if diff_result.is_empty() {
                         tracing::debug!("Bash tool {}: no changes detected", invocation_key);
+                        signal_daemon_ai_pre_edit_close(
+                            repo_root,
+                            tool_use_id,
+                            trace_id,
+                            "bash_no_changes",
+                        );
                         Ok(BashPostHookResult {
                             action: BashCheckpointAction::NoChanges,
                         })
