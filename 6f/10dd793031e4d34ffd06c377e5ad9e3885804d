@@ -1,0 +1,54 @@
+src/authorship/attribution_tracker.rs
+  s_85744b850c0992::t_fbb0152c77b57c 2085-2091,2093,2097-2098,2104-2105,2114-2115,2126,2132,2145-2146,2154-2157,2163-2176,2185-2187,2191
+  s_85744b850c0992::t_df8775d8d16dc7 1936-1943
+  s_85744b850c0992::t_14f75b7dda75d8 2042,2045,3129-3165
+  s_85744b850c0992::t_a8172c2e684c73 1876,1905-1920,2057-2059
+  s_85744b850c0992::t_45fcc0e7bace96 2002-2041,2043-2044,2046-2056,2060-2080
+  s_85744b850c0992::t_6badbfad461cf1 1130-1138,2177-2184
+  s_85744b850c0992::t_080902a90a01bc 3167-3193
+  s_85744b850c0992::t_cef9424a249cc7 896,898,900,1093-1095,1099-1129
+---
+{
+  "schema_version": "authorship/3.1.0",
+  "git_ai_version": "2.2.42",
+  "x_user_id": "108",
+  "base_commit_sha": "6f10dd793031e4d34ffd06c377e5ad9e3885804d",
+  "prompts": {
+    "s_85744b850c0992::t_080902a90a01bc": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ee480-c156-7d53-8ae6-aad9fea365a0",
+        "model": "gpt-5.5"
+      },
+      "human_author": null,
+      "messages": [],
+      "total_additions": 47,
+      "total_deletions": 8,
+      "accepted_lines": 27,
+      "overriden_lines": 0
+    },
+    "s_85744b850c0992::t_a8172c2e684c73": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ee480-c156-7d53-8ae6-aad9fea365a0",
+        "model": "gpt-5.5"
+      },
+      "human_author": null,
+      "messages": [],
+      "total_additions": 47,
+      "total_deletions": 8,
+      "accepted_lines": 20,
+      "overriden_lines": 0
+    }
+  },
+  "sessions": {
+    "s_85744b850c0992": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ee480-c156-7d53-8ae6-aad9fea365a0",
+        "model": "gpt-5.5"
+      },
+      "human_author": null
+    }
+  }
+}
