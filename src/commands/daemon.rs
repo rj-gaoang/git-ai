@@ -377,8 +377,10 @@ fn spawn_daemon_run_detached(config: &DaemonConfig) -> Result<(), String> {
 
     #[cfg(windows)]
     {
+        let internal_dir_literal = powershell_single_quote_literal(config.internal_dir.as_os_str());
         let script = format!(
-            "Start-Process -FilePath {} -ArgumentList @('bg','run') -WorkingDirectory {} -WindowStyle Hidden",
+            "$env:GIT_AI_DAEMON_INTERNAL_DIR = {}; Start-Process -FilePath {} -ArgumentList @('bg','run') -WorkingDirectory {} -WindowStyle Hidden",
+            internal_dir_literal,
             powershell_single_quote_literal(exe.as_os_str()),
             powershell_single_quote_literal(Path::new(&runtime_dir).as_os_str())
         );
@@ -427,6 +429,7 @@ fn spawn_daemon_run_detached(config: &DaemonConfig) -> Result<(), String> {
             .arg("bg")
             .arg("run")
             .current_dir(&runtime_dir)
+            .env("GIT_AI_DAEMON_INTERNAL_DIR", &config.internal_dir)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());

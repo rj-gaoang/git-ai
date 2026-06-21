@@ -92,6 +92,7 @@ pub use control_api::{
 const PID_META_FILE: &str = "daemon.pid.json";
 const ACTIVE_DAEMON_RUNTIME_FILE: &str = "active-runtime.json";
 const TRACE_INGEST_SEQ_FIELD: &str = "git_ai_ingest_seq";
+const ACTIVE_DAEMON_RUNTIME_STARTING_GRACE_NS: u128 = 10_000_000_000;
 const DAEMON_CONTROL_CONNECT_TIMEOUT: Duration = Duration::from_millis(250);
 const DAEMON_CONTROL_RESPONSE_TIMEOUT: Duration = Duration::from_secs(2);
 const DAEMON_CHECKPOINT_RESPONSE_TIMEOUT: Duration = Duration::from_secs(300);
@@ -232,7 +233,11 @@ impl DaemonConfig {
     }
 
     pub fn from_env_or_default_paths() -> Result<Self, GitAiError> {
-        let mut config = if let Ok(home) = std::env::var("GIT_AI_DAEMON_HOME")
+        let mut config = if let Ok(internal_dir) = std::env::var("GIT_AI_DAEMON_INTERNAL_DIR")
+            && !internal_dir.trim().is_empty()
+        {
+            Self::from_internal_dir(PathBuf::from(internal_dir))
+        } else if let Ok(home) = std::env::var("GIT_AI_DAEMON_HOME")
             && !home.trim().is_empty()
         {
             Self::from_home(Path::new(&home))
@@ -270,6 +275,9 @@ impl DaemonConfig {
         }
         let active_config = Self::from_internal_dir(meta.internal_dir);
         if active_runtime_is_reachable_or_starting(&active_config) {
+            return Some(active_config);
+        }
+        if active_runtime_meta_is_still_starting(&meta) {
             return Some(active_config);
         }
 
@@ -399,6 +407,10 @@ fn active_runtime_is_reachable_or_starting(config: &DaemonConfig) -> bool {
     }
 
     false
+}
+
+fn active_runtime_meta_is_still_starting(meta: &ActiveDaemonRuntimeMeta) -> bool {
+    now_unix_nanos().saturating_sub(meta.activated_at_ns) < ACTIVE_DAEMON_RUNTIME_STARTING_GRACE_NS
 }
 
 fn is_trace_payload(payload: &Value) -> bool {
@@ -9367,6 +9379,14 @@ mod tests {
     }
 
     fn write_active_runtime_meta(default_internal_dir: &Path, replacement_internal_dir: &Path) {
+        write_active_runtime_meta_with_time(default_internal_dir, replacement_internal_dir, 1);
+    }
+
+    fn write_active_runtime_meta_with_time(
+        default_internal_dir: &Path,
+        replacement_internal_dir: &Path,
+        activated_at_ns: u128,
+    ) {
         let meta_path = DaemonConfig::active_runtime_meta_path(default_internal_dir);
         fs::create_dir_all(meta_path.parent().expect("active runtime parent"))
             .expect("create active runtime parent");
@@ -9374,7 +9394,7 @@ mod tests {
             meta_path,
             serde_json::to_string(&ActiveDaemonRuntimeMeta {
                 internal_dir: replacement_internal_dir.to_path_buf(),
-                activated_at_ns: 1,
+                activated_at_ns,
                 reason: "test".to_string(),
             })
             .expect("serialize active runtime meta"),
@@ -9404,6 +9424,33 @@ mod tests {
         assert!(
             !DaemonConfig::active_runtime_meta_path(&default_internal_dir).exists(),
             "stale active-runtime.json should be removed"
+        );
+    }
+
+    #[test]
+    fn active_runtime_config_keeps_recent_replacement_while_starting() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let default_internal_dir = temp.path().join("default").join(".git-ai").join("internal");
+        let replacement_internal_dir = temp
+            .path()
+            .join("replacement")
+            .join(".git-ai")
+            .join("internal");
+        let replacement = DaemonConfig::from_internal_dir(replacement_internal_dir.clone());
+        replacement.ensure_parent_dirs().expect("replacement dirs");
+        write_active_runtime_meta_with_time(
+            &default_internal_dir,
+            &replacement_internal_dir,
+            now_unix_nanos(),
+        );
+
+        let resolved = DaemonConfig::active_runtime_config(&default_internal_dir)
+            .expect("recent replacement runtime should be kept while it starts");
+
+        assert_eq!(resolved.internal_dir, replacement_internal_dir);
+        assert!(
+            DaemonConfig::active_runtime_meta_path(&default_internal_dir).exists(),
+            "active-runtime.json should remain during startup grace period"
         );
     }
 
