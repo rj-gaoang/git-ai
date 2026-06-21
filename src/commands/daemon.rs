@@ -6,6 +6,8 @@ use crate::daemon::{
 use crate::utils::LockFile;
 #[cfg(windows)]
 use crate::utils::{CREATE_BREAKAWAY_FROM_JOB, CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW};
+#[cfg(windows)]
+use std::ffi::OsStr;
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -13,8 +15,6 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
-#[cfg(windows)]
-use std::{ffi::OsStr, path::Path};
 
 pub fn handle_daemon(args: &[String]) {
     if args.is_empty() || is_help(args[0].as_str()) {
@@ -254,10 +254,27 @@ pub(crate) fn ensure_daemon_running(
                 return Ok(config);
             }
 
+            if config.matches_active_runtime() {
+                return Err(format!(
+                    "timed out after {:?} waiting for active replacement daemon",
+                    timeout
+                ));
+            }
+
             return start_replacement_daemon(
                 "daemon lock is held but sockets are unreachable from this process",
                 timeout,
             );
+        }
+
+        if config.matches_active_runtime() {
+            if wait_for_daemon_up(&config, timeout) {
+                return Ok(config);
+            }
+            return Err(format!(
+                "timed out after {:?} waiting for active replacement daemon",
+                timeout
+            ));
         }
 
         start_daemon_detached_with_config(config, timeout)
@@ -266,6 +283,25 @@ pub(crate) fn ensure_daemon_running(
 
 #[cfg(not(any(test, feature = "test-support")))]
 fn start_replacement_daemon(reason: &str, timeout: Duration) -> Result<DaemonConfig, String> {
+    let default_internal_dir = crate::config::internal_dir_path()
+        .ok_or_else(|| "Unable to determine ~/.git-ai/internal path".to_string())?;
+    let activation_lock = DaemonConfig::try_acquire_active_runtime_lock(&default_internal_dir)
+        .map_err(|e| e.to_string())?;
+    let Some(_activation_lock) = activation_lock else {
+        return wait_for_active_runtime(&default_internal_dir, timeout).ok_or_else(|| {
+            format!(
+                "timed out after {:?} waiting for replacement daemon activation",
+                timeout
+            )
+        });
+    };
+
+    if let Some(active_config) = DaemonConfig::active_runtime_config(&default_internal_dir)
+        && wait_for_daemon_up(&active_config, timeout)
+    {
+        return Ok(active_config);
+    }
+
     let replacement =
         DaemonConfig::activate_replacement_runtime(reason).map_err(|e| e.to_string())?;
     crate::diagnostics::append_debug_event(
@@ -278,6 +314,25 @@ fn start_replacement_daemon(reason: &str, timeout: Duration) -> Result<DaemonCon
         }),
     );
     start_daemon_detached_with_config(replacement, timeout)
+}
+
+#[cfg(not(any(test, feature = "test-support")))]
+fn wait_for_active_runtime(
+    default_internal_dir: &std::path::Path,
+    timeout: Duration,
+) -> Option<DaemonConfig> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(active_config) = DaemonConfig::active_runtime_config(default_internal_dir)
+            && daemon_is_up(&active_config)
+        {
+            return Some(active_config);
+        }
+        if Instant::now() >= deadline {
+            return None;
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
 }
 
 fn daemon_startup_is_blocked(config: &DaemonConfig) -> bool {
@@ -382,7 +437,7 @@ fn spawn_daemon_run_detached(config: &DaemonConfig) -> Result<(), String> {
             "$env:GIT_AI_DAEMON_INTERNAL_DIR = {}; Start-Process -FilePath {} -ArgumentList @('bg','run') -WorkingDirectory {} -WindowStyle Hidden",
             internal_dir_literal,
             powershell_single_quote_literal(exe.as_os_str()),
-            powershell_single_quote_literal(Path::new(&runtime_dir).as_os_str())
+            powershell_single_quote_literal(std::path::Path::new(&runtime_dir).as_os_str())
         );
         let mut child = Command::new("powershell.exe");
         child

@@ -91,6 +91,7 @@ pub use control_api::{
 
 const PID_META_FILE: &str = "daemon.pid.json";
 const ACTIVE_DAEMON_RUNTIME_FILE: &str = "active-runtime.json";
+const ACTIVE_DAEMON_RUNTIME_LOCK_FILE: &str = "active-runtime.lock";
 const TRACE_INGEST_SEQ_FIELD: &str = "git_ai_ingest_seq";
 const ACTIVE_DAEMON_RUNTIME_STARTING_GRACE_NS: u128 = 10_000_000_000;
 const DAEMON_CONTROL_CONNECT_TIMEOUT: Duration = Duration::from_millis(250);
@@ -260,13 +261,29 @@ impl DaemonConfig {
         Ok(config)
     }
 
-    fn active_runtime_meta_path(default_internal_dir: &Path) -> PathBuf {
+    pub(crate) fn active_runtime_meta_path(default_internal_dir: &Path) -> PathBuf {
         default_internal_dir
             .join("daemon")
             .join(ACTIVE_DAEMON_RUNTIME_FILE)
     }
 
-    fn active_runtime_config(default_internal_dir: &Path) -> Option<Self> {
+    pub(crate) fn active_runtime_lock_path(default_internal_dir: &Path) -> PathBuf {
+        default_internal_dir
+            .join("daemon")
+            .join(ACTIVE_DAEMON_RUNTIME_LOCK_FILE)
+    }
+
+    pub(crate) fn try_acquire_active_runtime_lock(
+        default_internal_dir: &Path,
+    ) -> Result<Option<LockFile>, GitAiError> {
+        let lock_path = Self::active_runtime_lock_path(default_internal_dir);
+        if let Some(parent) = lock_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        Ok(LockFile::try_acquire(&lock_path))
+    }
+
+    pub(crate) fn active_runtime_config(default_internal_dir: &Path) -> Option<Self> {
         let meta_path = Self::active_runtime_meta_path(default_internal_dir);
         let contents = fs::read_to_string(&meta_path).ok()?;
         let meta: ActiveDaemonRuntimeMeta = serde_json::from_str(&contents).ok()?;
@@ -281,6 +298,20 @@ impl DaemonConfig {
 
         let _ = fs::remove_file(meta_path);
         None
+    }
+
+    pub(crate) fn matches_active_runtime(&self) -> bool {
+        let Some(default_internal_dir) = config::internal_dir_path() else {
+            return false;
+        };
+        let meta_path = Self::active_runtime_meta_path(&default_internal_dir);
+        let Ok(contents) = fs::read_to_string(meta_path) else {
+            return false;
+        };
+        let Ok(meta) = serde_json::from_str::<ActiveDaemonRuntimeMeta>(&contents) else {
+            return false;
+        };
+        meta.internal_dir == self.internal_dir
     }
 
     pub fn activate_replacement_runtime(reason: &str) -> Result<Self, GitAiError> {
