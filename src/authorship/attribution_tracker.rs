@@ -893,11 +893,11 @@ impl AttributionTracker {
         let format_passthrough_enabled = crate::config::Config::get()
             .feature_flags()
             .format_only_attribution_passthrough;
-        let (format_del_indices, format_ins_indices) =
+        let (format_del_indices, format_ins_attributions) =
             if format_passthrough_enabled && !is_ai_checkpoint {
-                scan_format_only_superblocks(diffs)
+                scan_format_only_superblocks(diffs, old_attributions, current_author, ts)
             } else {
-                (HashSet::new(), HashSet::new())
+                (HashSet::new(), HashMap::new())
             };
         let mut format_only_inherit_count = 0u32;
 
@@ -1090,10 +1090,51 @@ impl AttributionTracker {
                     // Format-only passthrough (4.2 pair-level + 4.3 superblock-level)
                     let is_format_pair_new = format_passthrough_enabled
                         && prev_delete_data.is_some_and(|d| is_format_only_change(d, diff.data()));
-                    let is_format_superblock =
-                        format_passthrough_enabled && format_ins_indices.contains(&insertion_idx);
+                    let format_superblock_attributions =
+                        format_ins_attributions.get(&insertion_idx);
+                    let is_format_superblock = format_superblock_attributions.is_some();
                     let is_format_inherit =
                         is_formatting_pair || is_format_pair_new || is_format_superblock;
+
+                    if let Some(attrs) = format_superblock_attributions {
+                        format_only_inherit_count += 1;
+                        if attrs.is_empty() {
+                            if let Some(attr) = find_attribution_for_insertion(
+                                old_attributions,
+                                old_pos,
+                                &mut insertion_attr_cursor,
+                            ) {
+                                new_attributions.push(Attribution::new(
+                                    new_pos,
+                                    new_pos + len,
+                                    attr.author_id.clone(),
+                                    attr.ts,
+                                ));
+                            } else if let Some(attr) = new_attributions.last() {
+                                new_attributions.push(Attribution::new(
+                                    new_pos,
+                                    new_pos + len,
+                                    attr.author_id.clone(),
+                                    attr.ts,
+                                ));
+                            } else {
+                                new_attributions.push(Attribution::new(
+                                    new_pos,
+                                    new_pos + len,
+                                    current_author.to_string(),
+                                    ts,
+                                ));
+                            }
+                        } else {
+                            new_attributions.extend(attrs.iter().cloned());
+                        }
+
+                        new_pos += len;
+                        insertion_idx += 1;
+                        prev_whitespace_delete = false;
+                        prev_delete_data = None;
+                        continue;
+                    }
 
                     #[allow(clippy::if_same_then_else)]
                     let (author_id, attribution_ts) = if is_format_inherit {
@@ -1832,15 +1873,11 @@ fn sort_attributions_for_transform(attributions: &[Attribution]) -> Vec<Attribut
     sorted
 }
 
-fn find_attribution_for_insertion<'a>(
+fn overlapping_attribution_at_position<'a>(
     old_attributions: &'a [Attribution],
     position: usize,
     cursor_hint: &mut usize,
 ) -> Option<&'a Attribution> {
-    if old_attributions.is_empty() {
-        return None;
-    }
-
     while *cursor_hint < old_attributions.len() && old_attributions[*cursor_hint].end <= position {
         *cursor_hint += 1;
     }
@@ -1865,8 +1902,22 @@ fn find_attribution_for_insertion<'a>(
         idx += 1;
     }
 
-    if best_overlap.is_some() {
-        return best_overlap;
+    best_overlap
+}
+
+fn attribution_at_position<'a>(
+    old_attributions: &'a [Attribution],
+    position: usize,
+    cursor_hint: &mut usize,
+) -> Option<&'a Attribution> {
+    if old_attributions.is_empty() {
+        return None;
+    }
+
+    if let Some(best_overlap) =
+        overlapping_attribution_at_position(old_attributions, position, cursor_hint)
+    {
+        return Some(best_overlap);
     }
 
     let before = if *cursor_hint > 0 {
@@ -1880,6 +1931,14 @@ fn find_attribution_for_insertion<'a>(
         .find(|a| a.start >= position);
 
     before.or(after)
+}
+
+fn find_attribution_for_insertion<'a>(
+    old_attributions: &'a [Attribution],
+    position: usize,
+    cursor_hint: &mut usize,
+) -> Option<&'a Attribution> {
+    attribution_at_position(old_attributions, position, cursor_hint)
 }
 
 fn data_is_whitespace(data: &[u8]) -> bool {
@@ -1940,23 +1999,110 @@ fn is_format_only_change(old: &[u8], new: &[u8]) -> bool {
     }
 }
 
+fn push_mapped_format_attr(
+    result: &mut Vec<Attribution>,
+    start: usize,
+    end: usize,
+    author_id: String,
+    ts: u128,
+) {
+    if start >= end {
+        return;
+    }
+
+    if let Some(last) = result.last_mut()
+        && last.author_id == author_id
+        && last.ts == ts
+        && last.end == start
+    {
+        last.end = end;
+        return;
+    }
+
+    result.push(Attribution::new(start, end, author_id, ts));
+}
+
+fn format_only_mapped_attributions(
+    old: &[u8],
+    new: &[u8],
+    old_base: usize,
+    new_base: usize,
+    old_attributions: &[Attribution],
+    current_author: &str,
+    ts: u128,
+) -> Vec<Attribution> {
+    let Ok(old_str) = std::str::from_utf8(old) else {
+        return Vec::new();
+    };
+    let Ok(new_str) = std::str::from_utf8(new) else {
+        return Vec::new();
+    };
+
+    let mut result = Vec::new();
+    let mut old_chars = old_str.char_indices().filter(|(_, ch)| !ch.is_whitespace());
+    let mut attr_cursor = 0usize;
+
+    for (new_idx, new_ch) in new_str.char_indices().filter(|(_, ch)| !ch.is_whitespace()) {
+        let Some((old_idx, old_ch)) = old_chars.next() else {
+            break;
+        };
+        if old_ch != new_ch {
+            return Vec::new();
+        }
+
+        let old_abs = old_base + old_idx;
+        let new_abs = new_base + new_idx;
+        let new_end = new_abs + new_ch.len_utf8();
+
+        if let Some(attr) =
+            overlapping_attribution_at_position(old_attributions, old_abs, &mut attr_cursor)
+        {
+            push_mapped_format_attr(
+                &mut result,
+                new_abs,
+                new_end,
+                attr.author_id.clone(),
+                attr.ts,
+            );
+        } else {
+            push_mapped_format_attr(
+                &mut result,
+                new_abs,
+                new_end,
+                current_author.to_string(),
+                ts,
+            );
+        }
+    }
+
+    result
+}
+
 /// Pre-scan the diff list and identify "superblocks" of consecutive Delete/Insert
 /// operations (not separated by Equal) where the concatenated deleted content and
 /// concatenated inserted content are format-only equivalent.
 ///
-/// Returns two sets: deletion indices and insertion indices that belong to
-/// format-only superblocks.
-fn scan_format_only_superblocks(diffs: &[ByteDiff]) -> (HashSet<usize>, HashSet<usize>) {
+/// Returns deletion indices and insertion attributions for format-only superblocks.
+fn scan_format_only_superblocks(
+    diffs: &[ByteDiff],
+    old_attributions: &[Attribution],
+    current_author: &str,
+    ts: u128,
+) -> (HashSet<usize>, HashMap<usize, Vec<Attribution>>) {
     let mut format_deletion_indices = HashSet::new();
-    let mut format_insertion_indices = HashSet::new();
+    let mut format_insertion_attributions: HashMap<usize, Vec<Attribution>> = HashMap::new();
 
     let mut deletion_idx = 0usize;
     let mut insertion_idx = 0usize;
+    let mut old_pos = 0usize;
+    let mut new_pos = 0usize;
 
     // Collect superblocks: groups of consecutive Delete/Insert not separated by Equal
     let mut i = 0;
     while i < diffs.len() {
         if diffs[i].op() == ByteDiffOp::Equal {
+            old_pos += diffs[i].data().len();
+            new_pos += diffs[i].data().len();
             i += 1;
             continue;
         }
@@ -1965,6 +2111,8 @@ fn scan_format_only_superblocks(diffs: &[ByteDiff]) -> (HashSet<usize>, HashSet<
         let block_start = i;
         let block_del_start = deletion_idx;
         let block_ins_start = insertion_idx;
+        let block_old_start = old_pos;
+        let block_new_start = new_pos;
         let mut del_data: Vec<u8> = Vec::new();
         let mut ins_data: Vec<u8> = Vec::new();
         let mut has_delete = false;
@@ -1975,11 +2123,13 @@ fn scan_format_only_superblocks(diffs: &[ByteDiff]) -> (HashSet<usize>, HashSet<
                 ByteDiffOp::Delete => {
                     del_data.extend_from_slice(diffs[i].data());
                     has_delete = true;
+                    old_pos += diffs[i].data().len();
                     deletion_idx += 1;
                 }
                 ByteDiffOp::Insert => {
                     ins_data.extend_from_slice(diffs[i].data());
                     has_insert = true;
+                    new_pos += diffs[i].data().len();
                     insertion_idx += 1;
                 }
                 ByteDiffOp::Equal => unreachable!(),
@@ -1992,6 +2142,8 @@ fn scan_format_only_superblocks(diffs: &[ByteDiff]) -> (HashSet<usize>, HashSet<
             // Mark all deletion/insertion indices in this superblock
             let mut d = block_del_start;
             let mut n = block_ins_start;
+            let mut insertion_ranges: HashMap<usize, (usize, usize)> = HashMap::new();
+            let mut rel_new_pos = 0usize;
             for diff in &diffs[block_start..i] {
                 match diff.op() {
                     ByteDiffOp::Delete => {
@@ -1999,16 +2151,44 @@ fn scan_format_only_superblocks(diffs: &[ByteDiff]) -> (HashSet<usize>, HashSet<
                         d += 1;
                     }
                     ByteDiffOp::Insert => {
-                        format_insertion_indices.insert(n);
+                        let start = block_new_start + rel_new_pos;
+                        let end = start + diff.data().len();
+                        insertion_ranges.insert(n, (start, end));
+                        rel_new_pos += diff.data().len();
                         n += 1;
                     }
                     ByteDiffOp::Equal => {}
                 }
             }
+
+            let mapped = format_only_mapped_attributions(
+                &del_data,
+                &ins_data,
+                block_old_start,
+                block_new_start,
+                old_attributions,
+                current_author,
+                ts,
+            );
+            for (ins_idx, (start, end)) in insertion_ranges {
+                let attrs = mapped
+                    .iter()
+                    .filter(|attr| attr.start < end && attr.end > start)
+                    .map(|attr| {
+                        Attribution::new(
+                            attr.start.max(start),
+                            attr.end.min(end),
+                            attr.author_id.clone(),
+                            attr.ts,
+                        )
+                    })
+                    .collect();
+                format_insertion_attributions.insert(ins_idx, attrs);
+            }
         }
     }
 
-    (format_deletion_indices, format_insertion_indices)
+    (format_deletion_indices, format_insertion_attributions)
 }
 
 impl Default for AttributionTracker {
@@ -2945,5 +3125,70 @@ mod tests {
             "reindent should preserve AI attribution, got {:?}",
             line_attrs
         );
+    }
+
+    #[test]
+    fn format_only_mapping_preserves_mixed_authors_inside_block() {
+        let old = "alpha beta gamma";
+        let new = "alpha\n  beta\n  gamma";
+        let old_attrs = vec![
+            Attribution::new(0, "alpha".len(), "mock_ai".into(), TEST_TS),
+            Attribution::new(
+                old.find("beta").unwrap(),
+                old.find("beta").unwrap() + "beta".len(),
+                "human".into(),
+                TEST_TS + 1,
+            ),
+            Attribution::new(
+                old.find("gamma").unwrap(),
+                old.find("gamma").unwrap() + "gamma".len(),
+                "mock_ai".into(),
+                TEST_TS,
+            ),
+        ];
+
+        let mapped = format_only_mapped_attributions(
+            old.as_bytes(),
+            new.as_bytes(),
+            0,
+            0,
+            &old_attrs,
+            "formatter",
+            TEST_TS + 2,
+        );
+
+        let alpha = new.find("alpha").unwrap();
+        let beta = new.find("beta").unwrap();
+        let gamma = new.find("gamma").unwrap();
+        assert_range_owned_by(&mapped, alpha, alpha + "alpha".len(), "mock_ai");
+        assert_range_owned_by(&mapped, beta, beta + "beta".len(), "human");
+        assert_range_owned_by(&mapped, gamma, gamma + "gamma".len(), "mock_ai");
+    }
+
+    #[test]
+    fn format_only_mapping_does_not_inherit_neighbor_for_unattributed_tokens() {
+        let old = "alpha beta";
+        let new = "alpha\n  beta";
+        let old_attrs = vec![Attribution::new(
+            0,
+            "alpha".len(),
+            "mock_ai".into(),
+            TEST_TS,
+        )];
+
+        let mapped = format_only_mapped_attributions(
+            old.as_bytes(),
+            new.as_bytes(),
+            0,
+            0,
+            &old_attrs,
+            "formatter",
+            TEST_TS + 1,
+        );
+
+        let alpha = new.find("alpha").unwrap();
+        let beta = new.find("beta").unwrap();
+        assert_range_owned_by(&mapped, alpha, alpha + "alpha".len(), "mock_ai");
+        assert_range_owned_by(&mapped, beta, beta + "beta".len(), "formatter");
     }
 }
