@@ -350,50 +350,6 @@ function Wait-ForFileAvailable {
     return $false
 }
 
-function Get-LegacyGitWrapperDisabledPath {
-    param(
-        [Parameter(Mandatory = $true)][string]$InstallDir
-    )
-
-    $timestamp = Get-Date -Format 'yyyyMMddHHmmss'
-    $basePath = Join-Path $InstallDir "git.exe.disabled-legacy-wrapper-$timestamp"
-    $candidatePath = $basePath
-    $suffix = 1
-
-    while (Test-Path -LiteralPath $candidatePath) {
-        $candidatePath = "$basePath-$suffix"
-        $suffix += 1
-    }
-
-    return $candidatePath
-}
-
-function Disable-LegacyGitWrapper {
-    param(
-        [Parameter(Mandatory = $true)][string]$GitShim,
-        [Parameter(Mandatory = $true)][string]$InstallDir
-    )
-
-    if (-not (Test-Path -LiteralPath $GitShim)) {
-        return
-    }
-
-    $disabledPath = Get-LegacyGitWrapperDisabledPath -InstallDir $InstallDir
-    try {
-        Move-Item -Force -LiteralPath $GitShim -Destination $disabledPath -ErrorAction Stop
-    } catch {
-        if (-not (Wait-ForFileAvailable -Path $GitShim -InstallDir $InstallDir -MaxWaitSeconds 300 -RetryIntervalSeconds 5)) {
-            if (Test-PassiveAutoUpdateMode) {
-                Write-ErrorAndExit "Deferred auto-update because $GitShim is still in use and could not be disabled. git-ai will retry on a later update check."
-            }
-            Write-ErrorAndExit "Timeout waiting for $GitShim to be available. Please close any running git processes and try again."
-        }
-        Move-Item -Force -LiteralPath $GitShim -Destination $disabledPath
-    }
-
-    Write-Warning "Disabled legacy git.exe wrapper: $GitShim -> $disabledPath"
-}
-
 function Set-CurrentExePointer {
     param(
         [Parameter(Mandatory = $true)][string]$PointerPath,
@@ -701,8 +657,9 @@ function Get-Architecture {
     }
 }
 
-# Ensure $PathToAdd is on the User PATH (appended if absent). No Machine PATH,
-# no admin required, no positioning logic.
+# Ensure $PathToAdd is first on the User PATH. No Machine PATH and no admin
+# required. git-ai's git proxy must precede system Git for automatic commit
+# attribution and upload followups to run.
 function Set-PathEnsureContains {
     param(
         [Parameter(Mandatory = $true)][string]$PathToAdd
@@ -721,14 +678,13 @@ function Set-PathEnsureContains {
         $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
         $entries = @()
         if ($userPath) { $entries = ($userPath -split $sep) | Where-Object { $_ -and $_.Trim() -ne '' } }
-        $alreadyPresent = $false
-        foreach ($e in $entries) {
-            if ((NormalizePath $e) -eq $normalizedAdd) { $alreadyPresent = $true; break }
-        }
-        if ($alreadyPresent) {
+        $filteredEntries = @($entries | Where-Object { (NormalizePath $_) -ne $normalizedAdd })
+        $alreadyFirst = ($entries.Count -gt 0 -and (NormalizePath $entries[0]) -eq $normalizedAdd)
+        if ($alreadyFirst) {
             $userStatus = 'AlreadyPresent'
         } else {
-            $newUserPath = if ($userPath) { "$userPath$sep$PathToAdd" } else { $PathToAdd }
+            $newEntries = @($PathToAdd) + $filteredEntries
+            $newUserPath = ($newEntries -join $sep)
             [Environment]::SetEnvironmentVariable('Path', $newUserPath, 'User')
             $userStatus = 'Updated'
         }
@@ -741,12 +697,10 @@ function Set-PathEnsureContains {
         $procPath = $env:PATH
         $procEntries = @()
         if ($procPath) { $procEntries = ($procPath -split $sep) | Where-Object { $_ -and $_.Trim() -ne '' } }
-        $procHas = $false
-        foreach ($e in $procEntries) {
-            if ((NormalizePath $e) -eq $normalizedAdd) { $procHas = $true; break }
-        }
-        if (-not $procHas) {
-            $env:PATH = if ($procPath) { "$procPath$sep$PathToAdd" } else { $PathToAdd }
+        $procAlreadyFirst = ($procEntries.Count -gt 0 -and (NormalizePath $procEntries[0]) -eq $normalizedAdd)
+        if (-not $procAlreadyFirst) {
+            $procFilteredEntries = @($procEntries | Where-Object { (NormalizePath $_) -ne $normalizedAdd })
+            $env:PATH = ((@($PathToAdd) + $procFilteredEntries) -join $sep)
         }
     } catch { }
 
@@ -1010,9 +964,10 @@ Set-CurrentExePointer -PointerPath $currentExePointer -TargetPath $launcherExe
 Copy-InstalledBinary -Source $launcherExe -Destination $finalExe -InstallDir $installDir -Description 'compatibility git-ai.exe'
 try { Unblock-File -Path $finalExe -ErrorAction SilentlyContinue } catch { }
 
-# Existing Windows users may still have the legacy git.exe wrapper. Disable it
-# instead of refreshing it so PATH resolves to the real Git executable.
-Disable-LegacyGitWrapper -GitShim $gitShim -InstallDir $installDir
+# Keep git.exe installed beside git-ai.exe. The git proxy is what sends wrapper
+# pre/post state for commit processing and triggers post-commit upload followups.
+Copy-InstalledBinary -Source $launcherExe -Destination $gitShim -InstallDir $installDir -Description 'git proxy git.exe'
+try { Unblock-File -Path $gitShim -ErrorAction SilentlyContinue } catch { }
 
 # Login user with install token if provided
 $needLogin = $false
@@ -1054,7 +1009,7 @@ if ($skipPathUpdate) {
         UserStatus = 'Skipped'
     }
 } else {
-    $pathUpdate = Set-PathEnsureContains -PathToAdd $launcherDir
+    $pathUpdate = Set-PathEnsureContains -PathToAdd $installDir
 }
 if ($pathUpdate.UserStatus -eq 'Updated') {
     Write-Success 'Successfully added git-ai to the user PATH.'
@@ -1065,8 +1020,8 @@ if ($pathUpdate.UserStatus -eq 'Updated') {
 }
 
 Write-Success "Successfully installed git-ai into $launcherDir"
-Write-Success "Synchronized compatibility entrypoint into $installDir"
-Write-Success "You can now run 'git-ai' from your terminal"
+Write-Success "Synchronized git-ai and git proxy entrypoints into $installDir"
+Write-Success "You can now run 'git-ai' and git-ai-managed 'git' from your terminal"
 
 if ($installHooksSucceeded) {
     try {

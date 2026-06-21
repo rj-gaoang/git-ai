@@ -297,6 +297,14 @@ mv -f "$TMP_FILE" "${INSTALL_DIR}/git-ai"
 # Make executable
 chmod +x "${INSTALL_DIR}/git-ai"
 
+# Install the git proxy beside git-ai. The proxy sends wrapper pre/post state
+# for commit processing and triggers post-commit upload followups.
+if ln -sf "${INSTALL_DIR}/git-ai" "${INSTALL_DIR}/git" 2>/dev/null; then
+    success "Synchronized git proxy at ${INSTALL_DIR}/git"
+else
+    warn "Failed to create git proxy at ${INSTALL_DIR}/git. This is non-fatal, but automatic commit attribution may not run."
+fi
+
 # Remove quarantine attribute on macOS
 if [ "$OS" = "macos" ]; then
     xattr -d com.apple.quarantine "${INSTALL_DIR}/git-ai" 2>/dev/null || true
@@ -311,7 +319,7 @@ else
 fi
 
 success "Successfully installed git-ai into ${INSTALL_DIR}"
-success "You can now run 'git-ai' from your terminal"
+success "You can now run 'git-ai' and git-ai-managed 'git' from your terminal"
 
 # Print installed version
 INSTALLED_VERSION=$(${INSTALL_DIR}/git-ai --version 2>&1 || echo "unknown")

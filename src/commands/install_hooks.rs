@@ -285,6 +285,75 @@ fn configure_daemon_trace2(dry_run: bool) -> Result<(), GitAiError> {
     configure_async_mode_daemon_trace2_for_config(&daemon_config)
 }
 
+#[cfg(windows)]
+fn repair_git_proxy_entrypoint(dry_run: bool) -> Result<(), GitAiError> {
+    if dry_run {
+        return Ok(());
+    }
+
+    let Ok(current_exe) = std::env::current_exe() else {
+        return Ok(());
+    };
+    let Some(install_dir) = current_exe.parent() else {
+        return Ok(());
+    };
+
+    let current_name = current_exe
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    if !current_name.eq_ignore_ascii_case("git-ai.exe")
+        && !current_name.eq_ignore_ascii_case("git.exe")
+    {
+        return Ok(());
+    }
+
+    let git_ai_exe = install_dir.join("git-ai.exe");
+    let git_proxy = install_dir.join("git.exe");
+    if !git_ai_exe.exists() || git_proxy.exists() {
+        return Ok(());
+    }
+
+    fs::copy(&git_ai_exe, &git_proxy)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn repair_git_proxy_entrypoint(dry_run: bool) -> Result<(), GitAiError> {
+    if dry_run {
+        return Ok(());
+    }
+
+    let Ok(current_exe) = std::env::current_exe() else {
+        return Ok(());
+    };
+    let Some(install_dir) = current_exe.parent() else {
+        return Ok(());
+    };
+
+    let current_name = current_exe
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    if current_name != "git-ai" && current_name != "git" {
+        return Ok(());
+    }
+
+    let git_ai_exe = install_dir.join("git-ai");
+    let git_proxy = install_dir.join("git");
+    if !git_ai_exe.exists() || git_proxy.exists() {
+        return Ok(());
+    }
+
+    std::os::unix::fs::symlink(&git_ai_exe, &git_proxy)?;
+    Ok(())
+}
+
+#[cfg(not(any(windows, unix)))]
+fn repair_git_proxy_entrypoint(_dry_run: bool) -> Result<(), GitAiError> {
+    Ok(())
+}
+
 fn expanded_hooks_path(value: &str) -> PathBuf {
     let trimmed = value.trim();
     if let Some(rest) = trimmed
@@ -448,6 +517,9 @@ pub fn run(args: &[String]) -> Result<HashMap<String, String>, GitAiError> {
         Err(e) => {
             eprintln!("Warning: could not repair core.hooksPath (non-fatal): {e}");
         }
+    }
+    if let Err(e) = repair_git_proxy_entrypoint(options.dry_run) {
+        eprintln!("Warning: could not repair git proxy entrypoint (non-fatal): {e}");
     }
     ensure_daemon(options.dry_run);
 
