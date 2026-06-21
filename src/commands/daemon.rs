@@ -249,8 +249,35 @@ pub(crate) fn ensure_daemon_running(
             );
         }
 
+        if daemon_startup_is_blocked(&config) {
+            if wait_for_daemon_up(&config, timeout) {
+                return Ok(config);
+            }
+
+            return start_replacement_daemon(
+                "daemon lock is held but sockets are unreachable from this process",
+                timeout,
+            );
+        }
+
         start_daemon_detached_with_config(config, timeout)
     }
+}
+
+#[cfg(not(any(test, feature = "test-support")))]
+fn start_replacement_daemon(reason: &str, timeout: Duration) -> Result<DaemonConfig, String> {
+    let replacement =
+        DaemonConfig::activate_replacement_runtime(reason).map_err(|e| e.to_string())?;
+    crate::diagnostics::append_debug_event(
+        "daemon_replacement_runtime_activated",
+        serde_json::json!({
+            "reason": reason,
+            "internalDir": replacement.internal_dir.to_string_lossy().to_string(),
+            "controlSocket": replacement.control_socket_path.to_string_lossy().to_string(),
+            "traceSocket": replacement.trace_socket_path.to_string_lossy().to_string(),
+        }),
+    );
+    start_daemon_detached_with_config(replacement, timeout)
 }
 
 fn daemon_startup_is_blocked(config: &DaemonConfig) -> bool {

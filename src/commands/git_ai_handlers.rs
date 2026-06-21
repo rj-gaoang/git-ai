@@ -115,7 +115,7 @@ pub fn handle_git_ai(args: &[String]) {
             DaemonTelemetryInitResult, init_daemon_telemetry_handle,
         };
         match init_daemon_telemetry_handle() {
-            DaemonTelemetryInitResult::Connected | DaemonTelemetryInitResult::Skipped => {}
+            DaemonTelemetryInitResult::Connected { .. } | DaemonTelemetryInitResult::Skipped => {}
             DaemonTelemetryInitResult::Failed(err) => {
                 eprintln!(
                     "error: failed to connect to git-ai background service: {}",

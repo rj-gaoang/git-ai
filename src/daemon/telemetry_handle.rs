@@ -98,7 +98,10 @@ impl DaemonTelemetryHandle {
 /// Result of attempting to initialize the global daemon telemetry handle.
 pub enum DaemonTelemetryInitResult {
     /// Successfully connected to daemon.
-    Connected,
+    Connected {
+        /// Trace2 event target for the daemon this handle is connected to.
+        trace2_event_target: String,
+    },
     /// Failed to connect; contains the error message.
     Failed(String),
     /// Not in daemon mode or already inside the daemon process.
@@ -124,23 +127,34 @@ pub fn init_daemon_telemetry_handle() -> DaemonTelemetryInitResult {
     // (i.e., wrapper-daemon mode where the test harness manages the daemon).
     #[cfg(any(test, feature = "test-support"))]
     {
-        let socket_path = std::env::var("GIT_AI_DAEMON_CONTROL_SOCKET")
+        let control_socket_path = std::env::var("GIT_AI_DAEMON_CONTROL_SOCKET")
             .ok()
             .filter(|p| !p.trim().is_empty())
             .map(PathBuf::from)
             .filter(|p| p.exists());
 
-        match socket_path {
+        match control_socket_path {
             Some(path) => {
                 match open_local_socket_stream_with_timeout(&path, Duration::from_secs(2)) {
                     Ok(mut stream) => {
                         DaemonTelemetryHandle::apply_socket_timeouts(&mut stream, &path);
+                        let trace_socket_path = std::env::var("GIT_AI_DAEMON_TRACE_SOCKET")
+                            .ok()
+                            .filter(|p| !p.trim().is_empty())
+                            .map(PathBuf::from)
+                            .unwrap_or_else(|| path.clone());
+                        let trace2_event_target =
+                            crate::daemon::DaemonConfig::trace2_event_target_for_path(
+                                &trace_socket_path,
+                            );
                         let handle = DaemonTelemetryHandle {
                             socket_path: path,
                             conn: BufReader::new(stream),
                         };
                         let _ = DAEMON_TELEMETRY_HANDLE.get_or_init(|| Mutex::new(Some(handle)));
-                        DaemonTelemetryInitResult::Connected
+                        DaemonTelemetryInitResult::Connected {
+                            trace2_event_target,
+                        }
                     }
                     Err(e) => {
                         let _ = DAEMON_TELEMETRY_HANDLE.get_or_init(|| Mutex::new(None));
@@ -178,12 +192,15 @@ pub fn init_daemon_telemetry_handle() -> DaemonTelemetryInitResult {
                     &mut stream,
                     &config.control_socket_path,
                 );
+                let trace2_event_target = config.trace2_event_target();
                 let handle = DaemonTelemetryHandle {
                     socket_path: config.control_socket_path,
                     conn: BufReader::new(stream),
                 };
                 let _ = DAEMON_TELEMETRY_HANDLE.get_or_init(|| Mutex::new(Some(handle)));
-                DaemonTelemetryInitResult::Connected
+                DaemonTelemetryInitResult::Connected {
+                    trace2_event_target,
+                }
             }
             Err(e) => {
                 let _ = DAEMON_TELEMETRY_HANDLE.get_or_init(|| Mutex::new(None));

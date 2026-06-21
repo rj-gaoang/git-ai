@@ -104,7 +104,7 @@ pub fn handle_git(args: &[String]) {
                 "currentExe": crate::diagnostics::current_exe_for_debug(),
             }),
         );
-        proxy_to_git(&orig_args, true, None);
+        proxy_to_git(&orig_args, true, None, None);
         return;
     }
 
@@ -144,7 +144,7 @@ pub fn handle_git(args: &[String]) {
                 "command": parsed.command.as_deref(),
             }),
         );
-        let exit_status = proxy_to_git(args, false, None);
+        let exit_status = proxy_to_git(args, false, None, None);
         exit_with_status(exit_status);
     }
 
@@ -168,7 +168,7 @@ pub fn handle_git(args: &[String]) {
                 "command": parsed.command.as_deref(),
             }),
         );
-        let exit_status = proxy_to_git(args, false, None);
+        let exit_status = proxy_to_git(args, false, None, None);
         exit_with_status(exit_status);
     }
 
@@ -177,12 +177,15 @@ pub fn handle_git(args: &[String]) {
     // Initialize the daemon telemetry handle so we can send wrapper state.
     // If the daemon isn't available, fall back to a plain passthrough proxy
     // (no invocation_id, no wrapper state, no extra GIT_* env vars).
-    let daemon_connected = matches!(
-        crate::daemon::telemetry_handle::init_daemon_telemetry_handle(),
-        crate::daemon::telemetry_handle::DaemonTelemetryInitResult::Connected
-    );
+    let trace2_event_target = match crate::daemon::telemetry_handle::init_daemon_telemetry_handle()
+    {
+        crate::daemon::telemetry_handle::DaemonTelemetryInitResult::Connected {
+            trace2_event_target,
+        } => Some(trace2_event_target),
+        _ => None,
+    };
 
-    if !daemon_connected {
+    if trace2_event_target.is_none() {
         crate::diagnostics::append_debug_event(
             "git_proxy_route",
             serde_json::json!({
@@ -191,7 +194,7 @@ pub fn handle_git(args: &[String]) {
                 "repositoryFound": repository.is_some(),
             }),
         );
-        let exit_status = proxy_to_git(args, false, None);
+        let exit_status = proxy_to_git(args, false, None, None);
         if should_run_post_commit_followups(&parsed, exit_status.success()) {
             run_post_commit_followups(&parsed, repository.as_ref(), false, "wrapper_no_daemon");
         }
@@ -212,6 +215,7 @@ pub fn handle_git(args: &[String]) {
             "repositoryFound": repository.is_some(),
             "worktree": worktree.as_ref().map(|path| path.to_string_lossy().to_string()),
             "wrapperInvocationId": invocation_id,
+            "trace2EventTarget": trace2_event_target.as_deref(),
         }),
     );
 
@@ -219,7 +223,12 @@ pub fn handle_git(args: &[String]) {
     // processes the atexit trace event and starts the wrapper state timeout.
     send_wrapper_pre_state_to_daemon(&invocation_id, worktree.as_deref(), &pre_state);
 
-    let exit_status = proxy_to_git(args, false, Some(&invocation_id));
+    let exit_status = proxy_to_git(
+        args,
+        false,
+        Some(&invocation_id),
+        trace2_event_target.as_deref(),
+    );
 
     let post_state = worktree
         .as_deref()
@@ -580,6 +589,22 @@ fn send_wrapper_post_state_to_daemon(
     }
 }
 
+fn apply_git_trace2_event_target_override(cmd: &mut Command, trace2_event_target: Option<&str>) {
+    let Some(trace2_event_target) = trace2_event_target else {
+        return;
+    };
+    let index = match std::env::var("GIT_CONFIG_COUNT") {
+        Ok(value) => match value.parse::<usize>() {
+            Ok(index) => index,
+            Err(_) => return,
+        },
+        Err(_) => 0,
+    };
+    cmd.env(format!("GIT_CONFIG_KEY_{}", index), "trace2.eventTarget");
+    cmd.env(format!("GIT_CONFIG_VALUE_{}", index), trace2_event_target);
+    cmd.env("GIT_CONFIG_COUNT", (index + 1).to_string());
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -617,6 +642,7 @@ fn proxy_to_git(
     args: &[String],
     exit_on_completion: bool,
     wrapper_invocation_id: Option<&str>,
+    trace2_event_target: Option<&str>,
 ) -> std::process::ExitStatus {
     // Suppress trace2 for read-only invocations to avoid hitting the daemon
     // with events that can never produce meaningful state changes.  In async
@@ -644,6 +670,7 @@ fn proxy_to_git(
         "exitOnCompletion": exit_on_completion,
         "suppressTrace2": suppress_trace2,
         "wrapperInvocationIdPresent": wrapper_invocation_id.is_some(),
+        "trace2EventTargetPresent": trace2_event_target.is_some(),
         "currentDir": crate::diagnostics::current_dir_for_debug(),
     });
     #[cfg(windows)]
@@ -675,6 +702,7 @@ fn proxy_to_git(
                 cmd.env("GIT_AI_WRAPPER_INVOCATION_ID", id);
                 cmd.env("GIT_TRACE2_ENV_VARS", "GIT_AI_WRAPPER_INVOCATION_ID");
             }
+            apply_git_trace2_event_target_override(&mut cmd, trace2_event_target);
             unsafe {
                 let setpgid_flag = should_setpgid;
                 cmd.pre_exec(move || {
@@ -703,6 +731,7 @@ fn proxy_to_git(
                 cmd.env("GIT_AI_WRAPPER_INVOCATION_ID", id);
                 cmd.env("GIT_TRACE2_ENV_VARS", "GIT_AI_WRAPPER_INVOCATION_ID");
             }
+            apply_git_trace2_event_target_override(&mut cmd, trace2_event_target);
 
             #[cfg(windows)]
             {

@@ -1,8 +1,13 @@
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+$script:isElevated = $false
 
 function Start-DaemonIfRequested {
     if ($env:GIT_AI_RESTART_DAEMON_AFTER_INSTALL -ne '1') {
+        return
+    }
+    if ($script:isElevated) {
+        Write-Warning 'Skipping background service restart from elevated installer; it will start from the next normal git-ai command.'
         return
     }
 
@@ -388,12 +393,17 @@ function Invoke-GitAiInstallHooks {
     $originalSkipInstallTestUpload = $env:GIT_AI_SKIP_INSTALL_TEST_UPLOAD
     $hadDeferInstallHooksProbe = Test-Path Env:GIT_AI_DEFER_INSTALL_HOOKS_PROBE
     $originalDeferInstallHooksProbe = $env:GIT_AI_DEFER_INSTALL_HOOKS_PROBE
+    $hadSkipDaemonRestart = Test-Path Env:GIT_AI_SKIP_DAEMON_RESTART
+    $originalSkipDaemonRestart = $env:GIT_AI_SKIP_DAEMON_RESTART
 
     try {
         if ($env:GIT_AI_SKIP_INSTALL_TEST_UPLOAD -eq '1' -and [string]::IsNullOrWhiteSpace($env:GIT_AI_TEST_DB_PATH)) {
             Remove-Item Env:GIT_AI_SKIP_INSTALL_TEST_UPLOAD -ErrorAction SilentlyContinue
         }
         $env:GIT_AI_DEFER_INSTALL_HOOKS_PROBE = '1'
+        if ($script:isElevated) {
+            $env:GIT_AI_SKIP_DAEMON_RESTART = '1'
+        }
 
         & $GitAiExe install-hooks | Out-Host
         if ($LASTEXITCODE -ne 0) {
@@ -409,6 +419,11 @@ function Invoke-GitAiInstallHooks {
             $env:GIT_AI_DEFER_INSTALL_HOOKS_PROBE = $originalDeferInstallHooksProbe
         } else {
             Remove-Item Env:GIT_AI_DEFER_INSTALL_HOOKS_PROBE -ErrorAction SilentlyContinue
+        }
+        if ($hadSkipDaemonRestart) {
+            $env:GIT_AI_SKIP_DAEMON_RESTART = $originalSkipDaemonRestart
+        } else {
+            Remove-Item Env:GIT_AI_SKIP_DAEMON_RESTART -ErrorAction SilentlyContinue
         }
     }
 }

@@ -432,6 +432,10 @@ fn ensure_daemon(dry_run: bool) {
         return;
     }
 
+    if std::env::var_os("GIT_AI_SKIP_DAEMON_RESTART").is_some() {
+        return;
+    }
+
     // Don't touch daemon inside test harnesses
     if std::env::var_os("GIT_AI_TEST_DB_PATH").is_some()
         || std::env::var_os("GITAI_TEST_DB_PATH").is_some()

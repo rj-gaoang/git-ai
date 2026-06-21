@@ -398,18 +398,7 @@ fn active_runtime_is_reachable_or_starting(config: &DaemonConfig) -> bool {
         return true;
     }
 
-    if let Some(parent) = config.lock_path.parent()
-        && fs::create_dir_all(parent).is_err()
-    {
-        return false;
-    }
-
-    LockFile::try_acquire(&config.lock_path)
-        .map(|lock| {
-            drop(lock);
-            false
-        })
-        .unwrap_or(true)
+    false
 }
 
 fn is_trace_payload(payload: &Value) -> bool {
@@ -9419,7 +9408,7 @@ mod tests {
     }
 
     #[test]
-    fn active_runtime_config_keeps_replacement_when_lock_is_held() {
+    fn active_runtime_config_removes_replacement_when_lock_is_held_but_unreachable() {
         let temp = tempfile::tempdir().expect("temp dir");
         let default_internal_dir = temp.path().join("default").join(".git-ai").join("internal");
         let replacement_internal_dir = temp
@@ -9432,13 +9421,15 @@ mod tests {
         let _lock = LockFile::try_acquire(&replacement.lock_path).expect("hold replacement lock");
         write_active_runtime_meta(&default_internal_dir, &replacement_internal_dir);
 
-        let resolved = DaemonConfig::active_runtime_config(&default_internal_dir)
-            .expect("held replacement runtime should be kept");
+        let resolved = DaemonConfig::active_runtime_config(&default_internal_dir);
 
-        assert_eq!(resolved.internal_dir, replacement_internal_dir);
         assert!(
-            DaemonConfig::active_runtime_meta_path(&default_internal_dir).exists(),
-            "active-runtime.json should remain while replacement lock is held"
+            resolved.is_none(),
+            "unreachable replacement runtime should fall back to default"
+        );
+        assert!(
+            !DaemonConfig::active_runtime_meta_path(&default_internal_dir).exists(),
+            "active-runtime.json should be removed when replacement is unreachable"
         );
     }
 
