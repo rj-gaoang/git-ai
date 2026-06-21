@@ -273,11 +273,9 @@ impl DaemonConfig {
         if meta.internal_dir == default_internal_dir {
             return None;
         }
+        let still_starting = active_runtime_meta_is_still_starting(&meta);
         let active_config = Self::from_internal_dir(meta.internal_dir);
-        if active_runtime_is_reachable_or_starting(&active_config) {
-            return Some(active_config);
-        }
-        if active_runtime_meta_is_still_starting(&meta) {
+        if active_runtime_is_reachable_or_starting(&active_config) || still_starting {
             return Some(active_config);
         }
 
