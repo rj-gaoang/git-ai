@@ -1,0 +1,178 @@
+---
+{
+  "schema_version": "authorship/3.1.0",
+  "git_ai_version": "2.2.44",
+  "x_user_id": "108",
+  "base_commit_sha": "6f10dd793031e4d34ffd06c377e5ad9e3885804d",
+  "prompts": {
+    "s_4db261efa21ee9::t_0dbe096a73ff4e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019eedfb-7a99-7ea3-8323-e9e4809d3abe",
+        "model": "gpt-5.5"
+      },
+      "human_author": "gaoang <gaoang@ruijie.com.cn>",
+      "messages": [],
+      "total_additions": 691,
+      "total_deletions": 143,
+      "accepted_lines": 1,
+      "overriden_lines": 0
+    },
+    "s_4db261efa21ee9::t_273f1e77acaede": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019eedfb-7a99-7ea3-8323-e9e4809d3abe",
+        "model": "gpt-5.5"
+      },
+      "human_author": "gaoang <gaoang@ruijie.com.cn>",
+      "messages": [],
+      "total_additions": 691,
+      "total_deletions": 143,
+      "accepted_lines": 15,
+      "overriden_lines": 0
+    },
+    "s_4db261efa21ee9::t_29537fc144c45b": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019eedfb-7a99-7ea3-8323-e9e4809d3abe",
+        "model": "gpt-5.5"
+      },
+      "human_author": "gaoang <gaoang@ruijie.com.cn>",
+      "messages": [],
+      "total_additions": 691,
+      "total_deletions": 143,
+      "accepted_lines": 3138,
+      "overriden_lines": 0
+    },
+    "s_4db261efa21ee9::t_3737c50826dae1": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019eedfb-7a99-7ea3-8323-e9e4809d3abe",
+        "model": "gpt-5.5"
+      },
+      "human_author": "gaoang <gaoang@ruijie.com.cn>",
+      "messages": [],
+      "total_additions": 691,
+      "total_deletions": 143,
+      "accepted_lines": 24,
+      "overriden_lines": 0
+    },
+    "s_4db261efa21ee9::t_5274f115b92894": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019eedfb-7a99-7ea3-8323-e9e4809d3abe",
+        "model": "gpt-5.5"
+      },
+      "human_author": "gaoang <gaoang@ruijie.com.cn>",
+      "messages": [],
+      "total_additions": 691,
+      "total_deletions": 143,
+      "accepted_lines": 356,
+      "overriden_lines": 0
+    },
+    "s_4db261efa21ee9::t_64a5eec8d79cec": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019eedfb-7a99-7ea3-8323-e9e4809d3abe",
+        "model": "gpt-5.5"
+      },
+      "human_author": "gaoang <gaoang@ruijie.com.cn>",
+      "messages": [],
+      "total_additions": 691,
+      "total_deletions": 143,
+      "accepted_lines": 20,
+      "overriden_lines": 0
+    },
+    "s_4db261efa21ee9::t_6c0d07ffeffe8a": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019eedfb-7a99-7ea3-8323-e9e4809d3abe",
+        "model": "gpt-5.5"
+      },
+      "human_author": "gaoang <gaoang@ruijie.com.cn>",
+      "messages": [],
+      "total_additions": 691,
+      "total_deletions": 143,
+      "accepted_lines": 11,
+      "overriden_lines": 0
+    },
+    "s_4db261efa21ee9::t_b066af8395b80f": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019eedfb-7a99-7ea3-8323-e9e4809d3abe",
+        "model": "gpt-5.5"
+      },
+      "human_author": "gaoang <gaoang@ruijie.com.cn>",
+      "messages": [],
+      "total_additions": 691,
+      "total_deletions": 143,
+      "accepted_lines": 3,
+      "overriden_lines": 0
+    },
+    "s_4db261efa21ee9::t_c74933081a11a1": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019eedfb-7a99-7ea3-8323-e9e4809d3abe",
+        "model": "gpt-5.5"
+      },
+      "human_author": "gaoang <gaoang@ruijie.com.cn>",
+      "messages": [],
+      "total_additions": 691,
+      "total_deletions": 143,
+      "accepted_lines": 28,
+      "overriden_lines": 0
+    },
+    "s_4db261efa21ee9::t_cad6725a265c2b": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019eedfb-7a99-7ea3-8323-e9e4809d3abe",
+        "model": "gpt-5.5"
+      },
+      "human_author": "gaoang <gaoang@ruijie.com.cn>",
+      "messages": [],
+      "total_additions": 691,
+      "total_deletions": 143,
+      "accepted_lines": 0,
+      "overriden_lines": 0
+    },
+    "s_4db261efa21ee9::t_d595f532e912fa": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019eedfb-7a99-7ea3-8323-e9e4809d3abe",
+        "model": "gpt-5.5"
+      },
+      "human_author": "gaoang <gaoang@ruijie.com.cn>",
+      "messages": [],
+      "total_additions": 691,
+      "total_deletions": 143,
+      "accepted_lines": 22,
+      "overriden_lines": 0
+    },
+    "s_4db261efa21ee9::t_e21033ea6d6b69": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019eedfb-7a99-7ea3-8323-e9e4809d3abe",
+        "model": "gpt-5.5"
+      },
+      "human_author": "gaoang <gaoang@ruijie.com.cn>",
+      "messages": [],
+      "total_additions": 691,
+      "total_deletions": 143,
+      "accepted_lines": 142,
+      "overriden_lines": 0
+    },
+    "s_4db261efa21ee9::t_f300b93d97b61c": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019eedfb-7a99-7ea3-8323-e9e4809d3abe",
+        "model": "gpt-5.5"
+      },
+      "human_author": "gaoang <gaoang@ruijie.com.cn>",
+      "messages": [],
+      "total_additions": 691,
+      "total_deletions": 143,
+      "accepted_lines": 961,
+      "overriden_lines": 0
+    }
+  }
+}
