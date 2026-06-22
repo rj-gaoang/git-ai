@@ -33,6 +33,23 @@ Speckit 是团队使用的「规范驱动开发」框架，通过 `.specify/` �
 
 > **文档更新说明（2026-04-24）**：本文最初主要从“Speckit 如何集成 git-ai”的视角写，当前已经补充 `git-ai` 本身的源码改动，包括 `post_commit` 挂接点、原生上传模块、feature flag、环境变量约定、失败降级策略，以及代码级验证结果。也就是说，这份文档现在同时覆盖 Speckit 侧改造和 git-ai 侧改造，不再只是一份脚本集成方案。
 
+### 2026-06-22：闭环同分支 pull 后 AI 代码被保存事件归成人工
+
+现场形态：项目 A 的 `test` 分支上，用户1先用 AI 生成了未提交代码；用户2在同一分支手写并 push；用户1 pull 用户2的提交后，IDE/文件监听又触发一次 `KnownHuman` 保存 checkpoint，随后用户1 commit。旧逻辑只看 pull 后新 base 的 active working log，已经看不到用户1 pull 前那份 AI checkpoint；如果保存事件又生成 `h_*` 人工 attestation，最终本地 note / stats 会把用户1的 AI 代码算成人工。这不是服务端看板映射问题，也不是上传字段问题，坏数在 post-commit authorship note 里已经形成。
+
+本次修复把“base/archived working-log 断档”补成 checkpoint 和 post-commit 双保险：
+
+| 文件 | 变更点 | 作用 |
+|------|--------|------|
+| `src/authorship/archived_ai_state.rs` | 新增归档 `old-*` working log 的 recent AI state 采集，复用 line-attribution 到 char-attribution 的还原逻辑 | 统一 checkpoint 与 post-commit 对旧 AI 证据的读取方式，避免各自散落实现 |
+| `src/daemon/checkpoint.rs` | `KnownHuman` 原始请求即触发归档 AI state 合并，不再只看降级后的 `effective_kind` | 弱 `KnownHuman` 被降级成 `Human` 时，也能从旧 base 恢复同文件 AI 历史，避免保存事件整文件抢人工 |
+| `src/authorship/post_commit.rs` | 在 note 写入前增加归档 AI 回填：仅处理当前 active working log 没有 AI 证据的新增文件；只有当前提交新增行与归档 AI 快照同文件、同行同内容，或非空文本在两边都唯一匹配时，才把对应行从 `h_*`/unknown 恢复到原 AI author id | 即使 checkpoint 阶段漏过，也不会让已存在的归档 AI 证据被本次保存事件永久盖成人工；同时避免把用户2或用户1真实人工新增误补成 AI |
+| `tests/integration/pull_rebase_ff.rs` | 新增 `test_fast_forward_pull_then_known_human_save_preserves_archived_ai_attribution` | 覆盖“用户1 AI 未提交 -> 用户2 push -> 用户1 fast-forward pull -> IDE KnownHuman save -> commit”的回归形态 |
+
+诊断上新增 `post_commit_archived_ai_attributions_restored`，记录 `restoredLineCount`、`restoredFileCount`、`candidateFileCount`、`currentAiFileCount` 和文件样例。若这条日志出现，说明本次 commit 确实通过归档 old-base AI 证据修复了断档；若没有出现，要继续查是否根本没有 AI checkpoint、路径没采到、归档已超过 24 小时窗口，或内容已被人工改写导致不能安全匹配。
+
+本轮没有执行 `cargo test` / 集成测试：当前 Windows 环境每次跑测试会把机器卡死。后续验证建议只跑单条回归 `cargo test test_fast_forward_pull_then_known_human_save_preserves_archived_ai_attribution --test integration`，并先确认没有残留 `cargo` / `rustc` 进程。
+
 ## 最近一周归因不准问题总览（2026-06-11 至 2026-06-17）
 
 最近一周看板“统计不准”不是同一个公式错误，而是归因输入、checkpoint 落盘、post-commit gap-fill、上传补算和安装生效几个环节分别暴露问题。排查时必须先判断本地 `post_commit_stats_computed.statsSummary` 是否已经算错：如果本地 `aiAdditions` / `humanAdditions` / `unknownAdditions` 已经异常，根因在归因链路；如果本地正确但看板不对，再查上传 payload、后端响应和逐文件路径匹配。

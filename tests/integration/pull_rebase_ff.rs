@@ -257,6 +257,40 @@ fn test_fast_forward_pull_preserves_ai_attribution() {
 }
 
 #[test]
+fn test_fast_forward_pull_then_known_human_save_preserves_archived_ai_attribution() {
+    let setup = setup_pull_test();
+    let local = setup.local;
+
+    let mut ai_file = local.filename("ai_work.txt");
+    ai_file.set_contents(vec!["AI generated line 1".ai(), "AI generated line 2".ai()]);
+
+    local
+        .git_ai(&["checkpoint", "mock_ai", "ai_work.txt"])
+        .expect("AI checkpoint should succeed");
+
+    local
+        .git(&["config", "pull.rebase", "false"])
+        .expect("config should succeed");
+    local
+        .git(&["config", "pull.ff", "only"])
+        .expect("config should succeed");
+
+    local.git(&["pull"]).expect("pull should succeed");
+
+    // Simulates the editor save checkpoint after user1 pulls user2's commit.
+    // This used to read only the new base working log, miss the old AI state,
+    // and let the save checkpoint claim the AI lines as human-authored.
+    local
+        .git_ai(&["checkpoint", "mock_known_human", "ai_work.txt"])
+        .expect("known-human save checkpoint should succeed");
+
+    local
+        .stage_all_and_commit("commit after pull and save")
+        .expect("commit should succeed");
+    ai_file.assert_lines_and_blame(vec!["AI generated line 1".ai(), "AI generated line 2".ai()]);
+}
+
+#[test]
 fn test_fast_forward_pull_without_local_changes() {
     let setup = setup_pull_test();
     let local = setup.local;
@@ -945,6 +979,7 @@ fn test_regular_rebase_with_conflict_abort_preserves_original_notes() {
 
 crate::reuse_tests_in_worktree!(
     test_fast_forward_pull_preserves_ai_attribution,
+    test_fast_forward_pull_then_known_human_save_preserves_archived_ai_attribution,
     test_fast_forward_pull_without_local_changes,
     test_pull_rebase_preserves_committed_ai_authorship,
     test_pull_rebase_via_git_config_preserves_committed_ai_authorship,

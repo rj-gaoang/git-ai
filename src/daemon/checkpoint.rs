@@ -1,3 +1,7 @@
+use crate::authorship::archived_ai_state::{
+    collect_recent_archived_ai_states, is_ai_author_id as archived_is_ai_author_id,
+    previous_file_state_attributions, working_log_entry_has_non_human_attribution,
+};
 use crate::authorship::attribution_tracker::{
     Attribution, AttributionTracker, INITIAL_ATTRIBUTION_TS, LineAttribution,
 };
@@ -51,7 +55,6 @@ const AGENT_USAGE_MIN_INTERVAL_SECS: u64 = 150;
 #[cfg(not(any(test, feature = "test-support")))]
 const KNOWN_HUMAN_REJECT_SECS_AFTER_AI: u64 = 1;
 const KNOWN_HUMAN_RECENT_AI_SAVE_LIMIT_SECS: u64 = 30;
-const ARCHIVED_AI_STATE_LOOKBACK_SECS: u64 = 24 * 60 * 60;
 
 #[cfg(not(any(test, feature = "test-support")))]
 pub(crate) fn should_emit_agent_usage(agent_id: &AgentId) -> bool {
@@ -645,18 +648,7 @@ fn content_eq_normalized(a: &str, b: &str) -> bool {
 
 #[doc(hidden)]
 pub fn is_ai_author_id(author_id: &str) -> bool {
-    author_id != "human" && !author_id.starts_with("h_")
-}
-
-fn working_log_entry_has_non_human_attribution(entry: &WorkingLogEntry) -> bool {
-    entry
-        .line_attributions
-        .iter()
-        .any(|attr| is_ai_author_id(&attr.author_id))
-        || entry
-            .attributions
-            .iter()
-            .any(|attr| is_ai_author_id(&attr.author_id))
+    archived_is_ai_author_id(author_id)
 }
 
 fn has_known_human_editor_metadata(request: &CheckpointRequest) -> bool {
@@ -965,67 +957,14 @@ fn previous_file_state_content(state: &PreviousFileState) -> String {
         .unwrap_or_default()
 }
 
-fn collect_recent_archived_ai_states(
-    repo: &Repository,
-    files: &[String],
-    ts: u128,
-) -> HashMap<String, PreviousFileState> {
-    let target_files: HashSet<&str> = files.iter().map(String::as_str).collect();
-    let now_secs = (ts / 1000) as u64;
-    let mut latest_by_file: HashMap<String, PreviousFileState> = HashMap::new();
-
-    for archived_log in repo.storage.archived_working_logs() {
-        let Ok(checkpoints) = archived_log.read_all_checkpoints() else {
-            continue;
-        };
-
-        for checkpoint in checkpoints {
-            if !checkpoint_is_non_bash_ai_edit(&checkpoint)
-                || now_secs.saturating_sub(checkpoint.timestamp) > ARCHIVED_AI_STATE_LOOKBACK_SECS
-            {
-                continue;
-            }
-
-            for entry in &checkpoint.entries {
-                if !target_files.contains(entry.file.as_str()) {
-                    continue;
-                }
-
-                let state = PreviousFileState {
-                    blob_sha: entry.blob_sha.clone(),
-                    attributions: previous_file_state_attributions(
-                        entry,
-                        &archived_log,
-                        checkpoint.timestamp as u128,
-                    ),
-                    kind: checkpoint.kind,
-                    timestamp: checkpoint.timestamp,
-                    skip_as_ai_baseline: checkpoint_should_be_skipped_as_ai_baseline(&checkpoint),
-                    source_working_log: archived_log.clone(),
-                };
-
-                let should_replace = latest_by_file
-                    .get(&entry.file)
-                    .map(|existing| existing.timestamp < state.timestamp)
-                    .unwrap_or(true);
-                if should_replace {
-                    latest_by_file.insert(entry.file.clone(), state);
-                }
-            }
-        }
-    }
-
-    latest_by_file
-}
-
 fn merge_recent_archived_ai_states(
     previous_file_state_by_file: &mut HashMap<String, Vec<PreviousFileState>>,
     ai_touched_files: &mut HashSet<String>,
-    archived_ai_states: HashMap<String, PreviousFileState>,
+    archived_ai_states: HashMap<String, crate::authorship::archived_ai_state::ArchivedAiFileState>,
 ) -> usize {
     let mut merged = 0usize;
 
-    for (file, state) in archived_ai_states {
+    for (file, archived_state) in archived_ai_states {
         let already_has_ai = previous_file_state_by_file
             .get(&file)
             .is_some_and(|states| {
@@ -1040,6 +979,17 @@ fn merge_recent_archived_ai_states(
         if already_has_ai {
             continue;
         }
+
+        let state = PreviousFileState {
+            blob_sha: archived_state.blob_sha,
+            attributions: archived_state.attributions,
+            kind: archived_state.kind,
+            timestamp: archived_state.timestamp,
+            skip_as_ai_baseline: checkpoint_should_be_skipped_as_ai_baseline(
+                &archived_state.checkpoint,
+            ),
+            source_working_log: archived_state.source_working_log,
+        };
 
         previous_file_state_by_file
             .entry(file.clone())
@@ -1083,29 +1033,6 @@ fn select_previous_state_for_ai_checkpoint(
     }
 
     None
-}
-
-fn previous_file_state_attributions(
-    entry: &WorkingLogEntry,
-    working_log: &PersistedWorkingLog,
-    ts: u128,
-) -> Vec<Attribution> {
-    if !entry.attributions.is_empty() {
-        return entry.attributions.clone();
-    }
-
-    if entry.line_attributions.is_empty() {
-        return Vec::new();
-    }
-
-    let content = working_log
-        .get_file_version(&entry.blob_sha)
-        .unwrap_or_default();
-    crate::authorship::attribution_tracker::line_attributions_to_attributions(
-        &entry.line_attributions,
-        &content,
-        ts,
-    )
 }
 
 fn has_recent_ai_file_state(file_history: &[PreviousFileState], ts: u128) -> bool {
@@ -1445,7 +1372,7 @@ async fn get_checkpoint_entries(
     let precompute_start = Instant::now();
     let (mut previous_file_state_by_file, mut ai_touched_files) =
         build_previous_file_state_maps(working_log, previous_checkpoints, &initial_attributions);
-    let archived_ai_state_file_count = if effective_kind == CheckpointKind::KnownHuman {
+    let archived_ai_state_file_count = if kind == CheckpointKind::KnownHuman {
         let archived_ai_states = collect_recent_archived_ai_states(repo, files, ts);
         merge_recent_archived_ai_states(
             &mut previous_file_state_by_file,
@@ -1901,6 +1828,7 @@ fn compute_line_stats(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::authorship::archived_ai_state::ArchivedAiFileState;
     use crate::commands::checkpoint_agent::orchestrator::BaseCommit;
     use crate::commands::checkpoint_agent::orchestrator::CheckpointFile;
     use std::path::PathBuf;
@@ -2215,7 +2143,14 @@ mod tests {
             PathBuf::from("/repo"),
             None,
         );
-        let ai_state = PreviousFileState {
+        let mut checkpoint = checkpoint_with_metadata(
+            CheckpointKind::AiAgent,
+            "src/main.rs",
+            &[("edit_kind", "file_edit"), ("tool_use_id", "call_old")],
+        );
+        checkpoint.timestamp = 10;
+        let ai_state = ArchivedAiFileState {
+            file: "src/main.rs".to_string(),
             blob_sha: "sha".to_string(),
             attributions: vec![Attribution {
                 start: 0,
@@ -2223,10 +2158,11 @@ mod tests {
                 author_id: "s_session::t_trace".to_string(),
                 ts: 1,
             }],
+            line_attributions: Vec::new(),
             kind: CheckpointKind::AiAgent,
             timestamp: 10,
-            skip_as_ai_baseline: false,
             source_working_log: archived_log,
+            checkpoint,
         };
 
         let (mut states, mut ai_files) =
@@ -2267,7 +2203,14 @@ mod tests {
             "src/main.rs",
             &[("edit_kind", "file_edit"), ("tool_use_id", "call_current")],
         );
-        let archived_ai_state = PreviousFileState {
+        let mut archived_checkpoint = checkpoint_with_metadata(
+            CheckpointKind::AiAgent,
+            "src/main.rs",
+            &[("edit_kind", "file_edit"), ("tool_use_id", "call_old")],
+        );
+        archived_checkpoint.timestamp = 10;
+        let archived_ai_state = ArchivedAiFileState {
+            file: "src/main.rs".to_string(),
             blob_sha: "sha".to_string(),
             attributions: vec![Attribution {
                 start: 0,
@@ -2275,10 +2218,11 @@ mod tests {
                 author_id: "s_old::t_old".to_string(),
                 ts: 1,
             }],
+            line_attributions: Vec::new(),
             kind: CheckpointKind::AiAgent,
             timestamp: 10,
-            skip_as_ai_baseline: false,
             source_working_log: archived_log,
+            checkpoint: archived_checkpoint,
         };
 
         let (mut states, mut ai_files) =

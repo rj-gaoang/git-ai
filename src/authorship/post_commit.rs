@@ -1,6 +1,10 @@
 use crate::api::{ApiClient, ApiContext};
+use crate::authorship::archived_ai_state::{
+    ArchivedAiFileState, collect_recent_archived_ai_states,
+    is_ai_author_id as archived_is_ai_author_id,
+};
 use crate::authorship::authorship_log::{HumanRecord, LineRange, SessionRecord};
-use crate::authorship::authorship_log_serialization::AuthorshipLog;
+use crate::authorship::authorship_log_serialization::{AttestationEntry, AuthorshipLog};
 use crate::authorship::ignore::{
     build_ignore_matcher, effective_ignore_patterns, should_ignore_file_with_matcher,
 };
@@ -72,9 +76,7 @@ fn checkpoint_entry_requires_post_processing(
 }
 
 fn is_ai_author_id(author_id: &str) -> bool {
-    author_id != CheckpointKind::Human.to_str()
-        && author_id != CheckpointKind::KnownHuman.to_str()
-        && !author_id.starts_with("h_")
+    archived_is_ai_author_id(author_id)
 }
 
 fn checkpoint_entry_has_ai_path_evidence(checkpoint: &Checkpoint, entry: &WorkingLogEntry) -> bool {
@@ -345,6 +347,14 @@ pub fn post_commit_with_final_state(
         &human_author,
     );
     fill_legacy_human_ai_gaps_for_commit(
+        repo,
+        &parent_sha,
+        &commit_sha,
+        &mut authorship_log,
+        &parent_working_log,
+        &human_author,
+    );
+    restore_archived_ai_attributions_for_commit(
         repo,
         &parent_sha,
         &commit_sha,
@@ -1466,6 +1476,424 @@ fn fill_legacy_human_ai_gaps_for_commit(
             "humanAuthor": human_author,
         }),
     );
+}
+
+fn restore_archived_ai_attributions_for_commit(
+    repo: &Repository,
+    parent_sha: &str,
+    commit_sha: &str,
+    authorship_log: &mut AuthorshipLog,
+    checkpoints: &[Checkpoint],
+    human_author: &str,
+) {
+    let diff_base = if parent_sha == "initial" {
+        "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+    } else {
+        parent_sha
+    };
+
+    let Ok(mut added_lines_by_file) = repo.diff_added_lines(diff_base, commit_sha, None) else {
+        return;
+    };
+    added_lines_by_file.retain(|_, lines| !lines.is_empty());
+    if added_lines_by_file.is_empty() {
+        return;
+    }
+
+    let current_ai_files = collect_current_working_log_ai_files(checkpoints);
+    let candidate_files = added_lines_by_file
+        .iter()
+        .filter(|(file, added_lines)| {
+            !current_ai_files.contains(*file)
+                && !authorship_log_has_ai_added_lines(authorship_log, file, added_lines)
+        })
+        .map(|(file, _)| file.clone())
+        .collect::<Vec<_>>();
+    if candidate_files.is_empty() {
+        return;
+    }
+
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let archived_states = collect_recent_archived_ai_states(repo, &candidate_files, now_ms);
+    if archived_states.is_empty() {
+        return;
+    }
+
+    let mut restored_line_count = 0usize;
+    let mut restored_file_count = 0usize;
+    let mut restored_author_count = 0usize;
+    let mut restored_file_sample = Vec::new();
+
+    for (file, archived_state) in archived_states {
+        let Some(added_lines) = added_lines_by_file.get(&file) else {
+            continue;
+        };
+        let restored_by_author = archived_ai_lines_matching_commit(
+            repo,
+            commit_sha,
+            &file,
+            added_lines,
+            &archived_state,
+        );
+        if restored_by_author.is_empty() {
+            continue;
+        }
+
+        let restored_ranges = restored_by_author
+            .values()
+            .flat_map(|lines| LineRange::compress_lines(lines))
+            .collect::<Vec<_>>();
+        remove_ranges_from_file_attestations(authorship_log, &file, &restored_ranges);
+
+        let mut file_restored_lines = 0usize;
+        for (author_id, mut lines) in restored_by_author {
+            if lines.is_empty() || !is_ai_author_id(&author_id) {
+                continue;
+            }
+
+            lines.sort_unstable();
+            lines.dedup();
+            let line_count = lines.len();
+            let line_ranges = LineRange::compress_lines(&lines);
+            if line_ranges.is_empty() {
+                continue;
+            }
+
+            ensure_archived_ai_metadata(
+                authorship_log,
+                &archived_state,
+                &author_id,
+                human_author,
+                line_count as u32,
+            );
+
+            authorship_log
+                .get_or_create_file(&file)
+                .add_entry(AttestationEntry::new(author_id, line_ranges));
+
+            file_restored_lines += line_count;
+            restored_author_count += 1;
+        }
+
+        if file_restored_lines == 0 {
+            continue;
+        }
+
+        restored_line_count += file_restored_lines;
+        restored_file_count += 1;
+        if restored_file_sample.len() < 20 {
+            restored_file_sample.push(file);
+        }
+    }
+
+    if restored_line_count == 0 {
+        return;
+    }
+
+    crate::diagnostics::append_debug_event(
+        "post_commit_archived_ai_attributions_restored",
+        serde_json::json!({
+            "repo": repo.canonical_workdir().to_string_lossy().to_string(),
+            "commitSha": commit_sha,
+            "parentSha": parent_sha,
+            "restoredLineCount": restored_line_count,
+            "restoredFileCount": restored_file_count,
+            "restoredAuthorCount": restored_author_count,
+            "candidateFileCount": candidate_files.len(),
+            "currentAiFileCount": current_ai_files.len(),
+            "restoredFileSample": restored_file_sample,
+            "humanAuthor": human_author,
+        }),
+    );
+}
+
+fn collect_current_working_log_ai_files(checkpoints: &[Checkpoint]) -> HashSet<String> {
+    checkpoints
+        .iter()
+        .flat_map(|checkpoint| {
+            checkpoint.entries.iter().filter_map(|entry| {
+                checkpoint_entry_has_ai_path_evidence(checkpoint, entry).then(|| entry.file.clone())
+            })
+        })
+        .collect()
+}
+
+fn authorship_log_has_ai_added_lines(
+    authorship_log: &AuthorshipLog,
+    file: &str,
+    added_lines: &[u32],
+) -> bool {
+    let Some(file_attestation) = authorship_log
+        .attestations
+        .iter()
+        .find(|attestation| attestation.file_path == file)
+    else {
+        return false;
+    };
+
+    file_attestation.entries.iter().any(|entry| {
+        is_current_ai_attestation_hash(authorship_log, &entry.hash)
+            && entry.line_ranges.iter().any(|range| {
+                range
+                    .expand()
+                    .into_iter()
+                    .any(|line| added_lines.binary_search(&line).is_ok())
+            })
+    })
+}
+
+fn archived_ai_lines_matching_commit(
+    repo: &Repository,
+    commit_sha: &str,
+    file: &str,
+    added_lines: &[u32],
+    archived_state: &ArchivedAiFileState,
+) -> HashMap<String, Vec<u32>> {
+    let Ok(final_content_bytes) = repo.get_file_content(file, commit_sha) else {
+        return HashMap::new();
+    };
+    let final_content = String::from_utf8_lossy(&final_content_bytes).to_string();
+    let final_lines = final_content.lines().collect::<Vec<_>>();
+
+    let source_content = archived_state
+        .source_working_log
+        .get_file_version(&archived_state.blob_sha)
+        .unwrap_or_default();
+    let source_lines = source_content.lines().collect::<Vec<_>>();
+    if source_lines.is_empty() || final_lines.is_empty() {
+        return HashMap::new();
+    }
+
+    let mut source_candidates =
+        archived_ai_line_candidates(archived_state, &source_content, &source_lines);
+    if source_candidates.is_empty() {
+        return HashMap::new();
+    }
+    let final_added_text_counts = added_line_text_counts(&final_lines, added_lines);
+    let source_text_counts = source_candidate_text_counts(&source_candidates);
+
+    let mut restored_by_author: HashMap<String, Vec<u32>> = HashMap::new();
+    for line in added_lines {
+        let Some(final_text) = line_text(&final_lines, *line) else {
+            continue;
+        };
+
+        let candidate_index = source_candidates
+            .iter()
+            .position(|candidate| {
+                !candidate.used
+                    && candidate.line == *line
+                    && candidate.text.as_str() == final_text
+                    && is_ai_author_id(&candidate.author_id)
+            })
+            .or_else(|| {
+                if final_text.trim().is_empty() {
+                    return None;
+                }
+                if final_added_text_counts
+                    .get(final_text)
+                    .copied()
+                    .unwrap_or(0)
+                    != 1
+                    || source_text_counts.get(final_text).copied().unwrap_or(0) != 1
+                {
+                    return None;
+                }
+                source_candidates.iter().position(|candidate| {
+                    !candidate.used
+                        && candidate.text.as_str() == final_text
+                        && is_ai_author_id(&candidate.author_id)
+                })
+            });
+
+        let Some(candidate_index) = candidate_index else {
+            continue;
+        };
+        let candidate = &mut source_candidates[candidate_index];
+        candidate.used = true;
+        restored_by_author
+            .entry(candidate.author_id.clone())
+            .or_default()
+            .push(*line);
+    }
+
+    restored_by_author
+}
+
+fn added_line_text_counts(final_lines: &[&str], added_lines: &[u32]) -> HashMap<String, usize> {
+    let mut counts = HashMap::new();
+    for line in added_lines {
+        if let Some(text) = line_text(final_lines, *line) {
+            *counts.entry(text.to_string()).or_insert(0) += 1;
+        }
+    }
+    counts
+}
+
+fn source_candidate_text_counts(candidates: &[ArchivedAiLineCandidate]) -> HashMap<String, usize> {
+    let mut counts = HashMap::new();
+    for candidate in candidates {
+        *counts.entry(candidate.text.clone()).or_insert(0) += 1;
+    }
+    counts
+}
+
+#[derive(Debug)]
+struct ArchivedAiLineCandidate {
+    line: u32,
+    text: String,
+    author_id: String,
+    used: bool,
+}
+
+fn archived_ai_line_candidates(
+    archived_state: &ArchivedAiFileState,
+    source_content: &str,
+    source_lines: &[&str],
+) -> Vec<ArchivedAiLineCandidate> {
+    let mut candidates = Vec::new();
+
+    for attr in &archived_state.line_attributions {
+        if !is_ai_author_id(&attr.author_id) {
+            continue;
+        }
+        for line in attr.start_line..=attr.end_line {
+            let Some(text) = line_text(source_lines, line) else {
+                continue;
+            };
+            candidates.push(ArchivedAiLineCandidate {
+                line,
+                text: text.to_string(),
+                author_id: attr.author_id.clone(),
+                used: false,
+            });
+        }
+    }
+
+    if candidates.is_empty() {
+        let line_attrs = crate::authorship::attribution_tracker::attributions_to_line_attributions(
+            &archived_state.attributions,
+            source_content,
+        );
+        for attr in line_attrs {
+            if !is_ai_author_id(&attr.author_id) {
+                continue;
+            }
+            for line in attr.start_line..=attr.end_line {
+                let Some(text) = line_text(source_lines, line) else {
+                    continue;
+                };
+                candidates.push(ArchivedAiLineCandidate {
+                    line,
+                    text: text.to_string(),
+                    author_id: attr.author_id.clone(),
+                    used: false,
+                });
+            }
+        }
+    }
+
+    candidates
+}
+
+fn line_text<'a>(lines: &'a [&str], line: u32) -> Option<&'a str> {
+    lines.get(line.checked_sub(1)? as usize).copied()
+}
+
+fn remove_ranges_from_file_attestations(
+    authorship_log: &mut AuthorshipLog,
+    file: &str,
+    ranges: &[LineRange],
+) {
+    if ranges.is_empty() {
+        return;
+    }
+
+    let Some(file_attestation) = authorship_log
+        .attestations
+        .iter_mut()
+        .find(|attestation| attestation.file_path == file)
+    else {
+        return;
+    };
+
+    for entry in &mut file_attestation.entries {
+        entry.remove_line_ranges(ranges);
+    }
+    file_attestation
+        .entries
+        .retain(|entry| !entry.line_ranges.is_empty());
+}
+
+fn ensure_archived_ai_metadata(
+    authorship_log: &mut AuthorshipLog,
+    archived_state: &ArchivedAiFileState,
+    author_id: &str,
+    human_author: &str,
+    recovered_line_count: u32,
+) {
+    let agent_id = archived_state
+        .checkpoint
+        .agent_id
+        .clone()
+        .unwrap_or_else(|| AgentId {
+            tool: if archived_state.checkpoint.author.trim().is_empty() {
+                "archived_ai".to_string()
+            } else {
+                archived_state.checkpoint.author.clone()
+            },
+            id: author_id.to_string(),
+            model: "unknown".to_string(),
+        });
+
+    let mut custom_attributes = HashMap::new();
+    custom_attributes.insert("archived_ai_state_restored".to_string(), "true".to_string());
+    custom_attributes.insert("archive_file".to_string(), archived_state.file.clone());
+
+    if author_id.starts_with("s_") {
+        let session_id = author_id
+            .split("::")
+            .next()
+            .unwrap_or(author_id)
+            .to_string();
+        authorship_log
+            .metadata
+            .sessions
+            .entry(session_id)
+            .or_insert_with(|| SessionRecord {
+                agent_id: agent_id.clone(),
+                human_author: Some(human_author.to_string()),
+                custom_attributes: Some(custom_attributes.clone()),
+            });
+    }
+
+    authorship_log
+        .metadata
+        .prompts
+        .entry(author_id.to_string())
+        .or_insert_with(|| crate::authorship::authorship_log::PromptRecord {
+            agent_id,
+            human_author: Some(human_author.to_string()),
+            messages: archived_state
+                .checkpoint
+                .transcript
+                .as_ref()
+                .map(|transcript| transcript.messages().to_vec())
+                .unwrap_or_default(),
+            messages_url: None,
+            total_additions: archived_state
+                .checkpoint
+                .line_stats
+                .additions
+                .max(recovered_line_count),
+            total_deletions: archived_state.checkpoint.line_stats.deletions,
+            accepted_lines: recovered_line_count,
+            overriden_lines: 0,
+            custom_attributes: Some(custom_attributes),
+        });
 }
 
 fn collect_ai_gap_fill_attestation_hashes(authorship_log: &AuthorshipLog) -> Vec<String> {

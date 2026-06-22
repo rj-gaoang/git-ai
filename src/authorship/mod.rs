@@ -1,4 +1,5 @@
 pub mod agent_detection;
+pub(crate) mod archived_ai_state;
 pub mod attribution_gap;
 pub mod attribution_tracker;
 pub mod authorship_log;
