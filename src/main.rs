@@ -1,5 +1,7 @@
 use clap::Parser;
 use git_ai::commands;
+use git_ai::git::cli_parser::parse_git_cli_args;
+use git_ai::git::command_classification::is_definitely_read_only_invocation_args;
 use git_ai::utils::{SuperuserCheckResult, check_superuser_guard, print_superuser_warning};
 
 #[derive(Parser)]
@@ -44,6 +46,18 @@ fn is_fast_metadata_command(args: &[String]) -> bool {
     )
 }
 
+fn is_quiet_git_proxy_invocation(binary_name: &str, args: &[String]) -> bool {
+    if matches!(binary_name, "git-ai" | "git-ai.exe") {
+        return false;
+    }
+
+    let parsed = parse_git_cli_args(args);
+    parsed
+        .command
+        .as_deref()
+        .is_some_and(|cmd| is_definitely_read_only_invocation_args(cmd, &parsed.command_args))
+}
+
 fn main() {
     // Get the binary name that was called
     let binary_name = std::env::args_os()
@@ -70,6 +84,7 @@ fn main() {
     let cli = Cli::parse();
     if !(matches!(binary_name.as_str(), "git-ai" | "git-ai.exe")
         && is_fast_metadata_command(&cli.args))
+        && !is_quiet_git_proxy_invocation(&binary_name, &cli.args)
     {
         git_ai::diagnostics::append_process_started_event(&binary_name, &cli.args);
     }

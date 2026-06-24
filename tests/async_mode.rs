@@ -256,8 +256,20 @@ fn new_async_mode_repo_without_daemon() -> TestRepo {
 }
 
 #[test]
-fn install_hooks_async_mode_sets_daemon_trace2_global_config() {
+fn install_hooks_async_mode_cleans_daemon_trace2_global_config() {
     let repo = new_async_mode_repo_without_daemon();
+
+    let mut set_target_command = Command::new(real_git_executable());
+    set_target_command.args(["config", "--global", "trace2.eventTarget", "old-target"]);
+    set_target_command.current_dir(repo.path());
+    configure_test_home_env(&mut set_target_command, &repo);
+    assert!(set_target_command.output().unwrap().status.success());
+
+    let mut set_nesting_command = Command::new(real_git_executable());
+    set_nesting_command.args(["config", "--global", "trace2.eventNesting", "10"]);
+    set_nesting_command.current_dir(repo.path());
+    configure_test_home_env(&mut set_nesting_command, &repo);
+    assert!(set_nesting_command.output().unwrap().status.success());
 
     let output = git_ai_with_daemon_env(&repo, &["install-hooks", "--dry-run=false"])
         .expect("install-hooks should succeed");
@@ -267,14 +279,11 @@ fn install_hooks_async_mode_sets_daemon_trace2_global_config() {
         "install preflight should run silently without trace2 config output"
     );
 
-    let expected_trace_socket = daemon_trace_socket_path(&repo);
-    let expected_target = DaemonConfig::trace2_event_target_for_path(&expected_trace_socket);
-
     let target = read_global_git_config(&repo, "trace2.eventTarget");
     let nesting = read_global_git_config(&repo, "trace2.eventNesting");
 
-    assert_eq!(target.as_deref(), Some(expected_target.as_str()));
-    assert_eq!(nesting.as_deref(), Some("10"));
+    assert!(target.is_none());
+    assert!(nesting.is_none());
 }
 
 #[test]
@@ -298,7 +307,7 @@ fn install_hooks_async_mode_dry_run_does_not_write_trace2_global_config() {
 }
 
 #[test]
-fn install_hooks_async_mode_trace2_target_routes_real_git_trace_to_daemon() {
+fn wrapper_injects_trace2_target_for_mutating_git_commands() {
     let repo = new_async_mode_repo_without_daemon();
 
     git_ai_with_daemon_env(&repo, &["install-hooks", "--dry-run=false"])
@@ -317,10 +326,12 @@ fn install_hooks_async_mode_trace2_target_routes_real_git_trace_to_daemon() {
     // ingest pipeline and increment applied_seq. Readonly commands (like
     // `git status`) are discarded by the daemon's readonly fast-path before
     // reaching the ingest queue, so they never advance latest_seq.
-    let mut git_command = Command::new(real_git_executable());
+    let mut git_command = Command::new(get_binary_path());
     git_command.args(["config", "--local", "git-ai.tracing-test", "1"]);
     git_command.current_dir(repo.path());
     configure_test_home_env(&mut git_command, &repo);
+    configure_test_daemon_env(&mut git_command, &repo);
+    git_command.env("GIT_AI", "git");
     let git_output = git_command
         .output()
         .expect("failed to run traced git config");

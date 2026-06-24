@@ -1,6 +1,7 @@
 use crate::commands::git_hook_handlers::ENV_SKIP_MANAGED_HOOKS;
 use crate::config;
 use crate::git::cli_parser::{ParsedGitInvocation, parse_git_cli_args};
+use crate::git::command_classification::is_definitely_read_only_invocation_args;
 use crate::git::find_repository;
 use crate::git::repository::Repository;
 #[cfg(windows)]
@@ -109,6 +110,23 @@ pub fn handle_git(args: &[String]) {
     }
 
     let parsed = parse_git_cli_args(args);
+
+    // Read-only invocations don't need wrapper state (the daemon fast-paths
+    // their trace events and never processes them through the normalizer).
+    // Skip the invocation_id so we can also suppress trace2 for them,
+    // avoiding unnecessary daemon work and wrapper_states memory leaks.
+    //
+    // Use is_definitely_read_only_invocation (not is_definitely_read_only_command)
+    // so that subcommand-gated read-only calls like `git stash list` and
+    // `git worktree list` are also suppressed — these account for thousands
+    // of Zed IDE invocations per session.
+    let is_read_only = is_read_only_invocation(&parsed);
+
+    if is_read_only {
+        let exit_status = proxy_to_git_quiet(args);
+        exit_with_status(exit_status);
+    }
+
     crate::diagnostics::append_debug_event(
         "git_proxy_entered",
         serde_json::json!({
@@ -120,41 +138,13 @@ pub fn handle_git(args: &[String]) {
         }),
     );
 
-    // Read-only invocations don't need wrapper state (the daemon fast-paths
-    // their trace events and never processes them through the normalizer).
-    // Skip the invocation_id so we can also suppress trace2 for them,
-    // avoiding unnecessary daemon work and wrapper_states memory leaks.
-    //
-    // Use is_definitely_read_only_invocation (not is_definitely_read_only_command)
-    // so that subcommand-gated read-only calls like `git stash list` and
-    // `git worktree list` are also suppressed — these account for thousands
-    // of Zed IDE invocations per session.
-    let is_read_only = {
-        let subcommand = parsed.command_args.first().map(String::as_str);
-        parsed.command.as_deref().is_some_and(|cmd| {
-            crate::git::command_classification::is_definitely_read_only_invocation(cmd, subcommand)
-        })
-    };
-
-    if is_read_only {
-        crate::diagnostics::append_debug_event(
-            "git_proxy_route",
-            serde_json::json!({
-                "route": "read_only_passthrough",
-                "command": parsed.command.as_deref(),
-            }),
-        );
-        let exit_status = proxy_to_git(args, false, None, None);
-        exit_with_status(exit_status);
-    }
-
     // Repo-creating commands (clone, init) have no meaningful pre/post
     // repo state — the target repo doesn't exist yet. The wrapper would
     // either capture nothing (clone from outside a repo) or the wrong
     // repo (clone from inside a different repo). Skip the invocation_id
     // so the daemon doesn't wait for wrapper state that never arrives or
-    // is misleading; trace2 events still flow normally (trace2 suppression
-    // requires *both* no invocation_id and a read-only command).
+    // is misleading. This path also suppresses inherited/global trace2 in
+    // proxy_to_git, so stale daemon targets cannot affect clone/init.
     let is_repo_creating = parsed
         .command
         .as_deref()
@@ -593,16 +583,20 @@ fn apply_git_trace2_event_target_override(cmd: &mut Command, trace2_event_target
     let Some(trace2_event_target) = trace2_event_target else {
         return;
     };
-    let index = match std::env::var("GIT_CONFIG_COUNT") {
-        Ok(value) => match value.parse::<usize>() {
-            Ok(index) => index,
-            Err(_) => return,
-        },
-        Err(_) => 0,
-    };
-    cmd.env(format!("GIT_CONFIG_KEY_{}", index), "trace2.eventTarget");
-    cmd.env(format!("GIT_CONFIG_VALUE_{}", index), trace2_event_target);
-    cmd.env("GIT_CONFIG_COUNT", (index + 1).to_string());
+
+    // trace2 is initialized early in Git startup. Command-line config
+    // injection (`-c`/GIT_CONFIG_COUNT) can be too late on some Git builds, so
+    // use the dedicated environment variable for the single child process that
+    // needs daemon observation.
+    cmd.env("GIT_TRACE2_EVENT", trace2_event_target);
+    cmd.env("GIT_TRACE2_EVENT_NESTING", "10");
+}
+
+fn is_read_only_invocation(parsed: &ParsedGitInvocation) -> bool {
+    parsed
+        .command
+        .as_deref()
+        .is_some_and(|cmd| is_definitely_read_only_invocation_args(cmd, &parsed.command_args))
 }
 
 #[cfg(test)]
@@ -636,6 +630,126 @@ mod tests {
             "fallback upload must still upload this commit after the daemon writes its note"
         );
     }
+
+    #[test]
+    fn read_only_invocations_are_quiet_passthrough_candidates() {
+        let status = parse_git_cli_args(&["status".to_string(), "-z".to_string()]);
+        let worktree_list = parse_git_cli_args(&["worktree".to_string(), "list".to_string()]);
+        let config_read = parse_git_cli_args(&[
+            "config".to_string(),
+            "--null".to_string(),
+            "--get".to_string(),
+            "core.fsmonitor".to_string(),
+        ]);
+        let config_write = parse_git_cli_args(&[
+            "config".to_string(),
+            "--local".to_string(),
+            "git-ai.test".to_string(),
+            "1".to_string(),
+        ]);
+        let commit =
+            parse_git_cli_args(&["commit".to_string(), "-m".to_string(), "msg".to_string()]);
+        let pull = parse_git_cli_args(&["pull".to_string()]);
+
+        assert!(is_read_only_invocation(&status));
+        assert!(is_read_only_invocation(&worktree_list));
+        assert!(is_read_only_invocation(&config_read));
+        assert!(!is_read_only_invocation(&config_write));
+        assert!(!is_read_only_invocation(&commit));
+        assert!(!is_read_only_invocation(&pull));
+    }
+}
+
+fn proxy_to_git_quiet(args: &[String]) -> std::process::ExitStatus {
+    let real_git_path = config::Config::get().git_cmd().to_string();
+    #[cfg(windows)]
+    let interactive_terminal = is_interactive_terminal();
+
+    let child = {
+        #[cfg(unix)]
+        {
+            let is_interactive = unsafe { libc::isatty(libc::STDIN_FILENO) == 1 };
+            let should_setpgid = !is_interactive;
+
+            let mut cmd = Command::new(&real_git_path);
+            cmd.args(args)
+                .env(ENV_SKIP_MANAGED_HOOKS, "1")
+                .env("GIT_TRACE2_EVENT", "0");
+            unsafe {
+                let setpgid_flag = should_setpgid;
+                cmd.pre_exec(move || {
+                    if setpgid_flag {
+                        let _ = libc::setpgid(0, 0);
+                    }
+                    Ok(())
+                });
+            }
+            cmd.spawn().map(|child| (child, should_setpgid))
+        }
+        #[cfg(not(unix))]
+        {
+            let mut cmd = Command::new(&real_git_path);
+            cmd.args(args)
+                .env(ENV_SKIP_MANAGED_HOOKS, "1")
+                .env("GIT_TRACE2_EVENT", "0");
+
+            #[cfg(windows)]
+            {
+                if !interactive_terminal {
+                    cmd.creation_flags(CREATE_NO_WINDOW);
+                }
+            }
+
+            cmd.spawn()
+        }
+    };
+
+    #[cfg(unix)]
+    match child {
+        Ok((mut child, setpgid)) => {
+            if setpgid {
+                let pgid: i32 = child.id() as i32;
+                CHILD_PGID.store(pgid, Ordering::Relaxed);
+                install_forwarding_handlers();
+            }
+            match child.wait() {
+                Ok(status) => {
+                    if setpgid {
+                        CHILD_PGID.store(0, Ordering::Relaxed);
+                        uninstall_forwarding_handlers();
+                    }
+                    status
+                }
+                Err(e) => {
+                    if setpgid {
+                        CHILD_PGID.store(0, Ordering::Relaxed);
+                        uninstall_forwarding_handlers();
+                    }
+                    eprintln!("Failed to wait for git process: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("Failed to execute git command: {}", e);
+            std::process::exit(1);
+        }
+    }
+
+    #[cfg(not(unix))]
+    match child {
+        Ok(mut child) => match child.wait() {
+            Ok(status) => status,
+            Err(e) => {
+                eprintln!("Failed to wait for git process: {}", e);
+                std::process::exit(1);
+            }
+        },
+        Err(e) => {
+            eprintln!("Failed to execute git command: {}", e);
+            std::process::exit(1);
+        }
+    }
 }
 
 fn proxy_to_git(
@@ -644,22 +758,11 @@ fn proxy_to_git(
     wrapper_invocation_id: Option<&str>,
     trace2_event_target: Option<&str>,
 ) -> std::process::ExitStatus {
-    // Suppress trace2 for read-only invocations to avoid hitting the daemon
-    // with events that can never produce meaningful state changes.  In async
-    // mode, read-only invocations are handled before this point (no
-    // invocation_id set), so wrapper_invocation_id is only Some for mutating
-    // commands that need trace2 events for the daemon to match wrapper state.
-    //
-    // Use is_definitely_read_only_invocation so that subcommand-gated
-    // read-only calls like `git stash list` and `git worktree list` are also
-    // suppressed (matches the updated wrapper check in handle_git above).
-    let suppress_trace2 = wrapper_invocation_id.is_none() && {
-        let parsed = parse_git_cli_args(args);
-        let subcommand = parsed.command_args.first().map(String::as_str);
-        parsed.command.as_deref().is_some_and(|cmd| {
-            crate::git::command_classification::is_definitely_read_only_invocation(cmd, subcommand)
-        })
-    };
+    // Suppress inherited/global trace2 unless this wrapper has explicitly
+    // connected to the current daemon and is about to inject that fresh target.
+    // This prevents stale global trace2.eventTarget config from sending Git
+    // traffic to dead sockets or old daemon runtimes.
+    let suppress_trace2 = trace2_event_target.is_none();
     let real_git_path = config::Config::get().git_cmd().to_string();
     #[cfg(windows)]
     let interactive_terminal = is_interactive_terminal();

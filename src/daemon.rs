@@ -690,80 +690,6 @@ fn trace_argv_primary_command(argv: &[String]) -> Option<String> {
     None
 }
 
-/// Extract the subcommand from a trace2 argv after the primary command.
-///
-/// For an invocation like `git -c core.fsmonitor=false stash list` this
-/// returns `Some("list")`.  Used together with the primary command to
-/// identify read-only invocations such as `stash list` and `worktree list`
-/// that would otherwise be misclassified as potentially-mutating.
-fn trace_argv_subcommand(argv: &[String]) -> Option<String> {
-    // Walk the argv twice:
-    //   pass 1 — find the index of the primary command (same logic as
-    //            trace_argv_primary_command)
-    //   pass 2 — find the first non-flag token after that index
-    let mut idx = 0;
-    // Skip the git binary itself
-    if argv
-        .first()
-        .map(|token| {
-            let file_name = Path::new(token)
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or(token);
-            file_name == "git" || file_name == "git.exe"
-        })
-        .unwrap_or(false)
-    {
-        idx = 1;
-    }
-    // Skip git global flags to reach the primary command
-    let cmd_idx = loop {
-        if idx >= argv.len() {
-            return None;
-        }
-        let token = argv[idx].as_str();
-        if token == "-C" {
-            idx += 2;
-            continue;
-        }
-        if matches!(
-            token,
-            "-c" | "--config-env"
-                | "--git-dir"
-                | "--work-tree"
-                | "--namespace"
-                | "--super-prefix"
-                | "--exec-path"
-                | "--worktree-attributes"
-                | "--attr-source"
-        ) {
-            idx += 2;
-            continue;
-        }
-        if token.starts_with("--") && token.contains('=') {
-            idx += 1;
-            continue;
-        }
-        if token.starts_with('-') {
-            idx += 1;
-            continue;
-        }
-        break idx;
-    };
-    // cmd_idx points at the primary command.  Advance past it and find the
-    // first non-flag positional argument — the subcommand.
-    let mut idx = cmd_idx + 1;
-    while idx < argv.len() {
-        let token = argv[idx].as_str();
-        if token.starts_with('-') {
-            idx += 1;
-            continue;
-        }
-        return Some(token.to_string());
-    }
-    None
-}
-
 /// Returns true when the trace2 event's command+subcommand pair is
 /// guaranteed to never mutate repository state.
 ///
@@ -774,18 +700,17 @@ fn trace_invocation_is_definitely_read_only(
     primary_command: Option<&str>,
     argv: &[String],
 ) -> bool {
-    use crate::git::command_classification::is_definitely_read_only_invocation;
+    use crate::git::cli_parser::parse_git_cli_args;
+    use crate::git::command_classification::is_definitely_read_only_invocation_args;
     match primary_command {
         Some(cmd) => {
-            // Only parse the subcommand for commands that need it; parsing is
-            // cheap but this avoids it for the majority of clearly-read-only
-            // commands like status, diff, show, etc.
-            let subcommand = if matches!(cmd, "stash" | "worktree") {
-                trace_argv_subcommand(argv)
+            let parsed = parse_git_cli_args(trace_invocation_args(argv));
+            let command_args: &[String] = if parsed.command.as_deref() == Some(cmd) {
+                parsed.command_args.as_slice()
             } else {
-                None
+                &[]
             };
-            is_definitely_read_only_invocation(cmd, subcommand.as_deref())
+            is_definitely_read_only_invocation_args(cmd, command_args)
         }
         None => false,
     }

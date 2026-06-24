@@ -291,6 +291,69 @@ fn test_fast_forward_pull_then_known_human_save_preserves_archived_ai_attributio
 }
 
 #[test]
+fn test_user_pull_after_teammate_push_preserves_uncommitted_ai_attribution() {
+    let (user1, upstream) = TestRepo::new_with_remote();
+
+    let mut readme = user1.filename("README.md");
+    readme.set_contents(vec!["# Shared branch".human()]);
+    user1
+        .stage_all_and_commit("initial commit")
+        .expect("initial commit should succeed");
+    user1
+        .git(&["push", "-u", "origin", "HEAD"])
+        .expect("push initial commit should succeed");
+
+    let user2_path = user1.path().with_file_name(format!(
+        "{}-user2",
+        user1
+            .path()
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("repo")
+    ));
+    let upstream_path = upstream.path().to_string_lossy().to_string();
+    let user2_path_str = user2_path.to_string_lossy().to_string();
+    user1
+        .git(&["clone", upstream_path.as_str(), user2_path_str.as_str()])
+        .expect("user2 clone should succeed");
+    let user2 = TestRepo::new_at_path(user2_path.as_path());
+
+    let mut user1_ai = user1.filename("user1_uncommitted_ai.txt");
+    user1_ai.set_contents(vec![
+        "user1 local AI line 1".ai(),
+        "user1 local AI line 2".ai(),
+    ]);
+    user1
+        .git_ai(&["checkpoint", "mock_ai", "user1_uncommitted_ai.txt"])
+        .expect("user1 AI checkpoint should succeed");
+
+    let mut user2_file = user2.filename("user2_pushed.txt");
+    user2_file.set_contents(vec!["user2 pushed line".human()]);
+    user2
+        .stage_all_and_commit("user2 pushed commit")
+        .expect("user2 commit should succeed");
+    user2
+        .git(&["push", "origin", "HEAD"])
+        .expect("user2 push should succeed");
+
+    user1
+        .git(&["config", "pull.rebase", "false"])
+        .expect("config pull.rebase should succeed");
+    user1
+        .git(&["config", "pull.ff", "only"])
+        .expect("config pull.ff should succeed");
+    user1.git(&["pull"]).expect("user1 pull should succeed");
+
+    user1
+        .stage_all_and_commit("commit user1 local AI after teammate pull")
+        .expect("user1 commit should succeed");
+    user1_ai.assert_lines_and_blame(vec![
+        "user1 local AI line 1".ai(),
+        "user1 local AI line 2".ai(),
+    ]);
+}
+
+#[test]
 fn test_fast_forward_pull_without_local_changes() {
     let setup = setup_pull_test();
     let local = setup.local;

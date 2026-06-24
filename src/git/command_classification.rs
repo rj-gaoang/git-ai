@@ -19,6 +19,7 @@ pub fn is_definitely_read_only_command(command: &str) -> bool {
             | "grep"
             | "help"
             | "log"
+            | "ls-remote"
             | "ls-files"
             | "ls-tree"
             | "merge-base"
@@ -53,9 +54,185 @@ pub fn is_definitely_read_only_invocation(command: &str, subcommand: Option<&str
         return true;
     }
     match command {
+        "branch" => matches!(subcommand, Some("--show-current" | "--list" | "-l")),
+        "config" => matches!(
+            subcommand,
+            Some(
+                "--get"
+                    | "--get-all"
+                    | "--get-regexp"
+                    | "--get-urlmatch"
+                    | "--list"
+                    | "-l"
+                    | "--null"
+                    | "-z"
+                    | "--name-only"
+                    | "--show-origin"
+                    | "--show-scope"
+            )
+        ),
+        "fetch" => matches!(subcommand, Some("--dry-run")),
+        "remote" => matches!(subcommand, Some("-v" | "--verbose" | "get-url" | "show")),
         "stash" => matches!(subcommand, Some("list" | "show")),
         "worktree" => matches!(subcommand, Some("list")),
         _ => false,
+    }
+}
+
+pub fn is_definitely_read_only_invocation_args(command: &str, command_args: &[String]) -> bool {
+    if is_definitely_read_only_command(command) {
+        return true;
+    }
+
+    match command {
+        "branch" => branch_invocation_is_read_only(command_args),
+        "config" => config_invocation_is_read_only(command_args),
+        "fetch" => command_args.iter().any(|arg| arg == "--dry-run"),
+        "remote" => remote_invocation_is_read_only(command_args),
+        "stash" => matches!(first_positional(command_args), Some("list" | "show")),
+        "worktree" => matches!(first_positional(command_args), Some("list")),
+        _ => false,
+    }
+}
+
+fn first_positional(args: &[String]) -> Option<&str> {
+    let mut skip_next = false;
+    for arg in args {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        if arg == "--" {
+            return None;
+        }
+        if arg.starts_with('-') {
+            if flag_takes_value(arg) && !arg.contains('=') {
+                skip_next = true;
+            }
+            continue;
+        }
+        return Some(arg.as_str());
+    }
+    None
+}
+
+fn positional_count(args: &[String]) -> usize {
+    let mut count = 0usize;
+    let mut skip_next = false;
+    for arg in args {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        if arg == "--" {
+            break;
+        }
+        if arg.starts_with('-') {
+            if flag_takes_value(arg) && !arg.contains('=') {
+                skip_next = true;
+            }
+            continue;
+        }
+        count += 1;
+    }
+    count
+}
+
+fn flag_takes_value(arg: &str) -> bool {
+    matches!(
+        arg,
+        "-c" | "-C"
+            | "-f"
+            | "--file"
+            | "--blob"
+            | "--type"
+            | "--fixed-value"
+            | "--get-urlmatch"
+            | "--format"
+            | "--sort"
+            | "--points-at"
+            | "--merged"
+            | "--no-merged"
+            | "--contains"
+            | "--no-contains"
+            | "--server-option"
+            | "-o"
+    )
+}
+
+fn branch_invocation_is_read_only(args: &[String]) -> bool {
+    let mut has_explicit_read_flag = false;
+    for arg in args {
+        match arg.as_str() {
+            "--show-current" | "--list" | "-l" | "--all" | "-a" | "--remotes" | "-r"
+            | "--verbose" | "-v" | "-vv" | "--contains" | "--no-contains" | "--merged"
+            | "--no-merged" | "--points-at" | "--format" | "--sort" | "--color" | "--no-color" => {
+                has_explicit_read_flag = true;
+            }
+            "-d"
+            | "-D"
+            | "--delete"
+            | "-m"
+            | "-M"
+            | "--move"
+            | "-c"
+            | "-C"
+            | "--copy"
+            | "--set-upstream-to"
+            | "-u"
+            | "--unset-upstream"
+            | "--edit-description"
+            | "--track"
+            | "--no-track"
+            | "-f"
+            | "--force"
+            | "--create-reflog"
+            | "--recurse-submodules" => return false,
+            _ => {}
+        }
+    }
+
+    has_explicit_read_flag || positional_count(args) == 0
+}
+
+fn config_invocation_is_read_only(args: &[String]) -> bool {
+    let mut has_read_mode = false;
+    let mut non_flag_count = 0usize;
+    let mut skip_next = false;
+
+    for arg in args {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        match arg.as_str() {
+            "--get" | "--get-all" | "--get-regexp" | "--get-urlmatch" | "--get-color"
+            | "--get-colorbool" | "--list" | "-l" | "--name-only" => {
+                has_read_mode = true;
+            }
+            "--null" | "-z" | "-lz" | "--show-origin" | "--show-scope" | "--includes"
+            | "--global" | "--system" | "--local" | "--worktree" | "--fixed-value" => {}
+            "--file" | "-f" | "--blob" | "--type" => {
+                skip_next = !arg.contains('=');
+            }
+            "--add" | "--replace-all" | "--unset" | "--unset-all" | "--rename-section"
+            | "--remove-section" | "--edit" | "-e" | "--set" => return false,
+            _ if arg.starts_with("--") && arg.contains('=') => {}
+            _ if arg.starts_with('-') => {}
+            _ => non_flag_count += 1,
+        }
+    }
+
+    has_read_mode || non_flag_count <= 1
+}
+
+fn remote_invocation_is_read_only(args: &[String]) -> bool {
+    match first_positional(args) {
+        None => true,
+        Some("-v" | "--verbose" | "get-url" | "show") => true,
+        Some("add" | "rename" | "remove" | "rm" | "set-head" | "set-branches" | "set-url")
+        | Some("prune" | "update") => false,
+        Some(_) => false,
     }
 }
 
@@ -72,6 +249,7 @@ mod tests {
         assert!(is_definitely_read_only_command("log"));
         assert!(is_definitely_read_only_command("cat-file"));
         assert!(is_definitely_read_only_command("ls-files"));
+        assert!(is_definitely_read_only_command("ls-remote"));
     }
 
     #[test]
@@ -120,6 +298,83 @@ mod tests {
     #[test]
     fn worktree_list_is_read_only_invocation() {
         assert!(is_definitely_read_only_invocation("worktree", Some("list")));
+    }
+
+    #[test]
+    fn ide_polling_invocations_are_read_only() {
+        assert!(is_definitely_read_only_invocation("config", Some("--get")));
+        assert!(is_definitely_read_only_invocation("config", Some("--null")));
+        assert!(is_definitely_read_only_invocation(
+            "branch",
+            Some("--show-current")
+        ));
+        assert!(is_definitely_read_only_invocation("remote", Some("-v")));
+        assert!(is_definitely_read_only_invocation(
+            "fetch",
+            Some("--dry-run")
+        ));
+        assert!(!is_definitely_read_only_invocation("config", Some("--set")));
+        assert!(!is_definitely_read_only_invocation("fetch", None));
+    }
+
+    #[test]
+    fn fetch_invocation_args_only_treat_explicit_dry_run_as_read_only() {
+        assert!(is_definitely_read_only_invocation_args(
+            "fetch",
+            &["--dry-run".into(), "origin".into()]
+        ));
+        assert!(!is_definitely_read_only_invocation_args(
+            "fetch",
+            &["-n".into(), "origin".into()]
+        ));
+        assert!(!is_definitely_read_only_invocation_args(
+            "fetch",
+            &["origin".into()]
+        ));
+    }
+
+    #[test]
+    fn branch_invocation_args_keep_mutating_forms_on_full_path() {
+        assert!(is_definitely_read_only_invocation_args(
+            "branch",
+            &["--show-current".into()]
+        ));
+        assert!(is_definitely_read_only_invocation_args(
+            "branch",
+            &["--format".into(), "%(refname:short)".into()]
+        ));
+        assert!(!is_definitely_read_only_invocation_args(
+            "branch",
+            &["-f".into(), "topic".into(), "HEAD".into()]
+        ));
+        assert!(!is_definitely_read_only_invocation_args(
+            "branch",
+            &["-m".into(), "old".into(), "new".into()]
+        ));
+    }
+
+    #[test]
+    fn config_invocation_args_distinguish_reads_from_writes() {
+        assert!(is_definitely_read_only_invocation_args(
+            "config",
+            &["--null".into(), "--get".into(), "core.fsmonitor".into()]
+        ));
+        assert!(is_definitely_read_only_invocation_args(
+            "config",
+            &["user.email".into()]
+        ));
+        assert!(is_definitely_read_only_invocation_args(
+            "config",
+            &["-lz".into(), "--show-origin".into(), "--name-only".into()]
+        ));
+        assert!(!is_definitely_read_only_invocation_args(
+            "config",
+            &["--local".into(), "git-ai.test".into(), "1".into()]
+        ));
+        assert!(!is_definitely_read_only_invocation_args(
+            "config",
+            &["--unset".into(), "git-ai.test".into()]
+        ));
     }
 
     #[test]
