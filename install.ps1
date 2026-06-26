@@ -968,6 +968,7 @@ Verify-Checksum -File $tmpFile -BinaryName $downloadedBinaryName
 $uploadActivityLock = Acquire-UploadActivityLock
 
 $launcherExe = Join-Path $launcherDir 'git-ai.exe'
+$launcherGitShim = Join-Path $launcherDir 'git.exe'
 $finalExe = Join-Path $installDir 'git-ai.exe'
 $gitShim = Join-Path $installDir 'git.exe'
 $currentExePointer = Join-Path $gitAiRoot 'current-exe'
@@ -976,11 +977,17 @@ Install-BinaryWithRenameFallback -Source $tmpFile -Destination $launcherExe -Ins
 try { Unblock-File -Path $launcherExe -ErrorAction SilentlyContinue } catch { }
 Set-CurrentExePointer -PointerPath $currentExePointer -TargetPath $launcherExe
 
+# Keep the launcher git proxy in lockstep with the authoritative launcher
+# entrypoint. PATH prefers launcher, so a stale launcher\git.exe would keep
+# commit/upload followups on old code even after git-ai.exe is updated.
+Copy-InstalledBinary -Source $launcherExe -Destination $launcherGitShim -InstallDir $launcherDir -Description 'launcher git proxy git.exe'
+try { Unblock-File -Path $launcherGitShim -ErrorAction SilentlyContinue } catch { }
+
 Copy-InstalledBinary -Source $launcherExe -Destination $finalExe -InstallDir $installDir -Description 'compatibility git-ai.exe'
 try { Unblock-File -Path $finalExe -ErrorAction SilentlyContinue } catch { }
 
-# Keep git.exe installed beside git-ai.exe. The git proxy is what sends wrapper
-# pre/post state for commit processing and triggers post-commit upload followups.
+# Keep a compatibility git.exe beside bin\git-ai.exe for existing shells and
+# hooks that still point at the historical bin directory.
 Copy-InstalledBinary -Source $launcherExe -Destination $gitShim -InstallDir $installDir -Description 'git proxy git.exe'
 try { Unblock-File -Path $gitShim -ErrorAction SilentlyContinue } catch { }
 
@@ -1024,7 +1031,7 @@ if ($skipPathUpdate) {
         UserStatus = 'Skipped'
     }
 } else {
-    $pathUpdate = Set-PathEnsureContains -PathToAdd $installDir
+    $pathUpdate = Set-PathEnsureContains -PathToAdd $launcherDir
 }
 if ($pathUpdate.UserStatus -eq 'Updated') {
     Write-Success 'Successfully added git-ai to the user PATH.'
@@ -1035,7 +1042,7 @@ if ($pathUpdate.UserStatus -eq 'Updated') {
 }
 
 Write-Success "Successfully installed git-ai into $launcherDir"
-Write-Success "Synchronized git-ai and git proxy entrypoints into $installDir"
+Write-Success "Synchronized git-ai and git proxy entrypoints into $launcherDir and $installDir"
 Write-Success "You can now run 'git-ai' and git-ai-managed 'git' from your terminal"
 
 if ($installHooksSucceeded) {

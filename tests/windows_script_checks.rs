@@ -40,6 +40,13 @@ fn installed_launcher_git_ai_path(repo: &TestRepo) -> PathBuf {
         .join("git-ai.exe")
 }
 
+fn installed_launcher_git_wrapper_path(repo: &TestRepo) -> PathBuf {
+    repo.test_home_path()
+        .join(".git-ai")
+        .join("launcher")
+        .join("git.exe")
+}
+
 fn installed_current_exe_pointer_path(repo: &TestRepo) -> PathBuf {
     repo.test_home_path().join(".git-ai").join("current-exe")
 }
@@ -295,12 +302,13 @@ fn spawn_installed_daemon(repo: &TestRepo) -> Child {
 
 fn kill_installed_processes(repo: &TestRepo) {
     let script = format!(
-        "$targets = @('{}','{}','{}'); \
+        "$targets = @('{}','{}','{}','{}'); \
          Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | \
          Where-Object {{ $_.ExecutablePath -and ($targets -contains $_.ExecutablePath) }} | \
          ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }}",
         installed_git_ai_path(repo).display(),
         installed_launcher_git_ai_path(repo).display(),
+        installed_launcher_git_wrapper_path(repo).display(),
         repo.test_home_path()
             .join(".git-ai")
             .join("bin")
@@ -491,7 +499,9 @@ fn windows_install_script_synchronizes_launcher_current_exe_and_compat_bin() {
     );
 
     let launcher = installed_launcher_git_ai_path(&repo);
+    let launcher_git = installed_launcher_git_wrapper_path(&repo);
     let compat_bin = installed_git_ai_path(&repo);
+    let compat_git = installed_git_wrapper_path(&repo);
     let pointer = installed_current_exe_pointer_path(&repo);
     assert!(
         launcher.exists(),
@@ -499,9 +509,19 @@ fn windows_install_script_synchronizes_launcher_current_exe_and_compat_bin() {
         launcher.display()
     );
     assert!(
+        launcher_git.exists(),
+        "launcher git proxy should be installed at {}",
+        launcher_git.display()
+    );
+    assert!(
         compat_bin.exists(),
         "compatibility git-ai.exe should be installed at {}",
         compat_bin.display()
+    );
+    assert!(
+        compat_git.exists(),
+        "compatibility git proxy should be installed at {}",
+        compat_git.display()
     );
     assert!(
         pointer.exists(),
@@ -519,8 +539,12 @@ fn windows_install_script_synchronizes_launcher_current_exe_and_compat_bin() {
         "current-exe should point at the launcher entrypoint"
     );
 
-    let launcher_version =
-        run_git_ai_at_path(&repo, launcher, &["--version"], Duration::from_secs(15));
+    let launcher_version = run_git_ai_at_path(
+        &repo,
+        launcher.clone(),
+        &["--version"],
+        Duration::from_secs(15),
+    );
     let compat_version =
         run_git_ai_at_path(&repo, compat_bin, &["--version"], Duration::from_secs(15));
     assert!(
@@ -540,11 +564,21 @@ fn windows_install_script_synchronizes_launcher_current_exe_and_compat_bin() {
         compat_version.stdout.trim(),
         "launcher and compatibility bin should report the same version"
     );
+    assert_eq!(
+        fs::read(&launcher).expect("failed to read launcher git-ai.exe"),
+        fs::read(&launcher_git).expect("failed to read launcher git.exe"),
+        "launcher git.exe should be byte-for-byte synchronized with launcher git-ai.exe"
+    );
+    assert_eq!(
+        fs::read(&launcher).expect("failed to read launcher git-ai.exe"),
+        fs::read(&compat_git).expect("failed to read compatibility git.exe"),
+        "compatibility git.exe should be byte-for-byte synchronized from launcher"
+    );
     assert!(
         install
             .stdout
-            .contains("Synchronized compatibility entrypoint into"),
-        "installer should report compatibility entrypoint sync\nstdout:\n{}",
+            .contains("Synchronized git-ai and git proxy entrypoints into"),
+        "installer should report entrypoint sync\nstdout:\n{}",
         install.stdout
     );
 }
@@ -558,7 +592,7 @@ fn seed_existing_wrapper(repo: &TestRepo) {
 
 #[test]
 #[serial]
-fn windows_install_script_skips_wrapper_for_new_users() {
+fn windows_install_script_installs_proxy_for_new_users() {
     let repo =
         TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::NoDaemon);
 
@@ -576,11 +610,15 @@ fn windows_install_script_skips_wrapper_for_new_users() {
         installed_git_ai_path(&repo).display()
     );
 
-    let bin_dir = repo.test_home_path().join(".git-ai").join("bin");
     assert!(
-        !bin_dir.join("git.exe").exists(),
-        "fresh install should NOT create the git.exe wrapper"
+        installed_launcher_git_wrapper_path(&repo).exists(),
+        "fresh install should create the launcher git proxy"
     );
+    assert!(
+        installed_git_wrapper_path(&repo).exists(),
+        "fresh install should create the compatibility git proxy"
+    );
+    let bin_dir = repo.test_home_path().join(".git-ai").join("bin");
     assert!(
         !bin_dir.join("git-og.cmd").exists(),
         "fresh install should NOT create git-og.cmd"
@@ -589,7 +627,7 @@ fn windows_install_script_skips_wrapper_for_new_users() {
 
 #[test]
 #[serial]
-fn windows_install_script_disables_wrapper_for_existing_users() {
+fn windows_install_script_refreshes_wrapper_for_existing_users() {
     let repo =
         TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::NoDaemon);
 
@@ -604,24 +642,14 @@ fn windows_install_script_disables_wrapper_for_existing_users() {
     );
 
     assert!(
-        !installed_git_wrapper_path(&repo).exists(),
-        "existing git.exe wrapper should be disabled instead of refreshed"
+        installed_git_wrapper_path(&repo).exists(),
+        "existing git.exe wrapper should be refreshed"
     );
 
-    let bin_dir = repo.test_home_path().join(".git-ai").join("bin");
-    let disabled_wrappers: Vec<_> = fs::read_dir(&bin_dir)
-        .expect("failed to read git-ai bin dir")
-        .filter_map(Result::ok)
-        .filter(|entry| {
-            entry
-                .file_name()
-                .to_string_lossy()
-                .starts_with("git.exe.disabled-legacy-wrapper-")
-        })
-        .collect();
-    assert!(
-        !disabled_wrappers.is_empty(),
-        "installer should preserve the legacy git.exe wrapper under a disabled name"
+    assert_eq!(
+        fs::read(installed_git_ai_path(&repo)).expect("failed to read compatibility git-ai.exe"),
+        fs::read(installed_git_wrapper_path(&repo)).expect("failed to read compatibility git.exe"),
+        "existing git.exe wrapper should be synchronized with git-ai.exe"
     );
 }
 
@@ -667,6 +695,14 @@ fn windows_install_script_replaces_busy_binary_by_retiring_it() {
     assert!(
         script.contains("Copy-InstalledBinary -Source $launcherExe -Destination $finalExe"),
         "install.ps1 should synchronize the compatibility bin entrypoint from launcher"
+    );
+    assert!(
+        script.contains("Copy-InstalledBinary -Source $launcherExe -Destination $launcherGitShim"),
+        "install.ps1 should synchronize the launcher git proxy from launcher"
+    );
+    assert!(
+        script.contains("Copy-InstalledBinary -Source $launcherExe -Destination $gitShim"),
+        "install.ps1 should synchronize the compatibility git proxy from launcher"
     );
     assert!(
         script.contains("Retired active $Description before install"),

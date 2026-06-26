@@ -861,8 +861,7 @@ pub fn update_vscode_copilot_hook_locations_settings(
 
 /// Remove stale VS Code `git.path` values that point at old git-ai shims.
 ///
-/// Windows installs no longer create a fresh `~/.git-ai/bin/git.exe` shim, so a
-/// stale settings value can make VS Code fail with "No such file". We only
+/// Broken historical shims can make VS Code fail with "No such file". We only
 /// remove values that are clearly git-ai-managed and broken, leaving normal
 /// user/system Git settings alone.
 pub fn repair_vscode_git_path_settings(

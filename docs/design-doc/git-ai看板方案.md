@@ -33,6 +33,83 @@ Speckit 是团队使用的「规范驱动开发」框架，通过 `.specify/` �
 
 > **文档更新说明（2026-04-24）**：本文最初主要从“Speckit 如何集成 git-ai”的视角写，当前已经补充 `git-ai` 本身的源码改动，包括 `post_commit` 挂接点、原生上传模块、feature flag、环境变量约定、失败降级策略，以及代码级验证结果。也就是说，这份文档现在同时覆盖 Speckit 侧改造和 git-ai 侧改造，不再只是一份脚本集成方案。
 
+### 2026-06-26：黄芳 6/26 提交未进入远程看板
+
+现场反馈为“用户已配置 MCP，但 2026-06-26 提交的代码归因都没有上传到远程看板”。这次日志形态和 MCP 身份缺失不同：`logs/黄芳-20260626.jsonl` 整份日志里 `post_commit_started=0`、`post_commit_fallback_upload_spawned=0`、`upload_stats_ready=0`、`upload_stats_succeeded=0`、`upload_stats_failed=0`，说明客户端没有发起任何一次提交统计上传，MCP 的 `X-USER-ID` 解析还没有被执行到。
+
+关键提交链路证据集中在 2026-06-26 16:57:45：
+
+| 日志行 | 证据 | 判断 |
+|------|------|------|
+| 5690 | `git commit --quiet` 在 `D:\project\sale-ai-analyzer\sale-ai-analyzer-service` 发起，`currentExe=C:\Users\admin\.git-ai\launcher\git.exe`，`gitAiVersion=2.2.44` | 真正拦截 commit 的是旧 `launcher\git.exe` |
+| 5697-5699 | commit 走 `route=daemon_wrapper`，真实 Git 子进程已启动，`wrapperInvocationId=9591fb25-adb8-4e39-85f4-5978393b3d26` | wrapper 前半段存在，但后续没有本次 commit 的 child exit / post-commit 收口事件 |
+| 全量版本分布 | `launcher\git.exe` 共 865 条为 `2.2.44`；同一日志里 `launcher\git-ai.exe` / `bin\git-ai.exe` 已是 `2.2.46` | 安装后出现入口版本分裂：`git-ai.exe` 已更新，PATH 首位的 `git.exe` 仍旧 |
+
+根因是 Windows 安装 / 自修复边界没有把 `launcher\git.exe` 与权威 `launcher\git-ai.exe` 同步。现行入口策略把 `.git-ai\launcher` 放在 PATH 前面，日志也证明 `pathHead[0]=C:\Users\admin\.git-ai\launcher`；但安装脚本只同步了 `bin\git.exe`，没有刷新 `launcher\git.exe`。同时 `install-hooks` 的 `repair_git_proxy_entrypoint` 遇到已有 `git.exe` 会直接返回，旧代理即使存在也不会被新版 `git-ai.exe install-hooks` 覆盖。因此 commit 继续由 2.2.44 的旧代理处理，提供日志里没有进入 2.2.46 的 post-commit fallback upload / upload-stats 链路。排除项：这不是 MCP 配置错误、不是 HTTP / 后端失败、不是 activity lock 阻塞，也不是 stats 计算失败；这些路径的 debug 事件在本日志中均未出现。
+
+本次代码修复：
+
+| 文件 | 变更点 | 影响 |
+|------|--------|------|
+| `install.ps1` | 新增 `$launcherGitShim`，安装时从 `launcher\git-ai.exe` 同步到 `launcher\git.exe`，并继续同步 `bin\git-ai.exe` / `bin\git.exe` | PATH 命中 launcher 时，`git` 与 `git-ai` 保持同一版本 |
+| `install.ps1` | PATH 更新恢复为优先加入 `$launcherDir`，成功文案同时说明 launcher / bin 均已同步 | 避免 launcher / bin 入口策略再分裂 |
+| `src/commands/install_hooks.rs` | Windows `repair_git_proxy_entrypoint` 在通过 `git-ai.exe` 运行时会刷新同目录已有 `git.exe`，通过 `git.exe` 自身运行时仍避免覆盖正在执行的代理 | 安装脚本之外，用户手动 `git-ai install-hooks` 也能修复旧 `launcher\git.exe` |
+| `tests/windows_script_checks.rs` | 真实 PowerShell 安装测试断言 `launcher\git.exe`、`bin\git.exe` 都与 `launcher\git-ai.exe` 字节一致；新用户创建代理、老用户刷新代理 | 锁定“旧 git proxy 留在 PATH 首位导致 commit 不上传”的回归 |
+
+历史数据口径：这次修复保证后续 commit 会进入新版 post-commit / fallback upload 链路；已经发生但日志中没有完成 post-commit 收口的 2026-06-26 提交，客户端不会凭空补造远程记录。需要历史修复时，应先确认目标 commit SHA 和本地 `refs/notes/ai` 是否存在，再用修复后的 `git-ai upload-stats <sha> --source manual` 或服务端 backfill 做显式补传。
+
+验证记录：
+
+| 命令 | 结论 |
+|------|------|
+| `cargo test --lib windows_git_proxy_entrypoint -- --nocapture` | 通过，覆盖旧 `git.exe` 已存在时刷新 / 不刷新两种分支 |
+| `cargo test --test windows_script_checks windows_install_script_synchronizes_launcher_current_exe_and_compat_bin -- --nocapture` | 通过，隔离 HOME 下真实执行 `install.ps1` 并验证 launcher / bin 四个入口同步 |
+| `cargo test --test windows_script_checks windows_install_script_installs_proxy_for_new_users -- --nocapture` | 通过 |
+| `cargo test --test windows_script_checks windows_install_script_refreshes_wrapper_for_existing_users -- --nocapture` | 通过 |
+| `cargo test --test windows_script_checks windows_install_script_writes_current_exe_pointer_to_launcher -- --nocapture` | 通过 |
+
+### 2026-06-26：徐建丰 6/25-6/26 看板按人/部门缺记录排查
+
+现场反馈为“6 月 25 日、6 月 26 日提交的代码归因没有上传到远程看板”。本次排查先把“是否发起上传”和“看板是否能按用户/部门归属展示”拆开：
+
+| 日期 | 日志证据 | 判断 |
+|------|----------|------|
+| 2026-06-25 | `logs/建丰-20260626.jsonl` 中 `1b5f85778617e9b90bfc0a99ea9471a1b915299d`、`dbbc03a180208a9d28ca44602c7ab9b9a1488aad`、`e1e9edbdd4cbb7a383aa48db5702c6f2fd743c1f` 均有 `post_commit_started`、`post_commit_stats_computed` / `upload_stats_payload_build_succeeded`、`upload_stats_succeeded(statusCode=200)` | 不是本地归因未生成，也不是 HTTP 上传失败；这些记录已经以 `source=auto` 发到远程 |
+| 2026-06-25 身份字段 | 三次 `upload_stats_ready` 均为 `hasUserId=false`、`userIdSource=missing` | 自动上传没有携带 `X-USER-ID`，如果后端无法仅靠 Git author email 映射用户/部门，看板按人或部门查询会像“没上传” |
+| 2026-06-26 | 当前提供日志中 `post_commit_started=0`、`upload_stats_*` 事件数为 0；只有 checkpoint / blame / install-hooks / install test skip 等事件 | 从这份日志不能证明 6/26 发生了提交上传失败；需要目标 commit SHA 或包含提交时刻的 debug 日志继续核对 |
+
+根因在客户端 MCP 身份解析边界：`src/integration/ide_mcp.rs` 旧逻辑只扫描仓库 `.vscode/mcp.json` 和 JSON 顶层 `servers`，而现场常见配置在工作区 `.mcp.json`：
+
+```json
+{
+  "mcpServers": {
+    "codereview-mcp-server": {
+      "url": "http://mcppage.ruijie.com.cn:9810/mcp",
+      "type": "http",
+      "headers": { "X-USER-ID": "108" }
+    }
+  }
+}
+```
+
+因此 commit 自动上传阶段没有解析到 `X-USER-ID=108`，`upload_stats_ready` 只能记录 `hasUserId=false/userIdSource=missing`。这次排除的方向包括：post-commit 没执行、stats 没算出、authorship note 缺失、HTTP/network 失败、服务端业务响应拒绝 2026-06-25 payload；这些在 6/25 三个 commit 的日志里都不成立。6/26 则缺少 post-commit/upload 事件，不能和 6/25 混成同一个“上传失败”。
+
+本次代码修复：
+
+| 文件 | 变更点 | 影响 |
+|------|--------|------|
+| `src/integration/ide_mcp.rs` | 候选路径从仓库根开始向父级工作区查找 `.mcp.json` 和 `.vscode/mcp.json`，仍保留显式环境变量最高优先级 | 子仓库提交时也能读到父工作区 MCP 配置 |
+| `src/integration/ide_mcp.rs` | MCP JSON 同时支持顶层 `servers` 与 `mcpServers`，并继续支持 `headers.X-USER-ID` / `requestInit.headers.X-USER-ID` | 兼容 Claude / VS Code / Cursor 常见 `.mcp.json` 结构，未来自动上传会携带 `X-USER-ID` |
+
+历史数据口径：客户端修复只防止后续提交继续缺 `X-USER-ID`。6/25 三个 commit 已经在服务端创建过记录，后端当前会按 commit code 去重；如果需要让历史记录补上用户/部门维度，不能只让新版客户端重新上传，需要服务端侧 backfill、删除后重传、或把去重创建改为可更新 `x_user_id` 的 upsert/repair 流程。看板查询时还要注意 `source=auto` 需要落在 `source=all` 或包含自动上传的过滤条件中。
+
+验证记录：
+
+| 命令 | 结论 |
+|------|------|
+| `cargo fmt --check` | 通过 |
+| `cargo test --lib integration::ide_mcp -- --nocapture` | 曾在父级工作区查找补充前通过；补充父级查找后本机 Cargo 进程在 5 分钟超时，未拿到最终测试输出，需在空闲环境重跑 |
+
 ### 2026-06-22：闭环同分支 pull 后 AI 代码被保存事件归成人工
 
 现场形态：项目 A 的 `test` 分支上，用户1先用 AI 生成了未提交代码；用户2在同一分支手写并 push；用户1 pull 用户2的提交后，IDE/文件监听又触发一次 `KnownHuman` 保存 checkpoint，随后用户1 commit。旧逻辑只看 pull 后新 base 的 active working log，已经看不到用户1 pull 前那份 AI checkpoint；如果保存事件又生成 `h_*` 人工 attestation，最终本地 note / stats 会把用户1的 AI 代码算成人工。这不是服务端看板映射问题，也不是上传字段问题，坏数在 post-commit authorship note 里已经形成。
@@ -309,7 +386,7 @@ Speckit 安装后会在项目根目录生成一个 `.specify/` 文件夹，里�
 | **原生自动上传入口** | `src/authorship/post_commit.rs` + `src/integration/upload_stats.rs` | 在 authorship note 写入成功且 stats 可用时，直接组装与脚本一致的 payload 并后台上传 | 适合 commit 后即时上报 |
 | **本地存储** | `refs/notes/ai`（Git Notes） | 每次 commit 自动生成的 AI 归因日志 | 这是所有统计的数据源 |
 | **Authorship Note 直接解析** | `git notes --ref=ai show <sha>` | 输出该 commit 的原始 attestation（逐文件、逐行范围的 AI/人工归因）+ JSON 元数据（prompt 的 tool/model 信息） | 上传脚本解析它获取**逐文件级**的 AI 归因明细（`Get-CommitAiFileStats`） |
-| **X-USER-ID 解析** | `src/integration/ide_mcp.rs` | 从环境变量、仓库 `.vscode/mcp.json`、VS Code / IDEA MCP 配置中读取 `X-USER-ID` | 原生上传和脚本上传都复用同一套身份来源 |
+| **X-USER-ID 解析** | `src/integration/ide_mcp.rs` | 从环境变量、仓库及父级工作区 `.mcp.json` / `.vscode/mcp.json`、VS Code / IDEA MCP 配置中读取 `X-USER-ID` | 原生上传和脚本上传都复用同一套身份来源 |
 | **推送机制** | `push_authorship_notes()`（`src/git/sync_authorship.rs`） | git push 时自动把 notes 推到远端 | 已有，无需改动 |
 
 **关键发现（影响设计决策）：**
@@ -2630,6 +2707,8 @@ GitHub Copilot VS Code native hook 的补充说明：当 hook payload 因为脱�
 | 2.42 | Copilot native / CLI hook 在工具输入输出无路径时用 `dirtyFiles` key 兜底 | `git-ai/src/commands/checkpoint_agent/presets/github_copilot/mod.rs`、`git-ai/src/commands/checkpoint_agent/presets/github_copilot/ide.rs`、`git-ai/src/commands/checkpoint_agent/presets/github_copilot/cli.rs`、`git-ai/docs/design-doc/git-ai看板方案.md` | 当 `tool_input` / `tool_response` 只有文本片段、执行结果或脱敏内容，没有 `file_path/path/files` 时，使用当前 hook 顶层 `dirtyFiles` / `dirty_files` 的 key 作为文件路径兜底；修复 `rj-ltc-contract-web`、`ai-cr-manage-service`、`op-api` 这类 AI 生成文件大量掉到 `unknown` 的路径缺失问题 |
 | 2.43 | recent `KnownHuman` 保存不再覆盖已有 AI 行 | `git-ai/src/daemon/checkpoint.rs`、`git-ai/tests/integration/pending_ai_edit_suppression.rs`、`git-ai/docs/design-doc/git-ai看板方案.md` | `AI Edited` 后 IDE 保存 / 文件监听触发的 `known_human` 是正常竞态；1 秒内仍拒绝，30 秒内 recent AI save 只对真实 changed lines 写 `h_*`，已有 AI 行保持 AI，用户后续手工补充的行仍能计入人工 |
 | 2.44 | commit 后自动更新先让本次 commit 上传落地 | `git-ai/src/commands/git_handlers.rs`、`git-ai/src/integration/upload_stats.rs`、`git-ai/docs/design-doc/git-ai看板方案.md` | `git commit` 成功后先 spawn fallback `upload-stats --wait-for-authorship-note-ms 5000 --skip-if-already-uploaded --acquire-activity-lock-before-stats`，再调度后台自更新；自动更新功能不受影响，但不会先重启 / 替换 runtime 导致远程看板看不到本次 commit |
+| 2.45 | 自动上传身份解析支持工作区 `.mcp.json` / `mcpServers` | `git-ai/src/integration/ide_mcp.rs`、`git-ai/docs/design-doc/git-ai看板方案.md`、`git-ai/docs/design-doc/获取x-user-id实现方案.md` | 从仓库根向父级工作区查找 `.mcp.json` / `.vscode/mcp.json`，并同时解析顶层 `servers` 与 `mcpServers`；修复徐建丰 2026-06-25 这类 HTTP 200 已上传但 `hasUserId=false/userIdSource=missing`，导致看板按人/部门维度查不到自动提交记录的问题 |
+| 2.46 | Windows launcher git proxy 与 git-ai 入口强制同步 | `git-ai/install.ps1`、`git-ai/src/commands/install_hooks.rs`、`git-ai/tests/windows_script_checks.rs`、`git-ai/docs/design-doc/git-ai看板方案.md` | 安装时同时刷新 `.git-ai\launcher\git.exe` 与 `.git-ai\bin\git.exe`，PATH 继续优先 launcher；`git-ai install-hooks` 通过新版 `git-ai.exe` 运行时也会覆盖同目录旧 `git.exe`。修复黄芳 2026-06-26 这类 `git-ai.exe` 已是 2.2.46、但 commit 仍由旧 `launcher\git.exe` 2.2.44 拦截，导致没有 post-commit/upload 事件的问题 |
 
 ### Phase 3（2-3 天）：Code Review 自动上传
 

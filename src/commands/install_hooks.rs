@@ -258,6 +258,24 @@ fn cleanup_daemon_trace2(dry_run: bool) -> Result<(), GitAiError> {
 }
 
 #[cfg(windows)]
+fn sync_windows_git_proxy_entrypoint(
+    git_ai_exe: &Path,
+    git_proxy: &Path,
+    refresh_existing: bool,
+) -> Result<(), GitAiError> {
+    if !git_ai_exe.exists() {
+        return Ok(());
+    }
+
+    if git_proxy.exists() && !refresh_existing {
+        return Ok(());
+    }
+
+    fs::copy(git_ai_exe, git_proxy)?;
+    Ok(())
+}
+
+#[cfg(windows)]
 fn repair_git_proxy_entrypoint(dry_run: bool) -> Result<(), GitAiError> {
     if dry_run {
         return Ok(());
@@ -282,12 +300,8 @@ fn repair_git_proxy_entrypoint(dry_run: bool) -> Result<(), GitAiError> {
 
     let git_ai_exe = install_dir.join("git-ai.exe");
     let git_proxy = install_dir.join("git.exe");
-    if !git_ai_exe.exists() || git_proxy.exists() {
-        return Ok(());
-    }
-
-    fs::copy(&git_ai_exe, &git_proxy)?;
-    Ok(())
+    let refresh_existing = current_name.eq_ignore_ascii_case("git-ai.exe");
+    sync_windows_git_proxy_entrypoint(&git_ai_exe, &git_proxy, refresh_existing)
 }
 
 #[cfg(unix)]
@@ -1237,6 +1251,34 @@ mod tests {
         {
             std::os::unix::fs::symlink(git_path, install_dir.join("git-og")).unwrap();
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_git_proxy_entrypoint_refreshes_existing_stale_proxy() {
+        let temp = tempdir().unwrap();
+        let git_ai_exe = temp.path().join("git-ai.exe");
+        let git_proxy = temp.path().join("git.exe");
+        fs::write(&git_ai_exe, b"new runtime").unwrap();
+        fs::write(&git_proxy, b"old runtime").unwrap();
+
+        sync_windows_git_proxy_entrypoint(&git_ai_exe, &git_proxy, true).unwrap();
+
+        assert_eq!(fs::read(&git_proxy).unwrap(), b"new runtime");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_git_proxy_entrypoint_leaves_existing_proxy_when_not_refreshing() {
+        let temp = tempdir().unwrap();
+        let git_ai_exe = temp.path().join("git-ai.exe");
+        let git_proxy = temp.path().join("git.exe");
+        fs::write(&git_ai_exe, b"new runtime").unwrap();
+        fs::write(&git_proxy, b"old runtime").unwrap();
+
+        sync_windows_git_proxy_entrypoint(&git_ai_exe, &git_proxy, false).unwrap();
+
+        assert_eq!(fs::read(&git_proxy).unwrap(), b"old runtime");
     }
 
     #[test]

@@ -27,23 +27,27 @@
 1. 强制覆盖环境变量，例如 `X_USER_ID_OVERRIDE`
 2. 显式指定 VS Code MCP 文件的环境变量，例如 `VSCODE_MCP_CONFIG_PATH`
 3. 显式指定 IntelliJ MCP 文件的环境变量，例如 `IDEA_MCP_CONFIG_PATH`
-4. 当前项目下的 `.vscode/mcp.json`
-5. `%APPDATA%\Code\User\mcp.json`
-6. `%APPDATA%\Code - Insiders\User\mcp.json`
-7. `%APPDATA%\github-copilot\intellij\mcp.json`
-8. `%LOCALAPPDATA%\github-copilot\intellij\mcp.json`
+4. 当前 Git 仓库根目录及父级工作区的 `.mcp.json`
+5. 当前 Git 仓库根目录及父级工作区的 `.vscode/mcp.json`
+6. `%APPDATA%\Code\User\mcp.json`
+7. `%APPDATA%\Code - Insiders\User\mcp.json`
+8. `%APPDATA%\github-copilot\intellij\mcp.json`
+9. `%LOCALAPPDATA%\github-copilot\intellij\mcp.json`
 
 说明：
 
 1. 上面的环境变量名只是实现示例，不是固定要求
 2. 实际项目可以按团队规范改成自己的变量名
+3. 多项目工作区中，用户常把 MCP 配在父级 `.mcp.json`；子仓库提交时也应从仓库根向父级逐层查找，最近目录优先
 
 ## 支持的 MCP 结构
 
-脚本同时支持两种常见结构：
+脚本同时支持 `servers` 和 `mcpServers` 两种顶层 key，并在每个 server 内读取两种 header 位置：
 
 1. `servers.<name>.requestInit.headers.X-USER-ID`
 2. `servers.<name>.headers.X-USER-ID`
+3. `mcpServers.<name>.requestInit.headers.X-USER-ID`
+4. `mcpServers.<name>.headers.X-USER-ID`
 
 示例一：
 
@@ -71,6 +75,22 @@
       "url": "http://localhost:9810/mcp",
       "headers": {
         "X-USER-ID": 108
+      }
+    }
+  }
+}
+```
+
+示例三：
+
+```json
+{
+  "mcpServers": {
+    "codereview-mcp-server": {
+      "url": "http://mcppage.ruijie.com.cn:9810/mcp",
+      "type": "http",
+      "headers": {
+        "X-USER-ID": "108"
       }
     }
   }
@@ -108,8 +128,8 @@
 ```json
 {
   "XUserId": "108",
-  "Source": "repo:.vscode/mcp.json",
-  "Path": "D:\\project\\.vscode\\mcp.json",
+  "Source": "workspace:.mcp.json",
+  "Path": "D:\\project\\.mcp.json",
   "ServerName": "codereview-mcp-server"
 }
 ```

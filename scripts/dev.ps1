@@ -7,10 +7,15 @@ if ($args.Count -gt 0 -and $args[0] -eq '--release') {
     $BuildType = 'release'
 }
 
-$InstallDir = Join-Path $HOME '.git-ai\bin'
+$GitAiRoot = Join-Path $HOME '.git-ai'
+$LauncherDir = Join-Path $GitAiRoot 'launcher'
+$InstallDir = Join-Path $GitAiRoot 'bin'
 $ConfigPath = Join-Path $HOME '.git-ai\config.json'
 $GitAiExe = Join-Path $InstallDir 'git-ai.exe'
 $GitShim = Join-Path $InstallDir 'git.exe'
+$LauncherGitAiExe = Join-Path $LauncherDir 'git-ai.exe'
+$LauncherGitShim = Join-Path $LauncherDir 'git.exe'
+$CurrentExePointer = Join-Path $GitAiRoot 'current-exe'
 
 function Test-FileAvailable {
     param([Parameter(Mandatory)][string]$Path)
@@ -126,6 +131,18 @@ if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 # Replace git-ai.exe, stopping the daemon first if it is running
 Write-Host "Installing binary to $GitAiExe..."
 Install-Binary -SrcPath "target\$BuildType\git-ai.exe" -DstPath $GitAiExe -GitAiExe $GitAiExe
+
+# Keep the authoritative launcher entrypoints in sync. Hooks and current-exe
+# point at the launcher path, so leaving it stale makes local dev builds appear
+# installed while agents still execute the previous release.
+New-Item -ItemType Directory -Force -Path $LauncherDir | Out-Null
+Write-Host "Installing launcher binary to $LauncherGitAiExe..."
+Install-Binary -SrcPath $GitAiExe -DstPath $LauncherGitAiExe -GitAiExe $GitAiExe
+if (Test-Path -LiteralPath $LauncherGitShim) {
+    Write-Host 'Updating launcher git.exe shim...'
+    Install-Binary -SrcPath $GitAiExe -DstPath $LauncherGitShim -GitAiExe $GitAiExe
+}
+[System.IO.File]::WriteAllText($CurrentExePointer, $LauncherGitAiExe, [System.Text.Encoding]::UTF8)
 
 # Keep the git.exe shim in sync with the updated binary
 if (Test-Path -LiteralPath $GitShim) {

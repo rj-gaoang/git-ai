@@ -276,6 +276,20 @@ pub(super) fn parse_vscode_native_hooks(
         external_parent_session_id: None,
     });
 
+    if is_bash && is_read_only_terminal_tool_input(tool_input) {
+        crate::diagnostics::append_debug_event(
+            "checkpoint_copilot_terminal_read_only_skipped",
+            serde_json::json!({
+                "tool": "github-copilot",
+                "hookEventName": hook_event_name,
+                "traceId": trace_id,
+                "toolName": tool_name,
+                "toolUseId": tool_use_id,
+            }),
+        );
+        return Ok(vec![]);
+    }
+
     if hook_event_name == "PreToolUse" {
         if is_bash {
             return Ok(vec![ParsedHookEvent::PreBashCall(PreBashCall {
@@ -480,6 +494,86 @@ fn classify_copilot_tool(tool_name: &str) -> ToolClass {
         }
         _ => ToolClass::Skip,
     }
+}
+
+fn is_read_only_terminal_tool_input(tool_input: Option<&serde_json::Value>) -> bool {
+    let Some(command) = terminal_command_from_tool_input(tool_input) else {
+        return false;
+    };
+    let command = command.trim();
+    if command.is_empty() {
+        return false;
+    }
+
+    let lower = command.to_ascii_lowercase();
+    let mutating_markers = [
+        "apply_patch",
+        "set-content",
+        "add-content",
+        "out-file",
+        "new-item",
+        "remove-item",
+        "move-item",
+        "copy-item",
+        "rename-item",
+        "[system.io.file]::write",
+        "::writeall",
+        " >",
+        ">>",
+        "git add",
+        "git commit",
+        "git checkout",
+        "git switch",
+        "git reset",
+        "git clean",
+        "git merge",
+        "git rebase",
+        "cargo ",
+        "npm ",
+        "pnpm ",
+        "yarn ",
+        "mvn ",
+        "gradle",
+        "task ",
+    ];
+    if mutating_markers.iter().any(|marker| lower.contains(marker)) {
+        return false;
+    }
+
+    let read_only_starts = [
+        "get-content",
+        "select-string",
+        "get-childitem",
+        "get-item",
+        "test-path",
+        "write-output",
+        "format-table",
+        "format-list",
+        "convertfrom-json",
+        "where-object",
+        "git status",
+        "git diff",
+        "git log",
+        "git show",
+        "git rev-parse",
+        "git config --get",
+        "git config --global --get",
+        "rg ",
+        "grep ",
+        "type ",
+        "dir",
+        "ls",
+        "cat ",
+    ];
+    let trimmed_lower = lower.trim_start();
+    read_only_starts
+        .iter()
+        .any(|prefix| trimmed_lower.starts_with(prefix))
+}
+
+fn terminal_command_from_tool_input(tool_input: Option<&serde_json::Value>) -> Option<&str> {
+    let value = tool_input?;
+    parse::optional_str_multi(value, &["command", "text", "script"])
 }
 
 /// Extract file paths from apply_patch text format. Called from the shared
@@ -706,6 +800,43 @@ mod tests {
     }
 
     #[test]
+    fn test_copilot_native_read_only_terminal_pre_is_skipped() {
+        let input = json!({
+            "hook_event_name": "PreToolUse",
+            "cwd": "/home/user/project",
+            "tool_name": "run_in_terminal",
+            "session_id": "sess-456",
+            "tool_use_id": "tu-readonly",
+            "tool_input": {"command": "Get-Content .\\logs\\debug.jsonl -Tail 20"},
+            "transcript_path": "/home/user/.vscode/data/github.copilot-chat/transcripts/sess-456.json"
+        })
+        .to_string();
+        let events = GithubCopilotPreset
+            .parse(&input, "t_test123456789a")
+            .unwrap();
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn test_copilot_native_mutating_terminal_pre_is_tracked() {
+        let input = json!({
+            "hook_event_name": "PreToolUse",
+            "cwd": "/home/user/project",
+            "tool_name": "run_in_terminal",
+            "session_id": "sess-456",
+            "tool_use_id": "tu-write",
+            "tool_input": {"command": "Set-Content .\\src\\main.rs 'changed'"},
+            "transcript_path": "/home/user/.vscode/data/github.copilot-chat/transcripts/sess-456.json"
+        })
+        .to_string();
+        let events = GithubCopilotPreset
+            .parse(&input, "t_test123456789a")
+            .unwrap();
+        assert_eq!(events.len(), 1);
+        assert!(matches!(events[0], ParsedHookEvent::PreBashCall(_)));
+    }
+
+    #[test]
     fn test_copilot_native_post_bash_call() {
         let input = json!({
             "hook_event_name": "PostToolUse",
@@ -727,6 +858,24 @@ mod tests {
             }
             _ => panic!("Expected PostBashCall"),
         }
+    }
+
+    #[test]
+    fn test_copilot_native_read_only_terminal_post_is_skipped() {
+        let input = json!({
+            "hook_event_name": "PostToolUse",
+            "cwd": "/home/user/project",
+            "tool_name": "run_in_terminal",
+            "session_id": "sess-456",
+            "tool_use_id": "tu-readonly",
+            "tool_input": {"command": "Select-String -Path .\\logs\\debug.jsonl -Pattern checkpoint"},
+            "transcript_path": "/home/user/.vscode/data/github.copilot-chat/transcripts/sess-456.json"
+        })
+        .to_string();
+        let events = GithubCopilotPreset
+            .parse(&input, "t_test123456789a")
+            .unwrap();
+        assert!(events.is_empty());
     }
 
     #[test]

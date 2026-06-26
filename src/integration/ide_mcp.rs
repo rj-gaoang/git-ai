@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 const MCP_FILENAME: &str = "mcp.json";
+const WORKSPACE_MCP_FILENAME: &str = ".mcp.json";
 const USER_ID_ENV_VAR: &str = "GIT_AI_REPORT_REMOTE_USER_ID";
 const VSCODE_MCP_PATH_ENV_VAR: &str = "GIT_AI_VSCODE_MCP_CONFIG_PATH";
 const IDEA_MCP_PATH_ENV_VAR: &str = "GIT_AI_IDEA_MCP_CONFIG_PATH";
@@ -49,11 +50,7 @@ fn build_candidate_paths(
         push_unique(&mut paths, &mut seen, PathBuf::from(path));
     }
     if let Some(workdir) = repo_workdir {
-        push_unique(
-            &mut paths,
-            &mut seen,
-            workdir.join(".vscode").join(MCP_FILENAME),
-        );
+        push_workspace_mcp_paths(&mut paths, &mut seen, workdir);
     }
 
     #[cfg(windows)]
@@ -137,6 +134,19 @@ fn push_unique(paths: &mut Vec<PathBuf>, seen: &mut HashSet<PathBuf>, path: Path
     }
 }
 
+fn push_workspace_mcp_paths(paths: &mut Vec<PathBuf>, seen: &mut HashSet<PathBuf>, workdir: &Path) {
+    let mut current = Some(workdir);
+    while let Some(dir) = current {
+        if dir.parent().is_none() {
+            break;
+        }
+
+        push_unique(paths, seen, dir.join(WORKSPACE_MCP_FILENAME));
+        push_unique(paths, seen, dir.join(".vscode").join(MCP_FILENAME));
+        current = dir.parent();
+    }
+}
+
 fn read_x_user_id_from_file(path: &Path) -> Option<String> {
     let raw = match fs::read_to_string(path) {
         Ok(raw) => raw,
@@ -166,15 +176,20 @@ fn parse_x_user_id_from_str(raw: &str) -> Option<String> {
 }
 
 fn parse_x_user_id_from_json(root: &Value) -> Option<String> {
-    let servers = root.get("servers")?.as_object()?;
-    let mut candidates = servers
-        .iter()
-        .map(|(name, server)| ServerCandidate {
-            name,
-            server,
-            score: server_score(name, server),
-        })
-        .collect::<Vec<_>>();
+    let mut candidates = Vec::new();
+    for key in ["servers", "mcpServers"] {
+        if let Some(servers) = root.get(key).and_then(Value::as_object) {
+            candidates.extend(servers.iter().map(|(name, server)| ServerCandidate {
+                name,
+                server,
+                score: server_score(name, server),
+            }));
+        }
+    }
+
+    if candidates.is_empty() {
+        return None;
+    }
 
     candidates.sort_by(|left, right| {
         right
@@ -314,6 +329,48 @@ mod tests {
     }
 
     #[test]
+    fn parses_workspace_mcp_servers_headers() {
+        let raw = r#"
+        {
+            "mcpServers": {
+                "codereview-mcp-server": {
+                    "url": "http://mcppage.ruijie.com.cn:9810/mcp",
+                    "type": "http",
+                    "headers": {
+                        "X-USER-ID": "108"
+                    }
+                }
+            }
+        }
+        "#;
+
+        assert_eq!(parse_x_user_id_from_str(raw), Some("108".to_string()));
+    }
+
+    #[test]
+    fn checks_mcp_servers_when_servers_has_no_user_id() {
+        let raw = r#"
+        {
+            "servers": {
+                "generic-server": {
+                    "url": "http://example.com/mcp"
+                }
+            },
+            "mcpServers": {
+                "codereview-mcp-server": {
+                    "url": "http://mcppage.ruijie.com.cn:9810/mcp",
+                    "headers": {
+                        "X-USER-ID": "109"
+                    }
+                }
+            }
+        }
+        "#;
+
+        assert_eq!(parse_x_user_id_from_str(raw), Some("109".to_string()));
+    }
+
+    #[test]
     fn returns_none_for_invalid_json() {
         assert_eq!(parse_x_user_id_from_str("{not-json}"), None);
     }
@@ -335,6 +392,60 @@ mod tests {
     }
 
     #[test]
+    fn resolves_x_user_id_from_workspace_mcp_file() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        fs::write(
+            temp_dir.path().join(WORKSPACE_MCP_FILENAME),
+            r#"{"mcpServers":{"codereview-mcp-server":{"headers":{"X-USER-ID":"108"}}}}"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            resolve_x_user_id_from_mcp_config(Some(temp_dir.path())),
+            Some("108".to_string())
+        );
+    }
+
+    #[test]
+    fn resolves_x_user_id_from_parent_workspace_mcp_file() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let repo_dir = temp_dir.path().join("repo");
+        fs::create_dir(&repo_dir).unwrap();
+        fs::write(
+            temp_dir.path().join(WORKSPACE_MCP_FILENAME),
+            r#"{"mcpServers":{"codereview-mcp-server":{"headers":{"X-USER-ID":"parent-108"}}}}"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            resolve_x_user_id_from_mcp_config(Some(&repo_dir)),
+            Some("parent-108".to_string())
+        );
+    }
+
+    #[test]
+    fn prefers_nearest_workspace_mcp_file() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let repo_dir = temp_dir.path().join("repo");
+        fs::create_dir(&repo_dir).unwrap();
+        fs::write(
+            temp_dir.path().join(WORKSPACE_MCP_FILENAME),
+            r#"{"mcpServers":{"codereview-mcp-server":{"headers":{"X-USER-ID":"parent-108"}}}}"#,
+        )
+        .unwrap();
+        fs::write(
+            repo_dir.join(WORKSPACE_MCP_FILENAME),
+            r#"{"mcpServers":{"codereview-mcp-server":{"headers":{"X-USER-ID":"repo-109"}}}}"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            resolve_x_user_id_from_mcp_config(Some(&repo_dir)),
+            Some("repo-109".to_string())
+        );
+    }
+
+    #[test]
     fn builds_candidate_paths_in_priority_order() {
         let repo_root = Path::new("/repo/root");
         let paths = build_candidate_paths(
@@ -348,6 +459,9 @@ mod tests {
 
         assert_eq!(paths[0], PathBuf::from("/overrides/vscode-mcp.json"));
         assert_eq!(paths[1], PathBuf::from("/overrides/idea-mcp.json"));
-        assert_eq!(paths[2], PathBuf::from("/repo/root/.vscode/mcp.json"));
+        assert_eq!(paths[2], PathBuf::from("/repo/root/.mcp.json"));
+        assert_eq!(paths[3], PathBuf::from("/repo/root/.vscode/mcp.json"));
+        assert_eq!(paths[4], PathBuf::from("/repo/.mcp.json"));
+        assert_eq!(paths[5], PathBuf::from("/repo/.vscode/mcp.json"));
     }
 }
