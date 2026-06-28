@@ -142,31 +142,21 @@ Speckit 是团队使用的「规范驱动开发」框架，通过 `.specify/` �
 | 18:42:55-18:43:12，`rj-ltc-web` 只有 IDE 触发的 `reflog` / `tag -l` 等 git 查询事件，没有 commit/post-commit/upload | 第二次提交后同样只被后续 Git 查询观察到，没有触发 post-commit 收口 |
 | 同一日志中 `ltc-platform`、`codereivew-upload-mcp` 有 `upload_stats_succeeded(statusCode=200)`，并且 `upload_stats_ready` 显示 `hasUserId=true/userIdSource=ide_mcp_config` | MCP 用户身份、HTTP 上传接口和服务端可达性不是本次根因 |
 
-根因是客户端缺少“观察到 HEAD/base 已推进后的 authorship note 补偿”。这两次 `rj-ltc-web` commit 自身绕过了 git-ai 的正常 post-commit/hook/proxy 收口，因此没有生成 `refs/notes/ai`，也就没有进入自动上传。旧代码只有 push 前的 `backfill_missing_authorship_before_push` 兜底；如果这个仓库后续没有被 git-ai 捕获到 `push`，即使后续 checkpoint 已经把 `baseCommit` 指向漏处理 commit，或 IDE 的 `tag/reflog` 已经证明 HEAD 前进，客户端也不会把仍可用的父 working log 物化成 authorship note 并上传。
+已能证明的直接原因是：这两次 `rj-ltc-web` commit 创建动作没有进入 git-ai 的正常 `command=commit` 代理收口，因此没有生成 `refs/notes/ai`，也就没有进入自动上传。旧代码只有目标仓库 push 前的 `backfill_missing_authorship_before_push` 兜底；现场 18:05 附近的 push/backfill 是 `D:\develop\ltc_project\ltc-platform`，不是 `rj-ltc-web`，所以不能覆盖目标仓库这两次漏收口提交。
 
-排除项：不是 `D:\rj-ltc\rj-ltc-web` 本地 clone 状态导致的判断；不是 MCP / `X-USER-ID` 缺失；不是 HTTP / 后端失败；不是 Copilot checkpoint 完全失效；也不是 2.2.44 / 2.2.46 launcher 新旧混跑问题。本次坏点在“commit 绕过 post-commit 后，非 push 场景没有安全补偿”。
+现有日志不能证明“为什么 IDE commit 没进入 git-ai wrapper”的具体机制。git-ai 只能记录已经进入 `C:\Users\admin\.git-ai\launcher\git.exe` 的进程；如果 IDE 使用内置 Git/JGit/libgit2、配置了未包装的 git.exe，或其他工具直接创建 commit，当前日志不会留下该创建进程的 argv/父进程/真实路径。后续要定位这一层根因，需要检查 IDE Git executable 配置，或新增安装/运行诊断去捕获未来 commit 使用的 Git 路径。
 
-本次代码级修改：
+排除项：不是 `D:\rj-ltc\rj-ltc-web` 本地 clone 状态导致的判断；不是 MCP / `X-USER-ID` 缺失；不是 HTTP / 后端失败；不是 Copilot checkpoint 完全失效；也不是 2.2.44 / 2.2.46 launcher 新旧混跑问题。本次坏点在“commit 创建没有进入 git-ai commit 收口”；具体绕过原因仍需额外诊断确认。
 
-| 文件 | 修改点 | 影响 |
-|------|--------|------|
-| `src/git/sync_authorship.rs` | 新增 `backfill_missing_authorship_for_observed_commit(...)` 和 `backfill_missing_authorship_from_observed_head(...)` | 当后续 checkpoint base 或 git 命令观察到漏处理 commit/HEAD 时，若该 commit 缺 authorship note 且父 working log 仍有 checkpoint / INITIAL 证据，则调用现有 `post_commit_with_final_state(...)` 物化 note、计算 stats 并走原有上传分发 |
-| `src/git/sync_authorship.rs` | 新增 `commit_has_materializable_parent_state(...)` 审计边界 | 没有本地 checkpoint / INITIAL 证据的 raw commit 仍保持无 note / unknown，不凭空改成 AI 或人工 |
-| `src/daemon.rs` | `apply_checkpoint_side_effect(...)` 在写入新 checkpoint 前，对 `resolved.base_commit` 做 observed-base backfill | 覆盖 18:05 形态：后续 checkpoint 的 `baseCommit` 已指向漏处理 commit 时，先补该 commit 的 note/upload |
-| `src/daemon.rs` | 普通 daemon-observed git 命令完成后，对当前 HEAD 做 observed-head backfill | 覆盖 18:42 形态：后续 IDE `tag -l` 等命令观察到 HEAD 已推进时，也能补偿漏处理 commit |
-| `tests/integration/post_commit_unit.rs` | 新增 observed commit/base/head 回归测试和无证据跳过测试 | 锁定有 AI checkpoint 的 raw commit 可被补偿；无本地证据的 raw commit 不会被误归因 |
+处理决策：不引入“后续 checkpoint / 普通 Git 查询观察到新 HEAD 后自动补 note/upload”的补救措施。该类补救已按用户要求从 `src/daemon.rs`、`src/git/sync_authorship.rs` 和相关测试中移除，避免在用户写代码或 IDE 查询过程中触发额外归因物化/上传。保留现有正常 post-commit、wrapper fallback upload、push 前 backfill 等既有链路。
 
-历史数据口径：客户端修复保证后续同类“commit 绕过 post-commit，但后续 checkpoint 或 IDE Git 查询仍观察到新 base/HEAD”的场景会自动补出 authorship note 并进入上传。已经发生且远端缺失的历史记录不会因为客户端升级自动出现在看板；如果本地仍保留目标 commit 的父 working log / checkpoint 证据，可以在升级后通过显式 repair/backfill 或重新触发可观察命令补偿，再执行上传。若本地证据已经被清理，则不能凭空恢复 AI / 人工归因，只能按 `hasAuthorshipNote=false` / `unknownAdditions` 的审计口径处理。
+历史数据口径：已经发生且远端缺失的历史记录不会因为客户端升级自动出现在看板。若需要修复历史数据，必须走显式、可审计的 repair/backfill 操作，并以本地仍保留的 checkpoint / working log / authorship note 证据为准；若本地证据已经被清理，则不能凭空恢复 AI / 人工归因，只能按 `hasAuthorshipNote=false` / `unknownAdditions` 的审计口径处理。
 
 验证记录：
 
 | 命令 | 结论 |
 |------|------|
-| `cargo test observed_commit_backfill_materializes_ai_checkpoint_after_raw_commit --test integration -- --nocapture` | 通过，raw commit 有 AI checkpoint 证据时可直接 materialize note，并计算为 AI |
-| `cargo test checkpoint_base_backfills_missing_note_after_raw_commit --test integration -- --nocapture` | 通过，后续 checkpoint 的 baseCommit 指向漏处理 commit 时会自动补 note |
-| `cargo test observed_git_command_backfills_missing_note_after_raw_commit --test integration -- --nocapture` | 通过，后续 daemon-observed `tag -l` 可触发 HEAD 补偿 |
-| `cargo test observed_head_backfill_skips_raw_commit_without_local_evidence --test integration -- --nocapture` | 通过，无 checkpoint / INITIAL 证据时不会补造归因 |
-| `cargo check --tests`、`cargo fmt --check`、`git diff --check` | 通过；仅保留既有 dead_code warning |
+| `cargo fmt --check`、`git diff --check`、`cargo check --tests` | 通过；仅保留既有 dead_code warning |
 
 ### 2026-06-28：锦召 `ai-rag-doc` / `ai-rag-service-python` 全 AI 未识别且被算成人工
 
