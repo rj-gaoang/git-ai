@@ -68,6 +68,25 @@ Speckit 是团队使用的「规范驱动开发」框架，通过 `.specify/` �
 | `cargo test --test windows_script_checks windows_install_script_refreshes_wrapper_for_existing_users -- --nocapture` | 通过 |
 | `cargo test --test windows_script_checks windows_install_script_writes_current_exe_pointer_to_launcher -- --nocapture` | 通过 |
 
+### 2026-06-26：龙宇 6/26 提交已上传但全部 unknown
+
+现场反馈为“用户在 2026-06-26 提交的代码都没有归因，既没有识别出来是 AI 写的，也没有识别出来是人工写的”。本次先按用户要求清理排查样本：`logs/龙宇-20260626.jsonl` 已删除 `2026-06-26` 之前的数据，过滤前备份为 `logs/龙宇-20260626.jsonl.bak-before-20260626-filter`，严格日期二次过滤前备份为 `logs/龙宇-20260626.jsonl.bak-before-20260626-strict-filter`，当前保留 5608 行，时间范围为 `2026-06-26T07:32:53+08:00` 到 `2026-06-26T19:00:01+08:00`。
+
+这次不是“完全没上传”，而是“缺 authorship note 后 fallback 上传了 metadata-only 记录”。当天日志里 5 次 `git commit` 都由旧入口 `C:\Users\admin\.git-ai\launcher\git.exe`、`gitAiVersion=2.2.44` 拦截；第一条 `15:34:27` 的 commit 子进程退出码为 1，没有形成提交。后面 4 条提交成功并触发 fallback upload：
+
+| 时间 | commit | 上传统计 | 判断 |
+|------|--------|----------|------|
+| 15:34:34 | `294d7e29e52efe1a1489d17919777693932f1fee` | `gitDiffAddedLines=2709`、`aiAdditions=0`、`humanAdditions=0`、`unknownAdditions=2709` | `hasAuthorshipNote=false` |
+| 15:55:01 | `d26c5e7a024795d1ab35adee9c5fd502e49b8c72` | `20 / 0 / 0 / 20` | `hasAuthorshipNote=false` |
+| 16:10:45 | `56fb0e623651b0ed836538c03cc6a9cbd1761e3c` | `4 / 0 / 0 / 4` | `hasAuthorshipNote=false` |
+| 16:17:41 | `6bdbce272fbac7f2ea55a1908e9c8403124b7038` | `12 / 0 / 0 / 12` | `hasAuthorshipNote=false` |
+
+关键事件链是：4 次成功 commit 后都有 `post_commit_fallback_upload_spawned(source=wrapper_post_commit)`，随后 `upload_stats_wait_for_authorship_note_finished(foundAuthorshipNote=false)`，等待约 5 秒仍找不到 `refs/notes/ai` note，于是进入 `upload_stats_manual_missing_note_stats_computed`，最终 `upload_stats_succeeded(statusCode=200)`。同一日志里 `post_commit_started=0`、`post_commit_working_log_loaded=0`、`post_commit_authorship_note_written=0`，说明 daemon/post-commit 从未把 checkpoint 工作日志收口成 authorship note。`upload_stats_ready` 还显示 `hasUserId=true/userIdSource=ide_mcp_config`，所以 MCP 用户身份可用；HTTP 200 也排除了远程接口失败。
+
+根因与黄芳场景同属 Windows launcher 入口版本分裂，但表现不同：黄芳是旧 `launcher\git.exe` 让提交完全没有进入新版上传链路；龙宇这里旧 `launcher\git.exe` 2.2.44 拦截 commit，同时新版 `launcher\git-ai.exe` / daemon / `upload-stats` 2.2.46 仍在运行，形成新旧 runtime 混跑。checkpoint 事件本身存在，但提交收口依赖的 post-commit authorship note 没生成；fallback upload 按审计语义不能把缺 note 的新增行硬判为 AI 或人工，只能把 4 个 commit 作为 metadata-only 上传为 `unknownAdditions`。排除项：不是 MCP 配置问题、不是 HTTP/后端失败、不是 stats 计算错误，也不是完全没有 Copilot/checkpoint 事件。
+
+修复口径继续沿用本节上方的 2.46/2.47 Windows 入口同步修复：安装时把 `.git-ai\launcher\git.exe`、`.git-ai\bin\git.exe` 都从权威 `.git-ai\launcher\git-ai.exe` 同步；通过新版 `git-ai.exe install-hooks` 运行时，也会刷新同目录旧 `git.exe`。龙宇机器只要升级到包含该修复的版本并重新执行安装 / `git-ai install-hooks`，后续 commit 会避免 `git.exe` 2.2.44 与 `git-ai.exe` 2.2.46 混跑。历史 4 条 metadata-only 远程记录不会被客户端自动改写；只有在本地仍能找到对应 `refs/notes/ai` 时，才可以显式执行 `git-ai upload-stats <sha> --source manual` 重传，否则不能凭空恢复 AI / 人工归因。
+
 ### 2026-06-26：徐建丰 6/25-6/26 看板按人/部门缺记录排查
 
 现场反馈为“6 月 25 日、6 月 26 日提交的代码归因没有上传到远程看板”。本次排查先把“是否发起上传”和“看板是否能按用户/部门归属展示”拆开：
@@ -109,6 +128,89 @@ Speckit 是团队使用的「规范驱动开发」框架，通过 `.specify/` �
 |------|------|
 | `cargo fmt --check` | 通过 |
 | `cargo test --lib integration::ide_mcp -- --nocapture` | 曾在父级工作区查找补充前通过；补充父级查找后本机 Cargo 进程在 5 分钟超时，未拿到最终测试输出，需在空闲环境重跑 |
+
+### 2026-06-29：龙宇 6/27 `rj-ltc-web` 提交绕过 post-commit 后未传后台
+
+现场反馈为“`D:\rj-ltc\rj-ltc-web` 当前分支下，2026-06-27 18:05 / 18:42 有两次 commit 记录，但代码归因未上传”。本次排查以 `logs/龙宇-20260628.jsonl` 为现场证据，不以用户本机另一个 clone `D:\rj-ltc\rj-ltc-web` 作为根因依据。日志里的真实现场路径是 `D:\develop\ltc_project\rj-ltc-web`，git-ai 版本为 `2.2.47`。
+
+关键证据链：
+
+| 时间 / 证据 | 结论 |
+|------|------|
+| 18:05 附近，`rj-ltc-web` 没有 `command=commit`、`post_commit_started`、`post_commit_stats_computed`、`upload_stats_ready/succeeded/failed` | 目标提交没有进入 git-ai 正常 commit 收口、note 生成和上传链路 |
+| 18:23-18:41 多条 checkpoint 的 `baseCommit=199dfcdac2ec481c47821c7108501cf7c9834208`，且包含 `ai_agent` / `known_human` | HEAD 已经推进到 18:05 的 commit，git-ai 后续确实观察到了这个新 base，也仍在正常采集 AI checkpoint |
+| 18:42:55-18:43:12，`rj-ltc-web` 只有 IDE 触发的 `reflog` / `tag -l` 等 git 查询事件，没有 commit/post-commit/upload | 第二次提交后同样只被后续 Git 查询观察到，没有触发 post-commit 收口 |
+| 同一日志中 `ltc-platform`、`codereivew-upload-mcp` 有 `upload_stats_succeeded(statusCode=200)`，并且 `upload_stats_ready` 显示 `hasUserId=true/userIdSource=ide_mcp_config` | MCP 用户身份、HTTP 上传接口和服务端可达性不是本次根因 |
+
+根因是客户端缺少“观察到 HEAD/base 已推进后的 authorship note 补偿”。这两次 `rj-ltc-web` commit 自身绕过了 git-ai 的正常 post-commit/hook/proxy 收口，因此没有生成 `refs/notes/ai`，也就没有进入自动上传。旧代码只有 push 前的 `backfill_missing_authorship_before_push` 兜底；如果这个仓库后续没有被 git-ai 捕获到 `push`，即使后续 checkpoint 已经把 `baseCommit` 指向漏处理 commit，或 IDE 的 `tag/reflog` 已经证明 HEAD 前进，客户端也不会把仍可用的父 working log 物化成 authorship note 并上传。
+
+排除项：不是 `D:\rj-ltc\rj-ltc-web` 本地 clone 状态导致的判断；不是 MCP / `X-USER-ID` 缺失；不是 HTTP / 后端失败；不是 Copilot checkpoint 完全失效；也不是 2.2.44 / 2.2.46 launcher 新旧混跑问题。本次坏点在“commit 绕过 post-commit 后，非 push 场景没有安全补偿”。
+
+本次代码级修改：
+
+| 文件 | 修改点 | 影响 |
+|------|--------|------|
+| `src/git/sync_authorship.rs` | 新增 `backfill_missing_authorship_for_observed_commit(...)` 和 `backfill_missing_authorship_from_observed_head(...)` | 当后续 checkpoint base 或 git 命令观察到漏处理 commit/HEAD 时，若该 commit 缺 authorship note 且父 working log 仍有 checkpoint / INITIAL 证据，则调用现有 `post_commit_with_final_state(...)` 物化 note、计算 stats 并走原有上传分发 |
+| `src/git/sync_authorship.rs` | 新增 `commit_has_materializable_parent_state(...)` 审计边界 | 没有本地 checkpoint / INITIAL 证据的 raw commit 仍保持无 note / unknown，不凭空改成 AI 或人工 |
+| `src/daemon.rs` | `apply_checkpoint_side_effect(...)` 在写入新 checkpoint 前，对 `resolved.base_commit` 做 observed-base backfill | 覆盖 18:05 形态：后续 checkpoint 的 `baseCommit` 已指向漏处理 commit 时，先补该 commit 的 note/upload |
+| `src/daemon.rs` | 普通 daemon-observed git 命令完成后，对当前 HEAD 做 observed-head backfill | 覆盖 18:42 形态：后续 IDE `tag -l` 等命令观察到 HEAD 已推进时，也能补偿漏处理 commit |
+| `tests/integration/post_commit_unit.rs` | 新增 observed commit/base/head 回归测试和无证据跳过测试 | 锁定有 AI checkpoint 的 raw commit 可被补偿；无本地证据的 raw commit 不会被误归因 |
+
+历史数据口径：客户端修复保证后续同类“commit 绕过 post-commit，但后续 checkpoint 或 IDE Git 查询仍观察到新 base/HEAD”的场景会自动补出 authorship note 并进入上传。已经发生且远端缺失的历史记录不会因为客户端升级自动出现在看板；如果本地仍保留目标 commit 的父 working log / checkpoint 证据，可以在升级后通过显式 repair/backfill 或重新触发可观察命令补偿，再执行上传。若本地证据已经被清理，则不能凭空恢复 AI / 人工归因，只能按 `hasAuthorshipNote=false` / `unknownAdditions` 的审计口径处理。
+
+验证记录：
+
+| 命令 | 结论 |
+|------|------|
+| `cargo test observed_commit_backfill_materializes_ai_checkpoint_after_raw_commit --test integration -- --nocapture` | 通过，raw commit 有 AI checkpoint 证据时可直接 materialize note，并计算为 AI |
+| `cargo test checkpoint_base_backfills_missing_note_after_raw_commit --test integration -- --nocapture` | 通过，后续 checkpoint 的 baseCommit 指向漏处理 commit 时会自动补 note |
+| `cargo test observed_git_command_backfills_missing_note_after_raw_commit --test integration -- --nocapture` | 通过，后续 daemon-observed `tag -l` 可触发 HEAD 补偿 |
+| `cargo test observed_head_backfill_skips_raw_commit_without_local_evidence --test integration -- --nocapture` | 通过，无 checkpoint / INITIAL 证据时不会补造归因 |
+| `cargo check --tests`、`cargo fmt --check`、`git diff --check` | 通过；仅保留既有 dead_code warning |
+
+### 2026-06-28：锦召 `ai-rag-doc` / `ai-rag-service-python` 全 AI 未识别且被算成人工
+
+现场反馈为 `logs/锦召2026-06-28.jsonl` 中 `2026-06-27 21:51:10` 提交的 `ai-rag-doc`、`2026-06-27 21:53:01` 提交的 `ai-rag-service-python` 都是 AI 生成，但没有识别出 AI，最终还被识别成人工。两个目标 commit 分别为 `ed33b0486bef6703211f81e5e187c7603b87f865` 和 `060e994c634216282316fa4be9112b4e9cb8a6c2`，本机版本为 `2.2.47`。这次坏数不是服务端改写，也不是 HTTP 上传问题：本地 `post_commit_stats_computed` 已经先算错，随后 `wrapper_post_commit` 和 `auto` 两路都以 HTTP 200 正常上传了本地坏数。
+
+关键链路：
+
+| 时间 | 事件 | 结论 |
+|------|------|------|
+| 21:50:55 / 21:52:30 | 两个项目分别 `git add .` | 提交前日志中没有对应项目的 `checkpoint github-copilot` / `checkpointKind=ai_agent` 事件 |
+| 21:51:10 | `ai-rag-doc` commit `ed33b048...` | commit 由 2.2.47 拦截 |
+| 21:51:11 | `ai-rag-doc post_commit_working_log_loaded`：`checkpointKindCounts={human:1}`、`aiCheckpointCount=0` | 当前 base working log 只有 1 个覆盖 10 个文件的 `Human` checkpoint，没有 prompt / session / AI 证据 |
+| 21:51:11 | `ai-rag-doc post_commit_legacy_human_manual_gaps_filled`：`filledLineCount=2995` | 2995 条新增行被写成 commit author 的 `h_*` 人工 |
+| 21:53:01 | `ai-rag-service-python` commit `060e994...` | commit 由 2.2.47 拦截 |
+| 21:53:03 | `ai-rag-service-python post_commit_working_log_loaded`：`checkpointKindCounts={human:1}`、`aiCheckpointCount=0` | 当前 base working log 只有 1 个覆盖 14 个文件的 `Human` checkpoint，没有 AI 证据 |
+| 21:53:03 | `ai-rag-service-python post_commit_legacy_human_manual_gaps_filled`：`filledLineCount=250` | 250 条新增行被写成 commit author 的 `h_*` 人工 |
+| 21:51:13-15 / 21:53:05-06 | `upload_stats_succeeded` | 上传链路正常，只是上传了本地已经算错的人工作数 |
+
+根因分两层：
+
+第一层是“为什么 AI 没识别出来”。这两个目标提交之前，对应子仓库没有任何 Copilot AI checkpoint 进入 post-commit：`aiCheckpointCount=0`、`pathspecCount=0`、`promptCount=0`、`sessionCount=0`、`attestationFileCount=0`。按审计语义，post-commit 没有 AI 证据时不能凭用户事后确认直接写 AI。进一步查看同一份日志的后续 `23:19` 场景，Copilot 在 `D:\idea_workspace\ai-rag` 上层工作区触发 `apply_patch`，同一个 payload 同时包含上层非 Git 仓库文件 `D:/idea_workspace/ai-rag/CHANGELOG.md` 和子仓库 `ai-rag-doc` 内多个文件。旧 `build_checkpoint_files(...)` 遇到任一“找不到 Git 仓库”的路径会直接返回错误，导致同批里本来能归到子仓库的 AI 文件也没有发送 `ai_agent` checkpoint。这解释了该类多项目工作区里“AI 工具事件存在，但目标子仓库没有 AI checkpoint”的可复现漏采路径；21:51 / 21:53 两个提交本身在日志里没有相邻 Copilot 进程，因此不能从现有证据补造历史 AI attestation，只能修客户端后续漏采。
+
+第二层是“为什么没有 AI 证据时又被算成人工”。这两个提交的 working log 中唯一的 `Human` checkpoint 是 replay/backfill 快照类证据，本应带 `git_ai_replay_checkpoint=true`，只能表示提交重放 / 快照兜底，不是强人工证据。但 `src/daemon/checkpoint.rs` 旧逻辑只为 AI、AI pre-edit、降级 KnownHuman 和有效 KnownHuman 保存 metadata，普通 `CheckpointKind::Human` 即使请求带 metadata 也会落成 `agent_metadata=None`。post-commit 侧 `is_plain_legacy_human_checkpoint(...)` 因此把它误判成“plain legacy manual Human”，触发 `fill_legacy_human_manual_gaps_for_commit(...)`，最终分别把 2995 行和 250 行写成 `h_*` 人工。
+
+本次代码级修改：
+
+| 文件 | 修改点 | 影响 |
+|------|--------|------|
+| `src/commands/checkpoint_agent/orchestrator.rs` | `build_checkpoint_files(...)` 对单个无 Git 仓库归属的路径记录 `checkpoint_file_path_skipped(reason=no_git_repository)` 并跳过，不再整批失败 | Copilot 在上层工作区一次 payload 混入 `CHANGELOG.md` 这类非仓库文件时，子仓库内可归属路径仍会生成 AI checkpoint |
+| `src/daemon/checkpoint.rs` | 普通 `CheckpointKind::Human` 在请求 metadata 非空时也保留 `agent_metadata` | `git_ai_replay_checkpoint=true`、AI pre-edit close 等弱/诊断标记不会在落盘时丢失 |
+| `tests/integration/github_copilot_tools.rs` | 新增 `copilot_mixed_workspace_paths_skip_non_repo_and_keep_nested_repo_ai` | 覆盖 `ai-rag` 这类上层工作区 + 子 Git 仓库混合路径的 Copilot 漏采 |
+| `tests/integration/repos/test_repo.rs` | 增加通过 daemon 路径写入带 metadata legacy Human checkpoint 的测试 helper | 回归测试覆盖真实“daemon 入库 -> working log -> post-commit”链路 |
+| `tests/integration/post_commit_unit.rs` | 新增 `replay_human_checkpoint_does_not_fill_manual_gaps` | 锁定 replay Human 不再触发 manual gap-fill；无 AI 证据时新增行保持 `unknown`，而不是误报人工 |
+
+版本与历史数据口径：客户端修复保证后续同类 mixed workspace payload 不再因为一个非仓库路径丢掉整批 AI checkpoint，同时 replay Human 不再因 metadata 丢失被强行补成人工。对于已经上传的 `ed33b048...` 和 `060e994...`，远端历史记录不会自动改变；在当前日志没有 AI checkpoint 证据的前提下，重新生成后也应按审计语义保持 `unknown`，不能仅凭事后确认直接改成 AI。只有能提供对应 Copilot hook / authorship note / checkpoint 证据时，才可做历史 AI 归因修复并重传。
+
+验证记录：
+
+| 命令 | 结论 |
+|------|------|
+| `cargo fmt --check` | 通过 |
+| `cargo test copilot_mixed_workspace_paths_skip_non_repo_and_keep_nested_repo_ai --test integration` | 通过 |
+| `cargo test replay_human_checkpoint_does_not_fill_manual_gaps --test integration` | 通过 |
+| `cargo test test_replace_string_in_file_basic --test integration` | 通过，确认普通 Copilot 文件编辑归因未破坏 |
 
 ### 2026-06-22：闭环同分支 pull 后 AI 代码被保存事件归成人工
 
@@ -2709,6 +2811,8 @@ GitHub Copilot VS Code native hook 的补充说明：当 hook payload 因为脱�
 | 2.44 | commit 后自动更新先让本次 commit 上传落地 | `git-ai/src/commands/git_handlers.rs`、`git-ai/src/integration/upload_stats.rs`、`git-ai/docs/design-doc/git-ai看板方案.md` | `git commit` 成功后先 spawn fallback `upload-stats --wait-for-authorship-note-ms 5000 --skip-if-already-uploaded --acquire-activity-lock-before-stats`，再调度后台自更新；自动更新功能不受影响，但不会先重启 / 替换 runtime 导致远程看板看不到本次 commit |
 | 2.45 | 自动上传身份解析支持工作区 `.mcp.json` / `mcpServers` | `git-ai/src/integration/ide_mcp.rs`、`git-ai/docs/design-doc/git-ai看板方案.md`、`git-ai/docs/design-doc/获取x-user-id实现方案.md` | 从仓库根向父级工作区查找 `.mcp.json` / `.vscode/mcp.json`，并同时解析顶层 `servers` 与 `mcpServers`；修复徐建丰 2026-06-25 这类 HTTP 200 已上传但 `hasUserId=false/userIdSource=missing`，导致看板按人/部门维度查不到自动提交记录的问题 |
 | 2.46 | Windows launcher git proxy 与 git-ai 入口强制同步 | `git-ai/install.ps1`、`git-ai/src/commands/install_hooks.rs`、`git-ai/tests/windows_script_checks.rs`、`git-ai/docs/design-doc/git-ai看板方案.md` | 安装时同时刷新 `.git-ai\launcher\git.exe` 与 `.git-ai\bin\git.exe`，PATH 继续优先 launcher；`git-ai install-hooks` 通过新版 `git-ai.exe` 运行时也会覆盖同目录旧 `git.exe`。修复黄芳 2026-06-26 这类 `git-ai.exe` 已是 2.2.46、但 commit 仍由旧 `launcher\git.exe` 2.2.44 拦截，导致没有 post-commit/upload 事件的问题 |
+| 2.47 | Copilot mixed workspace 漏采与 replay Human 误报人工修复 | `git-ai/src/commands/checkpoint_agent/orchestrator.rs`、`git-ai/src/daemon/checkpoint.rs`、`git-ai/tests/integration/github_copilot_tools.rs`、`git-ai/tests/integration/post_commit_unit.rs`、`git-ai/tests/integration/repos/test_repo.rs`、`git-ai/docs/design-doc/git-ai看板方案.md` | Copilot 在上层工作区一次 payload 混入非 Git 仓库路径时，不再让该路径拖垮同批子仓库 AI checkpoint；synthetic replay / backfill Human checkpoint 保留 `git_ai_replay_checkpoint=true` 等弱证据标记，post-commit 不再把这类快照误判为 plain manual Human 并写入 `h_*`。修复锦召 `ai-rag-doc` / `ai-rag-service-python` 这类“目标提交没有 AI checkpoint、又被 replay Human 误补成人工”的本地坏数链路 |
+| 2.48 | 观察到新 HEAD/base 后补偿漏 post-commit 提交 | `git-ai/src/git/sync_authorship.rs`、`git-ai/src/daemon.rs`、`git-ai/tests/integration/post_commit_unit.rs`、`git-ai/docs/design-doc/git-ai看板方案.md` | 后续 checkpoint 的 `baseCommit` 或 IDE 触发的普通 Git 查询证明 HEAD 已推进时，如果目标 commit 缺 authorship note 且父 working log 仍有 checkpoint / INITIAL 证据，则复用 post-commit 收口生成 note 并进入上传；无本地证据的 raw commit 仍保持 unknown。修复龙宇 2026-06-27 `rj-ltc-web` 18:05 / 18:42 这类 commit 绕过 post-commit 且没有 push 兜底时看板漏传的问题 |
 
 ### Phase 3（2-3 天）：Code Review 自动上传
 

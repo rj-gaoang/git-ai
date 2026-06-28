@@ -20,7 +20,10 @@ use crate::git::rewrite_log::{
     CherryPickAbortEvent, CherryPickCompleteEvent, MergeSquashEvent, RebaseAbortEvent,
     RebaseCompleteEvent, ResetEvent, ResetKind, RewriteLogEvent, StashEvent, StashOperation,
 };
-use crate::git::sync_authorship::{fetch_authorship_notes, fetch_remote_from_args};
+use crate::git::sync_authorship::{
+    backfill_missing_authorship_for_observed_commit,
+    backfill_missing_authorship_from_observed_head, fetch_authorship_notes, fetch_remote_from_args,
+};
 use crate::utils::LockFile;
 use crate::{
     authorship::post_commit::post_commit_with_final_state,
@@ -1436,6 +1439,18 @@ fn apply_checkpoint_side_effect(request: CheckpointRequest) -> Result<(), GitAiE
     let Some(resolved) = resolved else {
         return Ok(());
     };
+
+    if let Err(error) = backfill_missing_authorship_for_observed_commit(
+        &repo,
+        &resolved.base_commit,
+        "checkpoint_base",
+    ) {
+        tracing::debug!(
+            %error,
+            base_commit = %resolved.base_commit,
+            "checkpoint observed-base authorship backfill failed"
+        );
+    }
 
     crate::daemon::checkpoint::execute_resolved_checkpoint_from_daemon(
         &repo,
@@ -7638,6 +7653,36 @@ impl ActorDaemonCoordinator {
                 continue;
             }
             self.trigger_transcript_sweep(trigger);
+        }
+
+        if let Some(worktree) = cmd.worktree.as_ref()
+            && !matches!(
+                cmd.primary_command.as_deref(),
+                Some(
+                    "commit"
+                        | "rebase"
+                        | "merge"
+                        | "cherry-pick"
+                        | "am"
+                        | "stash"
+                        | "reset"
+                        | "pull"
+                        | "push"
+                        | "clone"
+                )
+            )
+            && let Ok(repo) = find_repository_in_path(&worktree.to_string_lossy())
+        {
+            if let Err(error) =
+                backfill_missing_authorship_from_observed_head(&repo, "observed_git_command")
+            {
+                tracing::debug!(
+                    %error,
+                    worktree = %worktree.display(),
+                    command = cmd.primary_command.as_deref().unwrap_or("unknown"),
+                    "observed-head authorship backfill failed"
+                );
+            }
         }
 
         Ok(())

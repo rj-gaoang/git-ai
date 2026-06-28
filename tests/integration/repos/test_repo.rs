@@ -2,7 +2,11 @@
 
 use git_ai::authorship::authorship_log_serialization::AuthorshipLog;
 use git_ai::authorship::stats::CommitStats;
+use git_ai::commands::checkpoint_agent::orchestrator::{
+    BaseCommit, CheckpointFile, CheckpointRequest,
+};
 use git_ai::config::ConfigPatch;
+use git_ai::daemon::checkpoint::{PreparedPathRole, ResolvedCheckpointExecution};
 use git_ai::daemon::{
     ControlRequest, DaemonConfig, local_socket_connects_with_timeout, send_control_request,
     send_control_request_with_timeout,
@@ -2969,6 +2973,87 @@ impl TestRepo {
         repo.storage
             .working_log_for_base_commit(&commit_sha)
             .unwrap()
+    }
+
+    pub fn checkpoint_legacy_human_via_daemon_with_metadata(
+        &self,
+        author: &str,
+        metadata: std::collections::HashMap<String, String>,
+    ) {
+        self.sync_daemon_force();
+
+        let repo = GitAiRepository::find_repository_in_path(self.path.to_str().unwrap())
+            .expect("Failed to find repository");
+        let base_commit = repo
+            .head()
+            .ok()
+            .and_then(|head| head.target().ok())
+            .map(|sha| sha.to_string());
+        let base = base_commit
+            .as_ref()
+            .map(|sha| BaseCommit::Sha(sha.clone()))
+            .unwrap_or(BaseCommit::Initial);
+        let base_commit = base_commit.unwrap_or_else(|| "initial".to_string());
+        let unstaged_diff = self
+            .git(&["diff", "--name-only"])
+            .expect("diff should succeed");
+        let staged_diff = self
+            .git(&["diff", "--cached", "--name-only"])
+            .expect("cached diff should succeed");
+        let untracked = self
+            .git(&["ls-files", "--others", "--exclude-standard"])
+            .expect("ls-files should succeed");
+        let files = unstaged_diff
+            .lines()
+            .chain(staged_diff.lines())
+            .chain(untracked.lines())
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+            .map(str::to_string)
+            .collect::<std::collections::BTreeSet<_>>();
+
+        let mut checkpoint_files = Vec::new();
+        let mut dirty_files = std::collections::HashMap::new();
+        for path in files {
+            let absolute_path = self.path.join(&path);
+            let content = std::fs::read_to_string(&absolute_path).unwrap_or_default();
+            dirty_files.insert(path.clone(), content.clone());
+            checkpoint_files.push(CheckpointFile {
+                path: absolute_path,
+                content: Some(content),
+                repo_work_dir: self.path.clone(),
+                base_commit: base.clone(),
+            });
+        }
+
+        let files = dirty_files.keys().cloned().collect();
+        let request = CheckpointRequest {
+            trace_id: "test-replay-human".to_string(),
+            checkpoint_kind: git_ai::authorship::working_log::CheckpointKind::Human,
+            agent_id: None,
+            files: checkpoint_files,
+            path_role: PreparedPathRole::WillEdit,
+            stream_source: None,
+            metadata,
+        };
+        let resolved = ResolvedCheckpointExecution {
+            base_commit,
+            ts: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis(),
+            files,
+            dirty_files,
+        };
+
+        git_ai::daemon::checkpoint::execute_resolved_checkpoint_from_daemon(
+            &repo,
+            author,
+            git_ai::authorship::working_log::CheckpointKind::Human,
+            request,
+            resolved,
+        )
+        .expect("daemon checkpoint should succeed");
     }
 
     pub fn read_authorship_note(&self, commit_sha: &str) -> Option<String> {

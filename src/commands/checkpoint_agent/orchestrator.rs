@@ -125,12 +125,16 @@ fn build_checkpoint_files(file_paths: &[PathBuf]) -> Result<Vec<CheckpointFile>,
 
         let ctx = {
             let t_discover = std::time::Instant::now();
-            let repo_work_dir = worktree_root_for_path(path).ok_or_else(|| {
-                GitAiError::Generic(format!(
-                    "No git repository found for path: {}",
-                    path.display()
-                ))
-            })?;
+            let Some(repo_work_dir) = worktree_root_for_path(path) else {
+                crate::diagnostics::append_debug_event(
+                    "checkpoint_file_path_skipped",
+                    serde_json::json!({
+                        "path": path.to_string_lossy().replace('\\', "/"),
+                        "reason": "no_git_repository",
+                    }),
+                );
+                continue;
+            };
             if !repo_cache.contains_key(&repo_work_dir) {
                 let t_head = std::time::Instant::now();
                 let base_commit = match read_head_state_for_worktree(&repo_work_dir) {

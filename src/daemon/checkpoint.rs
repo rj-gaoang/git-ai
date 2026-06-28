@@ -415,6 +415,9 @@ fn execute_resolved_checkpoint(
                 );
             }
             checkpoint.agent_metadata = Some(metadata);
+        } else if effective_kind == CheckpointKind::Human && !checkpoint_request.metadata.is_empty()
+        {
+            checkpoint.agent_metadata = Some(checkpoint_request.metadata.clone());
         } else if effective_kind == CheckpointKind::KnownHuman
             && !checkpoint_request.metadata.is_empty()
         {

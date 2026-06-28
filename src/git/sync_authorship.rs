@@ -238,6 +238,153 @@ fn is_missing_remote_notes_ref_error(error: &GitAiError) -> bool {
 const PUSH_NOTES_MAX_ATTEMPTS: usize = 3;
 const PUSH_BACKFILL_MAX_COMMITS: usize = 32;
 
+/// Safety net for commits created outside git-ai's normal post-commit path.
+///
+/// This path is intentionally narrower than push backfill: it only materializes
+/// a missing note when the commit's parent working log already contains
+/// checkpoint or INITIAL evidence. Commits with no local evidence remain
+/// unmaterialized so historical unknowns are not silently turned into AI/human.
+pub fn backfill_missing_authorship_for_observed_commit(
+    repository: &Repository,
+    commit_sha: &str,
+    source: &str,
+) -> Result<bool, GitAiError> {
+    if !is_push_backfill_candidate_oid(commit_sha)
+        || commit_has_authorship_log(repository, commit_sha)
+    {
+        return Ok(false);
+    }
+
+    let author = repository.git_author_identity().formatted_or_unknown();
+    match commit_has_materializable_parent_state(repository, commit_sha) {
+        Ok(true) => {}
+        Ok(false) => return Ok(false),
+        Err(error) => {
+            crate::diagnostics::append_debug_event(
+                "observed_head_authorship_backfill_failed",
+                serde_json::json!({
+                    "repo": repository.canonical_workdir().to_string_lossy().to_string(),
+                    "commitSha": commit_sha,
+                    "source": source,
+                    "error": error.to_string(),
+                }),
+            );
+            return Err(error);
+        }
+    }
+
+    match materialize_missing_commit_authorship(repository, commit_sha, &author) {
+        Ok(true) => {
+            crate::diagnostics::append_debug_event(
+                "observed_head_authorship_backfill_materialized",
+                serde_json::json!({
+                    "repo": repository.canonical_workdir().to_string_lossy().to_string(),
+                    "commitSha": commit_sha,
+                    "source": source,
+                }),
+            );
+            Ok(true)
+        }
+        Ok(false) => Ok(false),
+        Err(error) => {
+            crate::diagnostics::append_debug_event(
+                "observed_head_authorship_backfill_failed",
+                serde_json::json!({
+                    "repo": repository.canonical_workdir().to_string_lossy().to_string(),
+                    "commitSha": commit_sha,
+                    "source": source,
+                    "error": error.to_string(),
+                }),
+            );
+            Err(error)
+        }
+    }
+}
+
+/// Backfill recent missing notes when a later git-ai-observed command proves
+/// the worktree HEAD has advanced, even if the original commit bypassed hooks.
+pub fn backfill_missing_authorship_from_observed_head(
+    repository: &Repository,
+    source: &str,
+) -> Result<usize, GitAiError> {
+    let head = match repository.head().and_then(|head| head.target()) {
+        Ok(head) if is_push_backfill_candidate_oid(&head) => head,
+        _ => return Ok(0),
+    };
+
+    let mut current = head;
+    let mut inspected = 0usize;
+    let mut candidates = Vec::new();
+
+    while inspected < PUSH_BACKFILL_MAX_COMMITS && is_push_backfill_candidate_oid(&current) {
+        inspected += 1;
+
+        if !commit_has_authorship_log(repository, &current)
+            && commit_has_materializable_parent_state(repository, &current)?
+        {
+            candidates.push(current.clone());
+        }
+
+        let commit = repository.find_commit(current.clone())?;
+        if commit.parent_count()? != 1 {
+            break;
+        }
+        current = commit.parent(0)?.id();
+    }
+
+    candidates.reverse();
+    let author = repository.git_author_identity().formatted_or_unknown();
+    let mut materialized = 0usize;
+
+    for commit_sha in candidates {
+        match materialize_missing_commit_authorship(repository, &commit_sha, &author) {
+            Ok(true) => {
+                materialized += 1;
+                crate::diagnostics::append_debug_event(
+                    "observed_head_authorship_backfill_materialized",
+                    serde_json::json!({
+                        "repo": repository.canonical_workdir().to_string_lossy().to_string(),
+                        "commitSha": commit_sha,
+                        "source": source,
+                        "inspectedCount": inspected,
+                        "maxCommits": PUSH_BACKFILL_MAX_COMMITS,
+                    }),
+                );
+            }
+            Ok(false) => {}
+            Err(error) => {
+                crate::diagnostics::append_debug_event(
+                    "observed_head_authorship_backfill_failed",
+                    serde_json::json!({
+                        "repo": repository.canonical_workdir().to_string_lossy().to_string(),
+                        "commitSha": commit_sha,
+                        "source": source,
+                        "inspectedCount": inspected,
+                        "maxCommits": PUSH_BACKFILL_MAX_COMMITS,
+                        "error": error.to_string(),
+                    }),
+                );
+                return Err(error);
+            }
+        }
+    }
+
+    if materialized > 0 {
+        crate::diagnostics::append_debug_event(
+            "observed_head_authorship_backfill_completed",
+            serde_json::json!({
+                "repo": repository.canonical_workdir().to_string_lossy().to_string(),
+                "materializedCount": materialized,
+                "inspectedCount": inspected,
+                "maxCommits": PUSH_BACKFILL_MAX_COMMITS,
+                "source": source,
+            }),
+        );
+    }
+
+    Ok(materialized)
+}
+
 /// Best-effort safety net for commits created outside git-ai's normal commit
 /// capture path. If a later push is captured, materialize authorship/stat notes
 /// for the recent first-parent HEAD chain before syncing notes or returning for
@@ -334,6 +481,24 @@ fn materialize_missing_commit_authorship(
     )?;
 
     Ok(true)
+}
+
+fn commit_has_materializable_parent_state(
+    repository: &Repository,
+    commit_sha: &str,
+) -> Result<bool, GitAiError> {
+    let parent_sha =
+        commit_parent(repository, commit_sha)?.unwrap_or_else(|| "initial".to_string());
+    if !repository.storage.has_working_log(&parent_sha) {
+        return Ok(false);
+    }
+
+    let working_log = repository
+        .storage
+        .working_log_for_base_commit(&parent_sha)?;
+    let has_checkpoints = !working_log.read_all_checkpoints()?.is_empty();
+    let initial = working_log.read_initial_attributions();
+    Ok(has_checkpoints || !initial.files.is_empty())
 }
 
 fn commit_has_authorship_log(repository: &Repository, commit_sha: &str) -> bool {
