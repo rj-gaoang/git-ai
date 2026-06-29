@@ -1134,6 +1134,7 @@ struct UploadStatsArgs {
     ignore_patterns: Vec<String>,
     wait_for_authorship_note_ms: Option<u64>,
     skip_if_authorship_note_found: bool,
+    skip_if_authorship_note_missing_after_wait: bool,
     skip_if_already_uploaded: bool,
     acquire_activity_lock_before_stats: bool,
 }
@@ -1197,6 +1198,26 @@ fn handle_upload_stats(args: &[String]) {
                 skipped_count += 1;
                 println!(
                     "[git-ai] upload-stats: skipped {} source={} reason=authorship_note_found",
+                    short_commit_sha(&resolved_commit),
+                    parsed.source
+                );
+                continue;
+            }
+            if !found_note && parsed.skip_if_authorship_note_missing_after_wait {
+                crate::diagnostics::append_debug_event(
+                    "upload_stats_skipped",
+                    serde_json::json!({
+                        "reason": "authorship_note_missing_after_wait",
+                        "commitSha": resolved_commit,
+                        "commitShort": short_commit_sha(&resolved_commit),
+                        "source": parsed.source,
+                        "repo": repo.canonical_workdir().to_string_lossy().to_string(),
+                        "waitMs": wait_ms,
+                    }),
+                );
+                skipped_count += 1;
+                println!(
+                    "[git-ai] upload-stats: skipped {} source={} reason=authorship_note_missing_after_wait",
                     short_commit_sha(&resolved_commit),
                     parsed.source
                 );
@@ -1402,6 +1423,7 @@ fn parse_upload_stats_args(args: &[String]) -> Result<UploadStatsArgs, String> {
     let mut ignore_patterns = Vec::new();
     let mut wait_for_authorship_note_ms = None;
     let mut skip_if_authorship_note_found = false;
+    let mut skip_if_authorship_note_missing_after_wait = false;
     let mut skip_if_already_uploaded = false;
     let mut acquire_activity_lock_before_stats = false;
     let mut commit_revs = Vec::new();
@@ -1446,6 +1468,10 @@ fn parse_upload_stats_args(args: &[String]) -> Result<UploadStatsArgs, String> {
                 skip_if_authorship_note_found = true;
                 i += 1;
             }
+            "--skip-if-authorship-note-missing-after-wait" => {
+                skip_if_authorship_note_missing_after_wait = true;
+                i += 1;
+            }
             "--skip-if-already-uploaded" => {
                 skip_if_already_uploaded = true;
                 i += 1;
@@ -1475,6 +1501,7 @@ fn parse_upload_stats_args(args: &[String]) -> Result<UploadStatsArgs, String> {
         ignore_patterns,
         wait_for_authorship_note_ms,
         skip_if_authorship_note_found,
+        skip_if_authorship_note_missing_after_wait,
         skip_if_already_uploaded,
         acquire_activity_lock_before_stats,
     })
@@ -1784,6 +1811,7 @@ mod tests {
         assert!(parsed.ignore_patterns.is_empty());
         assert_eq!(parsed.wait_for_authorship_note_ms, None);
         assert!(!parsed.skip_if_authorship_note_found);
+        assert!(!parsed.skip_if_authorship_note_missing_after_wait);
         assert!(!parsed.skip_if_already_uploaded);
         assert!(!parsed.acquire_activity_lock_before_stats);
     }
@@ -1799,6 +1827,7 @@ mod tests {
             "--wait-for-authorship-note-ms".to_string(),
             "1234".to_string(),
             "--skip-if-authorship-note-found".to_string(),
+            "--skip-if-authorship-note-missing-after-wait".to_string(),
             "--skip-if-already-uploaded".to_string(),
             "--acquire-activity-lock-before-stats".to_string(),
             "head~1".to_string(),
@@ -1811,6 +1840,7 @@ mod tests {
         assert_eq!(parsed.ignore_patterns, vec!["Cargo.lock"]);
         assert_eq!(parsed.wait_for_authorship_note_ms, Some(1234));
         assert!(parsed.skip_if_authorship_note_found);
+        assert!(parsed.skip_if_authorship_note_missing_after_wait);
         assert!(parsed.skip_if_already_uploaded);
         assert!(parsed.acquire_activity_lock_before_stats);
         assert_eq!(parsed.commit_revs, vec!["HEAD~1", "abc1234"]);

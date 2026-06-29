@@ -338,6 +338,14 @@ pub fn post_commit_with_final_state(
         &parent_working_log,
         &human_author,
     );
+    fill_observed_human_gaps_for_commit(
+        repo,
+        &parent_sha,
+        &commit_sha,
+        &mut authorship_log,
+        &parent_working_log,
+        &human_author,
+    );
     fill_legacy_human_manual_gaps_for_commit(
         repo,
         &parent_sha,
@@ -881,6 +889,14 @@ fn build_authorship_log_from_working_log(
         &parent_working_log,
         human_author,
     );
+    fill_observed_human_gaps_for_commit(
+        repo,
+        parent_sha,
+        commit_sha,
+        &mut authorship_log,
+        &parent_working_log,
+        human_author,
+    );
     fill_legacy_human_manual_gaps_for_commit(
         repo,
         parent_sha,
@@ -1359,6 +1375,134 @@ fn fill_legacy_human_manual_gaps_for_commit(
             "humanAuthor": human_author,
         }),
     );
+}
+
+fn fill_observed_human_gaps_for_commit(
+    repo: &Repository,
+    parent_sha: &str,
+    commit_sha: &str,
+    authorship_log: &mut AuthorshipLog,
+    checkpoints: &[Checkpoint],
+    human_author: &str,
+) {
+    let human_file_authors = observed_human_gap_fill_file_authors(checkpoints, human_author);
+    if human_file_authors.is_empty() {
+        return;
+    }
+
+    let diff_base = if parent_sha == "initial" {
+        "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+    } else {
+        parent_sha
+    };
+    let human_files: HashSet<String> = human_file_authors.keys().cloned().collect();
+    let Ok(added_lines) = repo.diff_added_lines(diff_base, commit_sha, Some(&human_files)) else {
+        return;
+    };
+    if added_lines.is_empty() {
+        return;
+    }
+
+    let mut hunks_by_author: HashMap<String, HashMap<String, Vec<LineRange>>> = HashMap::new();
+    for (path, lines) in added_lines {
+        if lines.is_empty() {
+            continue;
+        }
+        let Some(author) = human_file_authors.get(&path) else {
+            continue;
+        };
+        hunks_by_author
+            .entry(author.clone())
+            .or_default()
+            .insert(path, LineRange::compress_lines(&lines));
+    }
+    if hunks_by_author.is_empty() {
+        return;
+    }
+
+    let mut filled_line_count = 0usize;
+    let mut author_count = 0usize;
+    for (author, committed_hunks) in hunks_by_author {
+        if committed_hunks.is_empty() {
+            continue;
+        }
+        let human_hash =
+            crate::authorship::authorship_log_serialization::generate_human_short_hash(&author);
+        let filled = crate::authorship::attribution_gap::fill_unattributed_hunks(
+            authorship_log,
+            &committed_hunks,
+            &human_hash,
+        );
+        if filled == 0 {
+            continue;
+        }
+
+        filled_line_count += filled;
+        author_count += 1;
+        authorship_log
+            .metadata
+            .humans
+            .entry(human_hash)
+            .or_insert_with(|| HumanRecord { author });
+    }
+
+    if filled_line_count == 0 {
+        return;
+    }
+
+    crate::diagnostics::append_debug_event(
+        "post_commit_observed_human_gaps_filled",
+        serde_json::json!({
+            "repo": repo.canonical_workdir().to_string_lossy().to_string(),
+            "commitSha": commit_sha,
+            "parentSha": parent_sha,
+            "filledLineCount": filled_line_count,
+            "observedHumanFileCount": human_files.len(),
+            "authorCount": author_count,
+            "humanAuthor": human_author,
+        }),
+    );
+}
+
+fn observed_human_gap_fill_file_authors(
+    checkpoints: &[Checkpoint],
+    human_author: &str,
+) -> HashMap<String, String> {
+    let ai_edited_tool_use_files = collect_ai_edited_tool_use_files(checkpoints);
+    let mut ai_evidence_files = HashSet::new();
+    for checkpoint in checkpoints {
+        for entry in &checkpoint.entries {
+            if checkpoint_entry_has_ai_path_evidence(checkpoint, entry)
+                || checkpoint_has_ai_pre_edit_path_evidence(
+                    checkpoint,
+                    entry,
+                    &ai_edited_tool_use_files,
+                )
+            {
+                ai_evidence_files.insert(entry.file.clone());
+            }
+        }
+    }
+
+    let mut file_authors = HashMap::new();
+    for checkpoint in checkpoints.iter().filter(|checkpoint| {
+        checkpoint.kind == CheckpointKind::KnownHuman
+            || is_plain_legacy_human_checkpoint(checkpoint)
+    }) {
+        let author = if checkpoint.author.trim().is_empty() {
+            human_author.to_string()
+        } else {
+            checkpoint.author.clone()
+        };
+
+        for entry in &checkpoint.entries {
+            if !ai_evidence_files.contains(&entry.file) {
+                file_authors.insert(entry.file.clone(), author.clone());
+            }
+        }
+    }
+
+    file_authors
 }
 
 fn fill_legacy_human_ai_gaps_for_commit(

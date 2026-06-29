@@ -47,7 +47,7 @@ const FALLBACK_UPLOAD_WAIT_FOR_AUTHORSHIP_NOTE_MS: &str = "5000";
 const FALLBACK_UPLOAD_GUARD_ENV: &str = "GIT_AI_POST_COMMIT_FALLBACK_UPLOAD_SPAWNED";
 
 fn post_commit_fallback_upload_args(commit_sha: &str, source: &str) -> Vec<String> {
-    vec![
+    let mut args = vec![
         "upload-stats".to_string(),
         commit_sha.to_string(),
         "--source".to_string(),
@@ -56,7 +56,11 @@ fn post_commit_fallback_upload_args(commit_sha: &str, source: &str) -> Vec<Strin
         FALLBACK_UPLOAD_WAIT_FOR_AUTHORSHIP_NOTE_MS.to_string(),
         "--skip-if-already-uploaded".to_string(),
         "--acquire-activity-lock-before-stats".to_string(),
-    ]
+    ];
+    if source == "wrapper_post_commit" {
+        args.push("--skip-if-authorship-note-missing-after-wait".to_string());
+    }
+    args
 }
 
 #[cfg(unix)]
@@ -623,6 +627,7 @@ mod tests {
         );
 
         assert!(args.contains(&"--wait-for-authorship-note-ms".to_string()));
+        assert!(args.contains(&"--skip-if-authorship-note-missing-after-wait".to_string()));
         assert!(args.contains(&"--skip-if-already-uploaded".to_string()));
         assert!(args.contains(&"--acquire-activity-lock-before-stats".to_string()));
         assert!(

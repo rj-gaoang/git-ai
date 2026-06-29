@@ -33,6 +33,50 @@ Speckit 是团队使用的「规范驱动开发」框架，通过 `.specify/` �
 
 > **文档更新说明（2026-04-24）**：本文最初主要从“Speckit 如何集成 git-ai”的视角写，当前已经补充 `git-ai` 本身的源码改动，包括 `post_commit` 挂接点、原生上传模块、feature flag、环境变量约定、失败降级策略，以及代码级验证结果。也就是说，这份文档现在同时覆盖 Speckit 侧改造和 git-ai 侧改造，不再只是一份脚本集成方案。
 
+### 2026-06-29：过滤 IDE 纯格式化改动，避免格式化行进入 unknown
+
+现场问题：`D:\rj-ltc\rj-ltc-contract-web` 在 `2026-06-29 18:03:28` 的提交 `e892a067b77795063fb5c0d5168f0bf815befb61` 已正常进入 git-ai，也成功上传一次；本地 `post_commit_stats_computed` 已经算出 `gitDiffAddedLines=791`、`aiAdditions=713`、`unknownAdditions=78`。这 78 行全部来自 7 个 `src/views/ContractManagement/ContractParsed*` 文件，diff 内容只是把同一行 `<el-option ... />` 展开成多行，属于 IDE/格式化器产生的纯格式化改动。
+
+本次修复不是把 unknown 硬改成 AI 或人工，而是在 stats 口径中过滤“纯格式化 hunk”：同一个 diff hunk 必须同时有删除和新增，并且删除内容、增加内容去掉所有空白字符后完全一致，才视为 format-only。满足条件的 hunk 不计入 `gitDiffAddedLines` / `gitDiffDeletedLines`，也不会进入 `unknownAdditions`。真实新增字段、方法、属性、字符串内容变化不会被过滤。
+
+代码变更：
+
+| 文件 | 变更点 | 影响 |
+|------|--------|------|
+| `src/authorship/stats.rs` | 新增 `effective_diff_line_stats_by_file` / `effective_diff_line_stats_from_hunks`，统一过滤 ignored file 和 format-only hunk | `git-ai stats`、post-commit 统计、无 note metadata-only 统计都使用过滤后的有效 diff 行数 |
+| `src/integration/upload_stats.rs` | 上传 payload 的 `stats.files[]` 改用同一套过滤后的逐文件 numstat；attestation 交集也使用过滤后的 added lines | commit 总数和逐文件明细保持一致，不再出现总数过滤但文件里仍显示 unknown 的情况 |
+
+现场验证：对 `e892a067` 复算 diff，原始为 `rawAdded=791 rawDeleted=215`；过滤后为 `effectiveAdded=713 effectiveDeleted=202`；被过滤的 `filteredAdded=78` 正好等于原本的 unknown。7 个被过滤文件分别为 `ContractParsed.vue` 12 行、`ContractParsed2.vue` 12 行、`ContractParsedInternational.vue` 12 行、`ContractParsedReview.vue` 12 行、`ContractParsedReviewDialog.vue` 6 行、`ContractParsedReviewDomesticHistoryDetail.vue` 12 行、`ContractParsedReviewStandardDetail.vue` 12 行。
+
+历史数据口径：客户端修复只影响后续重算/上传。已经上传到远程看板的旧记录不会自动变化；如果要让 `e892a067` 的远程记录体现新口径，需要用新版本重新计算并显式重传该 commit。
+
+### 2026-06-29: pasted/manual checkpoint additions and early no-note upload
+
+Incidents:
+
+- Sheng Songtao `ai-cr-manage-service` commit `8374de632504b50be70c837a8a34ca891a8f4cec` at `2026-06-29 18:47:48`: wrapper fallback upload waited 5 seconds, did not see the authorship note, and uploaded `hasAuthorshipNote=false` with `gitDiffAddedLines=7239` and `unknownAdditions=7239`. The post-commit note was written later at `18:48:04`, so the bad unknown count was caused by upload timing, not dashboard math.
+- Sheng Songtao commit `4af8272d3488ae1ef37162ddaff6db8243d0473d` at `2026-06-29 18:57:19`: the note existed, but local stats still had `unknownAdditions=101`. Logs showed mixed AI files plus human/manual copied files. The old manual gap-fill only handled pure legacy-human commits, not mixed AI + manual commits.
+- Longyu `ai-sandbox-project` commit `05b56d83f71f2d0c24c1b016170c09aeb59d9ef5` at `2026-06-29 20:03:17`: the user confirmed a large direct copy/paste. Logs showed `allAddedLineCount=1295`, `pathspecAddedLineCount=553`, `missingAddedLineCount=742`; excluded files had only `human` / `known_human` evidence and no AI path evidence, so the old logic left those pasted additions as unknown.
+- Huang Jinzhao `ai-rag-service-java` commit `e8e8d92d9ff1b687f959a9fef7a29fb7658c7460` at `2026-06-29 22:52:22`: the note existed and both wrapper/auto uploads used `hasAuthorshipNote=true`, but local stats were already `gitDiffAddedLines=2484`, `aiAdditions=2303`, `humanAdditions=6`, `unknownAdditions=175`. The 175 unknown lines matched files excluded with `excluded_no_ai_path_evidence` that had only `human=1`.
+- Huang Jinzhao `ai-rag-service-python` commit `e2f051de40fbda9192209ea3783ef9f5da3f68f3` at `2026-06-29 22:53:16`: the note existed and upload used `hasAuthorshipNote=true`, but local stats were already `gitDiffAddedLines=644`, `aiAdditions=354`, `humanAdditions=0`, `unknownAdditions=290`. The 290 unknown lines matched six files that had human checkpoints and no AI path evidence.
+
+Root causes:
+
+1. `wrapper_post_commit` fallback upload continued with no-note upload after note wait timeout. For large commits, daemon post-commit note generation can take longer than 5 seconds, so the remote dashboard could receive an all-unknown `hasAuthorshipNote=false` payload before the correct note payload.
+2. Post-commit human gap-fill was too narrow. It did not fill unattested added lines for files that had explicit human/known_human checkpoints inside a mixed AI + manual commit.
+
+Fix:
+
+| File | Change | Impact |
+| --- | --- | --- |
+| `src/commands/git_handlers.rs` | `wrapper_post_commit` fallback upload now passes `--skip-if-authorship-note-missing-after-wait` | If the daemon is running but note generation is slow, fallback upload skips instead of uploading no-note all-unknown data |
+| `src/commands/git_ai_handlers.rs` | Added `upload-stats --skip-if-authorship-note-missing-after-wait` | The new skip behavior is opt-in; manual upload and daemon-unavailable paths keep the existing no-note semantics |
+| `src/authorship/post_commit.rs` | Added `fill_observed_human_gaps_for_commit` | Added lines on files with explicit human/known_human checkpoints and no AI path evidence are filled as `h_*` human; existing AI/human attestations are never overwritten |
+
+Audit boundary: this does not convert every unknown line to human. A line is filled as human only when its file has observed human evidence and no AI path evidence. AI-evidence files still use AI attribution and AI gap-fill rules.
+
+Validation: ran `cargo fmt --check` and `git diff --check -- src/commands/git_handlers.rs src/commands/git_ai_handlers.rs src/authorship/post_commit.rs`. Broad tests were intentionally not run to avoid recreating a large `target` directory on this machine.
+
 ### 2026-06-26：黄芳 6/26 提交未进入远程看板
 
 现场反馈为“用户已配置 MCP，但 2026-06-26 提交的代码归因都没有上传到远程看板”。这次日志形态和 MCP 身份缺失不同：`logs/黄芳-20260626.jsonl` 整份日志里 `post_commit_started=0`、`post_commit_fallback_upload_spawned=0`、`upload_stats_ready=0`、`upload_stats_succeeded=0`、`upload_stats_failed=0`，说明客户端没有发起任何一次提交统计上传，MCP 的 `X-USER-ID` 解析还没有被执行到。
@@ -149,6 +193,8 @@ Speckit 是团队使用的「规范驱动开发」框架，通过 `.specify/` �
 排除项：不是 `D:\rj-ltc\rj-ltc-web` 本地 clone 状态导致的判断；不是 MCP / `X-USER-ID` 缺失；不是 HTTP / 后端失败；不是 Copilot checkpoint 完全失效；也不是 2.2.44 / 2.2.46 launcher 新旧混跑问题。本次坏点在“commit 创建没有进入 git-ai commit 收口”；具体绕过原因仍需额外诊断确认。
 
 处理决策：不引入“后续 checkpoint / 普通 Git 查询观察到新 HEAD 后自动补 note/upload”的补救措施。该类补救已按用户要求从 `src/daemon.rs`、`src/git/sync_authorship.rs` 和相关测试中移除，避免在用户写代码或 IDE 查询过程中触发额外归因物化/上传。保留现有正常 post-commit、wrapper fallback upload、push 前 backfill 等既有链路。
+
+2026-06-30 更新：repo-local `post-commit` hook bridge / `git-ai git-hooks install-post-commit` 方案也已按用户要求从未提交代码中撤回。后续对 TortoiseGit / 外部提交工具绕过 wrapper 的处理，需要先补诊断或重新设计方案，不能沿用该实现。
 
 历史数据口径：已经发生且远端缺失的历史记录不会因为客户端升级自动出现在看板。若需要修复历史数据，必须走显式、可审计的 repair/backfill 操作，并以本地仍保留的 checkpoint / working log / authorship note 证据为准；若本地证据已经被清理，则不能凭空恢复 AI / 人工归因，只能按 `hasAuthorshipNote=false` / `unknownAdditions` 的审计口径处理。
 

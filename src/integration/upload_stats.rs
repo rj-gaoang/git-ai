@@ -25,7 +25,8 @@
 use crate::authorship::authorship_log::PromptRecord;
 use crate::authorship::authorship_log_serialization::{AUTHORSHIP_LOG_VERSION, AuthorshipLog};
 use crate::authorship::stats::{
-    CommitStats, accepted_lines_from_attestations_by_file, stats_for_commit_stats,
+    CommitStats, FileDiffLineStats, accepted_lines_from_attestations_by_file,
+    effective_diff_line_stats_by_file, stats_for_commit_stats,
 };
 use crate::authorship::transcript::Message;
 use crate::git::refs::{get_authorship, note_blob_oids_for_commits};
@@ -673,7 +674,7 @@ fn prepare_upload_batch(
             },
         };
 
-        match build_commit_entry(repo, &commit_sha, &authorship_log, &stats) {
+        match build_commit_entry(repo, &commit_sha, &authorship_log, &stats, ignore_patterns) {
             Ok(commit_entry) => {
                 commit_entries.push(Value::Object(commit_entry));
                 commit_shas.push(commit_sha);
@@ -1938,7 +1939,7 @@ fn build_payload_with_source(
     stats: &CommitStats,
     source: &str,
 ) -> Result<Value, String> {
-    let commit_entry = build_commit_entry(repo, commit_sha, authorship_log, stats)?;
+    let commit_entry = build_commit_entry(repo, commit_sha, authorship_log, stats, &[])?;
     build_payload_from_commit_entries(repo, vec![Value::Object(commit_entry)], source)
 }
 
@@ -1946,9 +1947,11 @@ fn build_payload_without_authorship_note(
     repo: &Repository,
     commit_sha: &str,
     stats: &CommitStats,
+    ignore_patterns: &[String],
     source: &str,
 ) -> Result<Value, String> {
-    let commit_entry = build_commit_entry_without_authorship_note(repo, commit_sha, stats)?;
+    let commit_entry =
+        build_commit_entry_without_authorship_note(repo, commit_sha, stats, ignore_patterns)?;
     build_payload_from_commit_entries(repo, vec![Value::Object(commit_entry)], source)
 }
 
@@ -1957,13 +1960,15 @@ fn build_commit_entry(
     commit_sha: &str,
     authorship_log: &AuthorshipLog,
     stats: &CommitStats,
+    ignore_patterns: &[String],
 ) -> Result<Map<String, Value>, String> {
     let workdir = repo.canonical_workdir().to_path_buf();
     let (commit_message, commit_author, commit_timestamp) =
         git_commit_metadata(&workdir, commit_sha)
             .ok_or_else(|| "failed to read commit metadata".to_string())?;
 
-    let file_stats = build_file_stats(repo, commit_sha, authorship_log);
+    let file_stats =
+        build_file_stats_with_ignore_patterns(repo, commit_sha, authorship_log, ignore_patterns);
     let stats_json = stats_to_camel_case(stats, file_stats);
     let prompt_stats = build_prompt_stats(&authorship_log.metadata.prompts);
 
@@ -1986,13 +1991,14 @@ fn build_commit_entry_without_authorship_note(
     repo: &Repository,
     commit_sha: &str,
     stats: &CommitStats,
+    ignore_patterns: &[String],
 ) -> Result<Map<String, Value>, String> {
     let workdir = repo.canonical_workdir().to_path_buf();
     let (commit_message, commit_author, commit_timestamp) =
         git_commit_metadata(&workdir, commit_sha)
             .ok_or_else(|| "failed to read commit metadata".to_string())?;
 
-    let file_stats = build_file_stats_without_authorship_note(repo, commit_sha);
+    let file_stats = build_file_stats_without_authorship_note(repo, commit_sha, ignore_patterns);
     let stats_json = stats_to_camel_case(stats, file_stats);
 
     let mut commit_entry = Map::new();
@@ -2197,7 +2203,8 @@ fn upload_local_commit_stats_without_authorship_note(
         }),
     );
 
-    let payload = build_payload_without_authorship_note(repo, commit_sha, &stats, source)?;
+    let payload =
+        build_payload_without_authorship_note(repo, commit_sha, &stats, ignore_patterns, source)?;
     let payload_summary = upload_payload_summary(&payload);
     crate::diagnostics::append_debug_event(
         "upload_stats_payload_build_succeeded",
@@ -2402,28 +2409,50 @@ fn split_tool_model(key: &str) -> (String, Option<String>) {
     }
 }
 
+#[cfg(test)]
 fn build_file_stats(
     repo: &Repository,
     commit_sha: &str,
     authorship_log: &AuthorshipLog,
 ) -> Vec<Value> {
+    build_file_stats_with_ignore_patterns(repo, commit_sha, authorship_log, &[])
+}
+
+fn build_file_stats_with_ignore_patterns(
+    repo: &Repository,
+    commit_sha: &str,
+    authorship_log: &AuthorshipLog,
+    ignore_patterns: &[String],
+) -> Vec<Value> {
     let workdir = repo.canonical_workdir().to_path_buf();
-    let numstat = git_diff_tree_numstat(&workdir, commit_sha);
+    let effective_stats_by_file =
+        effective_diff_line_stats_by_file(repo, commit_sha, ignore_patterns).ok();
+    let numstat = effective_stats_by_file
+        .as_ref()
+        .map(numstat_from_effective_stats)
+        .unwrap_or_else(|| git_diff_tree_numstat(&workdir, commit_sha));
     if numstat.is_empty() {
         return Vec::new();
     }
 
-    let accepted_by_file = build_added_lines_by_file(repo, commit_sha)
-        .map(|added_lines_by_file| {
-            accepted_lines_from_attestations_by_file(
-                repo,
-                commit_sha,
-                Some(authorship_log),
-                &added_lines_by_file,
-                false,
-            )
+    let added_lines_by_file = effective_stats_by_file
+        .as_ref()
+        .map(|stats_by_file| {
+            stats_by_file
+                .iter()
+                .map(|(file_path, stats)| (file_path.clone(), stats.added_lines.clone()))
+                .collect::<HashMap<_, _>>()
         })
+        .or_else(|| build_added_lines_by_file(repo, commit_sha).ok())
         .unwrap_or_default();
+
+    let accepted_by_file = accepted_lines_from_attestations_by_file(
+        repo,
+        commit_sha,
+        Some(authorship_log),
+        &added_lines_by_file,
+        false,
+    );
 
     let mut files = Vec::with_capacity(numstat.len());
     for (file_path, added, deleted) in numstat {
@@ -2469,9 +2498,14 @@ fn build_file_stats(
     files
 }
 
-fn build_file_stats_without_authorship_note(repo: &Repository, commit_sha: &str) -> Vec<Value> {
+fn build_file_stats_without_authorship_note(
+    repo: &Repository,
+    commit_sha: &str,
+    ignore_patterns: &[String],
+) -> Vec<Value> {
     let workdir = repo.canonical_workdir().to_path_buf();
-    git_diff_tree_numstat(&workdir, commit_sha)
+    effective_numstat(repo, commit_sha, ignore_patterns)
+        .unwrap_or_else(|| git_diff_tree_numstat(&workdir, commit_sha))
         .into_iter()
         .map(|(file_path, added, deleted)| {
             json!({
@@ -2483,6 +2517,29 @@ fn build_file_stats_without_authorship_note(repo: &Repository, commit_sha: &str)
                 "unknownAdditions": added,
                 "toolModelBreakdown": [],
             })
+        })
+        .collect()
+}
+
+fn effective_numstat(
+    repo: &Repository,
+    commit_sha: &str,
+    ignore_patterns: &[String],
+) -> Option<Vec<(String, u32, u32)>> {
+    let stats_by_file =
+        effective_diff_line_stats_by_file(repo, commit_sha, ignore_patterns).ok()?;
+    Some(numstat_from_effective_stats(&stats_by_file))
+}
+
+fn numstat_from_effective_stats(
+    stats_by_file: &BTreeMap<String, FileDiffLineStats>,
+) -> Vec<(String, u32, u32)> {
+    stats_by_file
+        .iter()
+        .filter_map(|(file_path, stats)| {
+            let added = stats.added_lines.len() as u32;
+            let deleted = stats.deleted_lines.len() as u32;
+            (added > 0 || deleted > 0).then_some((file_path.clone(), added, deleted))
         })
         .collect()
 }

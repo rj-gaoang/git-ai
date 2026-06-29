@@ -2,6 +2,7 @@ use crate::authorship::authorship_log::LineRange;
 use crate::authorship::authorship_log_serialization::AuthorshipLog;
 use crate::authorship::ignore::{build_ignore_matcher, should_ignore_file_with_matcher};
 use crate::authorship::transcript::Message;
+use crate::commands::diff::DiffHunk;
 use crate::error::GitAiError;
 use crate::git::notes_api::read_authorship as get_authorship;
 use crate::git::repository::Repository;
@@ -61,6 +62,12 @@ pub(crate) struct FileAcceptedLineStats {
 enum AddedLineOwner {
     Human,
     Ai(String),
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct FileDiffLineStats {
+    pub added_lines: Vec<u32>,
+    pub deleted_lines: Vec<u32>,
 }
 
 pub fn stats_command(
@@ -548,6 +555,90 @@ pub(crate) fn accepted_lines_from_attestations_by_file(
     accepted_by_file
 }
 
+pub(crate) fn effective_diff_line_stats_by_file(
+    repo: &Repository,
+    commit_sha: &str,
+    ignore_patterns: &[String],
+) -> Result<BTreeMap<String, FileDiffLineStats>, GitAiError> {
+    use crate::commands::diff::get_diff_with_line_numbers;
+
+    let commit_obj = repo.revparse_single(commit_sha)?.peel_to_commit()?;
+    let parent_count = commit_obj.parent_count()?;
+
+    if parent_count > 1 {
+        return Ok(BTreeMap::new());
+    }
+
+    let from_ref = if parent_count == 0 {
+        "4b825dc642cb6eb9a060e54bf8d69288fbee4904".to_string()
+    } else {
+        commit_obj.parent(0)?.id()
+    };
+
+    let hunks = get_diff_with_line_numbers(repo, &from_ref, commit_sha)?;
+    Ok(effective_diff_line_stats_from_hunks(
+        &hunks,
+        ignore_patterns,
+    ))
+}
+
+pub(crate) fn effective_diff_line_stats_from_hunks(
+    hunks: &[DiffHunk],
+    ignore_patterns: &[String],
+) -> BTreeMap<String, FileDiffLineStats> {
+    let ignore_matcher = build_ignore_matcher(ignore_patterns);
+    let filter_format_only = crate::config::Config::get()
+        .feature_flags()
+        .format_only_attribution_passthrough;
+    let mut by_file: BTreeMap<String, FileDiffLineStats> = BTreeMap::new();
+
+    for hunk in hunks {
+        if should_ignore_file_with_matcher(&hunk.file_path, &ignore_matcher)
+            || (filter_format_only && is_format_only_hunk(hunk))
+        {
+            continue;
+        }
+
+        let file_stats = by_file.entry(hunk.file_path.clone()).or_default();
+        file_stats
+            .added_lines
+            .extend(hunk.added_lines.iter().copied());
+        file_stats
+            .deleted_lines
+            .extend(hunk.deleted_lines.iter().copied());
+    }
+
+    for file_stats in by_file.values_mut() {
+        file_stats.added_lines.sort_unstable();
+        file_stats.added_lines.dedup();
+        file_stats.deleted_lines.sort_unstable();
+        file_stats.deleted_lines.dedup();
+    }
+
+    by_file
+}
+
+fn is_format_only_hunk(hunk: &DiffHunk) -> bool {
+    if hunk.deleted_contents.is_empty() || hunk.added_contents.is_empty() {
+        return false;
+    }
+
+    let old_compact = compact_non_whitespace(&hunk.deleted_contents);
+    if old_compact.is_empty() {
+        return false;
+    }
+
+    old_compact == compact_non_whitespace(&hunk.added_contents)
+}
+
+fn compact_non_whitespace(lines: &[String]) -> String {
+    lines
+        .iter()
+        .flat_map(|line| line.chars())
+        .filter(|ch| !ch.is_whitespace())
+        .collect()
+}
+
 #[doc(hidden)]
 pub fn accepted_lines_from_attestations(
     authorship_log: Option<&AuthorshipLog>,
@@ -781,31 +872,24 @@ pub fn stats_for_commit_stats_from_hunks(
     repo: &Repository,
     commit_sha: &str,
     ignore_patterns: &[String],
-    hunks: &[crate::commands::diff::DiffHunk],
+    hunks: &[DiffHunk],
     authorship_log: Option<&crate::authorship::authorship_log_serialization::AuthorshipLog>,
 ) -> Result<CommitStats, GitAiError> {
     let commit_obj = repo.revparse_single(commit_sha)?.peel_to_commit()?;
     let parent_count = commit_obj.parent_count()?;
     let is_merge_commit = parent_count > 1;
 
-    let ignore_matcher = build_ignore_matcher(ignore_patterns);
-
     let mut git_diff_added_lines = 0u32;
     let mut git_diff_deleted_lines = 0u32;
     let mut added_lines_by_file: HashMap<String, Vec<u32>> = HashMap::new();
+    let diff_lines_by_file = effective_diff_line_stats_from_hunks(hunks, ignore_patterns);
 
-    for hunk in hunks {
-        if should_ignore_file_with_matcher(&hunk.file_path, &ignore_matcher) {
-            continue;
-        }
-        git_diff_added_lines += hunk.added_lines.len() as u32;
-        git_diff_deleted_lines += hunk.deleted_lines.len() as u32;
+    for (file_path, file_stats) in diff_lines_by_file {
+        git_diff_added_lines += file_stats.added_lines.len() as u32;
+        git_diff_deleted_lines += file_stats.deleted_lines.len() as u32;
 
-        if !is_merge_commit && !hunk.added_lines.is_empty() {
-            added_lines_by_file
-                .entry(hunk.file_path.clone())
-                .or_default()
-                .extend(hunk.added_lines.iter().copied());
+        if !is_merge_commit && !file_stats.added_lines.is_empty() {
+            added_lines_by_file.insert(file_path, file_stats.added_lines);
         }
     }
 
@@ -857,20 +941,16 @@ pub fn get_git_diff_stats(
         commit_obj.parent(0)?.id()
     };
 
-    // Use the diff engine which properly handles renames with --find-renames=1%
     let hunks = get_diff_with_line_numbers(repo, &from_ref, commit_sha)?;
-
-    let ignore_matcher = build_ignore_matcher(ignore_patterns);
-    let mut added_lines = 0u32;
-    let mut deleted_lines = 0u32;
-
-    for hunk in hunks {
-        if should_ignore_file_with_matcher(&hunk.file_path, &ignore_matcher) {
-            continue;
-        }
-        added_lines += hunk.added_lines.len() as u32;
-        deleted_lines += hunk.deleted_lines.len() as u32;
-    }
+    let file_stats = effective_diff_line_stats_from_hunks(&hunks, ignore_patterns);
+    let added_lines = file_stats
+        .values()
+        .map(|stats| stats.added_lines.len() as u32)
+        .sum();
+    let deleted_lines = file_stats
+        .values()
+        .map(|stats| stats.deleted_lines.len() as u32)
+        .sum();
 
     Ok((added_lines, deleted_lines))
 }
