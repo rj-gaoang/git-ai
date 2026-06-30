@@ -280,6 +280,16 @@ impl AgentPreset for OpenCodePreset {
 
         let file_paths = Self::extract_filepaths_from_tool_input(tool_input.as_ref(), &cwd);
         let tool_use_id_str = tool_use_id.as_deref().unwrap_or("bash").to_string();
+        if is_bash && super::is_read_only_shell_tool_input(tool_input.as_ref()) {
+            super::append_read_only_shell_skipped_event(
+                "opencode",
+                is_pre.then_some("PreToolUse").unwrap_or("PostToolUse"),
+                trace_id,
+                "shell",
+                &tool_use_id_str,
+            );
+            return Ok(vec![]);
+        }
 
         // Build metadata
         let mut metadata = HashMap::new();

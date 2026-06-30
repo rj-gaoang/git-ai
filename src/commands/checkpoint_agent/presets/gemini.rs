@@ -23,10 +23,22 @@ impl AgentPreset for GeminiPreset {
         let tool_name = parse::optional_str_multi(&data, &["tool_name", "toolName"]);
         let hook_event = parse::optional_str_multi(&data, &["hook_event_name", "hookEventName"]);
         let tool_use_id = parse::str_or_default_multi(&data, &["tool_use_id", "toolUseId"], "bash");
+        let tool_input = data.get("tool_input").or_else(|| data.get("toolInput"));
 
         let is_bash = tool_name
             .map(|n| bash_tool::classify_tool(Agent::Gemini, n) == ToolClass::Bash)
             .unwrap_or(false);
+
+        if is_bash && super::is_read_only_shell_tool_input(tool_input) {
+            super::append_read_only_shell_skipped_event(
+                "gemini",
+                hook_event.unwrap_or("PostToolUse"),
+                trace_id,
+                tool_name.unwrap_or("unknown"),
+                tool_use_id,
+            );
+            return Ok(vec![]);
+        }
 
         let context = PresetContext {
             agent_id: AgentId {

@@ -76,6 +76,18 @@ impl AgentPreset for CursorPreset {
                 tool_name
             )));
         }
+        if tool_class == ToolClass::Bash
+            && super::is_read_only_shell_tool_input(data.get("tool_input"))
+        {
+            super::append_read_only_shell_skipped_event(
+                "cursor",
+                hook_event_name,
+                trace_id,
+                tool_name,
+                parse::optional_str(&data, "tool_use_id").unwrap_or("bash"),
+            );
+            return Ok(vec![]);
+        }
 
         // Extract the edited path from Cursor file-edit tool input.
         let file_path = cursor_file_path_from_tool_input(data.get("tool_input"));

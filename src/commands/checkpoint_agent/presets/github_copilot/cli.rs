@@ -45,6 +45,16 @@ pub(super) fn parse_cli_hooks(
     let tool_use_id = parse::optional_str_multi(data, &["tool_use_id", "toolUseId"])
         .map(str::to_string)
         .unwrap_or_else(|| format!("cli-{}-{}", session_id, tool_name));
+    if class == ToolClass::Bash && super::super::is_read_only_shell_tool_input(tool_input) {
+        super::super::append_read_only_shell_skipped_event(
+            "github-copilot-cli",
+            hook_event_name,
+            trace_id,
+            tool_name,
+            &tool_use_id,
+        );
+        return Ok(vec![]);
+    }
 
     // Extract paths from the current tool call first. dirty_files is a fallback only:
     // CLI hooks can carry broad dirty workspace snapshots.

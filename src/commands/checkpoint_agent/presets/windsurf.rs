@@ -131,6 +131,21 @@ impl AgentPreset for WindsurfPreset {
             .or_else(|| parse::optional_str(&data, "execution_id"))
             .unwrap_or("bash")
             .to_string();
+        if is_bash
+            && tool_info
+                .and_then(|ti| ti.get("command"))
+                .and_then(|v| v.as_str())
+                .is_some_and(super::is_read_only_shell_command)
+        {
+            super::append_read_only_shell_skipped_event(
+                "windsurf",
+                agent_action.unwrap_or("run_command"),
+                trace_id,
+                "run_command",
+                &execution_id,
+            );
+            return Ok(vec![]);
+        }
 
         let event = if is_bash {
             if is_pre_bash {

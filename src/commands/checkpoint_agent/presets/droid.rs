@@ -123,6 +123,16 @@ impl AgentPreset for DroidPreset {
         let tool_use_id = parse::optional_str_multi(&data, &["tool_use_id", "toolUseId"])
             .unwrap_or("bash")
             .to_string();
+        if is_bash && super::is_read_only_shell_tool_input(tool_input) {
+            super::append_read_only_shell_skipped_event(
+                "droid",
+                hook_event_name,
+                trace_id,
+                tool_name.unwrap_or("unknown"),
+                &tool_use_id,
+            );
+            return Ok(vec![]);
+        }
 
         // Build metadata
         let extracted_model = crate::streams::model_extraction::extract_model_from_droid_settings(

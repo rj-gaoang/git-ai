@@ -50,6 +50,24 @@ Speckit 是团队使用的「规范驱动开发」框架，通过 `.specify/` �
 
 历史数据口径：客户端修复只影响后续重算/上传。已经上传到远程看板的旧记录不会自动变化；如果要让 `e892a067` 的远程记录体现新口径，需要用新版本重新计算并显式重传该 commit。
 
+### 2026-06-30: read-only shell checkpoint 卡顿与嵌套仓库噪声
+
+现场问题：在 `D:\git-ai-main` 下只是查看文件或查日志，也会明显卡顿。指定的 `logs/debug.jsonl` 只有约 824KB，不是大文件本身导致；本机 `~/.git-ai/logs/debug.jsonl` 曾增长到 165MB，会放大 PowerShell `Get-Content` / `ConvertFrom-Json` 的卡顿，但本次项目内日志证明还有另一条直接链路。
+
+证据：`logs/debug.jsonl` 中 `2026-06-30T00:08:55` 同一批 Codex 工具调用触发多次 `checkpoint_request_send`，并同时产生 `D:/git-ai-main` 与 `D:/git-ai-main/git-ai` 两个 repo 的 checkpoint；外层 repo 处理 `.idea/compiler.xml`，内层 repo 处理 `src/commands/git_handlers.rs` 和本文档。每个 checkpoint 约 300ms 到 1000ms，连续触发后表现为“读取文件也卡”。
+
+根因：最近 mixed workspace / nested repo 修复让同批路径里可归属到子仓库的文件不再因为其它路径失败而整批丢弃，这个方向是正确的；但多个 preset 把 shell / terminal / run command 一律当 Bash checkpoint 处理，导致 `Get-Content`、`rg`、`git diff` 这类只读命令也进入 pre/post bash checkpoint。再叠加嵌套仓库和 `.idea` 文件噪声，就会在查看文件时反复扫描 dirty 文件并发送 checkpoint。排除项：不是看板上传、不是 stats 计算、不是 MCP、也不是 `logs/debug.jsonl` 这个 824KB 文件本身。
+
+修复：
+
+| File | Change | Impact |
+| --- | --- | --- |
+| `src/commands/checkpoint_agent/presets/mod.rs` | 新增公共只读 shell 命令识别和 `checkpoint_shell_read_only_skipped` 诊断事件 | `Get-Content`、`Select-String`、`rg`、`git diff/log/show/status` 等只读命令统一跳过 checkpoint；`apply_patch`、`Set-Content`、`git commit`、构建命令等仍保留原有 checkpoint |
+| `src/commands/checkpoint_agent/presets/*.rs` | Codex、Claude、Cursor、Gemini、Continue、Amp、OpenCode、Droid、Firebender、Windsurf、GitHub Copilot CLI 的 Bash/Shell/Terminal 入口复用公共只读判断 | 查看文件、查日志、看 diff 不再触发 dirty snapshot / checkpoint；Pi payload 当前没有命令文本，暂不做只读误判 |
+| `src/commands/checkpoint_agent/orchestrator.rs` | `build_checkpoint_files(...)` 过滤 `.git`、`.idea`、`.vscode` 路径，并对同一批绝对路径去重 | IDE 配置和 Git 元数据不再进入归因采集，减少嵌套工作区中的无效 checkpoint |
+
+验证口径：本修复只影响 checkpoint 采集入口，不改变 post-commit authorship note、stats 计算和 upload payload。由于当前机器多次因测试/大日志解析卡死，本轮只做格式与 diff 检查，不跑集成测试。
+
 ### 2026-06-29: pasted/manual checkpoint additions and early no-note upload
 
 Incidents:

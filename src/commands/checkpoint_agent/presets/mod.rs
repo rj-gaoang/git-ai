@@ -147,6 +147,116 @@ pub trait AgentPreset {
     fn parse(&self, hook_input: &str, trace_id: &str) -> Result<Vec<ParsedHookEvent>, GitAiError>;
 }
 
+pub(crate) fn shell_command_from_tool_input(
+    tool_input: Option<&serde_json::Value>,
+) -> Option<&str> {
+    let value = tool_input?;
+    parse::optional_str_multi(
+        value,
+        &["command", "text", "script", "cmd", "shell_command", "input"],
+    )
+}
+
+pub(crate) fn is_read_only_shell_tool_input(tool_input: Option<&serde_json::Value>) -> bool {
+    let Some(command) = shell_command_from_tool_input(tool_input) else {
+        return false;
+    };
+    is_read_only_shell_command(command)
+}
+
+pub(crate) fn is_read_only_shell_command(command: &str) -> bool {
+    let command = command.trim();
+    if command.is_empty() {
+        return false;
+    }
+
+    let lower = command.to_ascii_lowercase();
+    let mutating_markers = [
+        "apply_patch",
+        "set-content",
+        "add-content",
+        "out-file",
+        "new-item",
+        "remove-item",
+        "move-item",
+        "copy-item",
+        "rename-item",
+        "[system.io.file]::write",
+        "::writeall",
+        " >",
+        ">>",
+        "git add",
+        "git commit",
+        "git checkout",
+        "git switch",
+        "git reset",
+        "git clean",
+        "git merge",
+        "git rebase",
+        "cargo ",
+        "npm ",
+        "pnpm ",
+        "yarn ",
+        "mvn ",
+        "gradle",
+        "task ",
+    ];
+    if mutating_markers.iter().any(|marker| lower.contains(marker)) {
+        return false;
+    }
+
+    let read_only_starts = [
+        "get-content",
+        "select-string",
+        "get-childitem",
+        "get-item",
+        "get-process",
+        "get-ciminstance",
+        "test-path",
+        "write-output",
+        "format-table",
+        "format-list",
+        "convertfrom-json",
+        "where-object",
+        "git status",
+        "git diff",
+        "git log",
+        "git show",
+        "git rev-parse",
+        "git config --get",
+        "git config --global --get",
+        "rg ",
+        "grep ",
+        "type ",
+        "dir",
+        "ls",
+        "cat ",
+    ];
+    let trimmed_lower = lower.trim_start();
+    read_only_starts
+        .iter()
+        .any(|prefix| trimmed_lower.starts_with(prefix))
+}
+
+pub(crate) fn append_read_only_shell_skipped_event(
+    agent: &str,
+    hook_event_name: &str,
+    trace_id: &str,
+    tool_name: &str,
+    tool_use_id: &str,
+) {
+    crate::diagnostics::append_debug_event(
+        "checkpoint_shell_read_only_skipped",
+        serde_json::json!({
+            "tool": agent,
+            "hookEventName": hook_event_name,
+            "traceId": trace_id,
+            "toolName": tool_name,
+            "toolUseId": tool_use_id,
+        }),
+    );
+}
+
 pub fn resolve_preset(name: &str) -> Result<Box<dyn AgentPreset>, GitAiError> {
     match name {
         "claude" => Ok(Box::new(claude::ClaudePreset)),

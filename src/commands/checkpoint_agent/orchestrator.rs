@@ -60,6 +60,20 @@ struct RepoContext {
 
 const MAX_CHECKPOINT_FILES: usize = 1000;
 
+fn should_skip_checkpoint_path(path: &Path) -> Option<&'static str> {
+    for component in path.components() {
+        let name = component.as_os_str().to_string_lossy();
+        let name = name.as_ref();
+        if name == ".git" {
+            return Some("git_metadata");
+        }
+        if name == ".idea" || name == ".vscode" {
+            return Some("ide_metadata");
+        }
+    }
+    None
+}
+
 fn read_checkpoint_file_content(path: &Path) -> Option<String> {
     if path.exists() {
         let bytes = fs::read(path).ok()?;
@@ -114,6 +128,7 @@ fn build_checkpoint_files(file_paths: &[PathBuf]) -> Result<Vec<CheckpointFile>,
 
     let mut repo_cache: HashMap<PathBuf, RepoContext> = HashMap::new();
     let mut files = Vec::new();
+    let mut seen_paths = std::collections::HashSet::new();
 
     for path in capped_paths {
         if !path.is_absolute() {
@@ -121,6 +136,19 @@ fn build_checkpoint_files(file_paths: &[PathBuf]) -> Result<Vec<CheckpointFile>,
                 "file path must be absolute: {}",
                 path.display()
             )));
+        }
+        if let Some(reason) = should_skip_checkpoint_path(path) {
+            crate::diagnostics::append_debug_event(
+                "checkpoint_file_path_skipped",
+                serde_json::json!({
+                    "path": path.to_string_lossy().replace('\\', "/"),
+                    "reason": reason,
+                }),
+            );
+            continue;
+        }
+        if !seen_paths.insert(checkpoint_path_lookup_key(path)) {
+            continue;
         }
 
         let ctx = {

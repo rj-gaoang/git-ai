@@ -210,6 +210,16 @@ impl AgentPreset for FirebenderPreset {
             dirty_files.map(|df| df.into_iter().map(|(k, v)| (PathBuf::from(k), v)).collect());
 
         let tool_use_id_str = tool_use_id.unwrap_or_else(|| "bash".to_string());
+        if is_bash && super::is_read_only_shell_tool_input(Some(&tool_input)) {
+            super::append_read_only_shell_skipped_event(
+                "firebender",
+                hook_event_name.as_str(),
+                trace_id,
+                tool_name.as_str(),
+                &tool_use_id_str,
+            );
+            return Ok(vec![]);
+        }
 
         let event = match (hook_event_name.as_str(), is_bash) {
             ("preToolUse", true) => ParsedHookEvent::PreBashCall(PreBashCall {

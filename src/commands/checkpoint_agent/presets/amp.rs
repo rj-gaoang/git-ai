@@ -262,6 +262,16 @@ impl AgentPreset for AmpPreset {
         let thread_id = hook_input.thread_id.clone();
         let tool_use_id = hook_input.tool_use_id.clone();
         let tool_use_id_str = tool_use_id.as_deref().unwrap_or("bash").to_string();
+        if is_bash && super::is_read_only_shell_tool_input(hook_input.tool_input.as_ref()) {
+            super::append_read_only_shell_skipped_event(
+                "amp",
+                hook_input.hook_event_name.as_str(),
+                trace_id,
+                hook_input.tool_name.as_deref().unwrap_or("unknown"),
+                &tool_use_id_str,
+            );
+            return Ok(vec![]);
+        }
 
         let file_paths = Self::extract_file_paths(&hook_input, cwd);
 

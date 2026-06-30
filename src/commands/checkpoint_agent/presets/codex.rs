@@ -108,6 +108,7 @@ impl AgentPreset for CodexPreset {
         let is_file_edit = tool_class == ToolClass::FileEdit;
 
         let transcript_path = Self::resolve_transcript_path(&data, &session_id);
+        let tool_input = data.get("tool_input").or_else(|| data.get("toolInput"));
 
         let mut metadata = HashMap::new();
         if let Some(ref tp) = transcript_path {
@@ -141,6 +142,16 @@ impl AgentPreset for CodexPreset {
         let event = match hook_event {
             Some("PreToolUse") => {
                 if is_bash {
+                    if super::is_read_only_shell_tool_input(tool_input) {
+                        super::append_read_only_shell_skipped_event(
+                            "codex",
+                            "PreToolUse",
+                            trace_id,
+                            tool_name.unwrap_or("unknown"),
+                            tool_use_id,
+                        );
+                        return Ok(vec![]);
+                    }
                     ParsedHookEvent::PreBashCall(PreBashCall {
                         context,
                         tool_use_id: tool_use_id.to_string(),
@@ -161,6 +172,16 @@ impl AgentPreset for CodexPreset {
             }
             Some("PostToolUse") => {
                 if is_bash {
+                    if super::is_read_only_shell_tool_input(tool_input) {
+                        super::append_read_only_shell_skipped_event(
+                            "codex",
+                            "PostToolUse",
+                            trace_id,
+                            tool_name.unwrap_or("unknown"),
+                            tool_use_id,
+                        );
+                        return Ok(vec![]);
+                    }
                     ParsedHookEvent::PostBashCall(PostBashCall {
                         context,
                         tool_use_id: tool_use_id.to_string(),
@@ -168,7 +189,6 @@ impl AgentPreset for CodexPreset {
                         dirty_files: None,
                     })
                 } else if is_file_edit {
-                    let tool_input = data.get("tool_input").or_else(|| data.get("toolInput"));
                     let mut file_paths =
                         OpenCodePreset::extract_filepaths_from_tool_input(tool_input, cwd);
 
