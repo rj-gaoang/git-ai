@@ -68,6 +68,101 @@ Speckit 是团队使用的「规范驱动开发」框架，通过 `.specify/` �
 
 验证口径：本修复只影响 checkpoint 采集入口，不改变 post-commit authorship note、stats 计算和 upload payload。由于当前机器多次因测试/大日志解析卡死，本轮只做格式与 diff 检查，不跑集成测试。
 
+### 2026-07-01：尚冠 115MB JSONL 日志暴涨与 bash fallback 全量路径 debug 截断
+
+现场问题：`logs/2026-06-30/尚冠-20260630.jsonl` 两天日志达到 `120781684` bytes，约 `115.2MB`。现场复查时文件 `LastWriteTime=2026/6/30 20:22:34`，等待 2 秒后大小仍为 `120781684` bytes，`delta=0`；因此不是当前仍在持续写入，而是 6/29 历史日志中已经写入了少数超大 JSONL 行。
+
+证据：该文件共 `14513` 行。按事件体积统计，`bash_post_checkpoint_resolved` 只有 7 行，但合计 `111574707` bytes，约 `106.4MB`；全部 `>10KB` 的 26 行合计约 `108.3MB`。典型超大行是 `2026-06-29T11:51:16.763+08:00` 的 `bash_post_checkpoint_resolved`：`repo=d:/workspace`、`action=missing_pre_snapshot`、`fallbackReason=git_status_fallback`、`detectedPathCount=124943`、`finalFileCount=124943`，旧日志字段 `detectedPaths` 把 12 万多个路径完整写进一行，单行约 `15.2MB`。
+
+根因：Copilot / Agent 的 bash post hook 进入收口时，daemon 中找不到对应 pre-snapshot，于是 `handle_bash_post_tool_use(...)` 返回 `MissingPreSnapshot`。旧代码随后在 `d:/workspace` 执行 `git status --porcelain=v2 -z --untracked-files=all` 做 fallback，扫到约 12 万个 changed/untracked 路径；`src/commands/checkpoint_agent/orchestrator.rs` 又在 `bash_post_checkpoint_resolved` debug 事件中把 `detectedPaths` 全量写入 JSONL。`build_checkpoint_files(...)` 虽然有 `MAX_CHECKPOINT_FILES=1000` 的截断，但截断发生在 debug 写入之后，挡不住日志膨胀，也会继续尝试处理前 1000 个大工作区路径。
+
+本次代码修复：
+
+| 文件 | 修改点 | 影响 |
+|------|--------|------|
+| `src/commands/checkpoint_agent/orchestrator.rs` | 新增 `DEBUG_PATH_SAMPLE_LIMIT=20`，`bash_post_checkpoint_resolved` 不再写 `detectedPaths` / `dirtyFilePaths` 全量数组，改写 count、sample、omitted、truncated 和 pathLimit | 后续即使检测到十几万路径，单条 debug 也只保留前 20 个样例，不再把 JSONL 写爆 |
+| `src/commands/checkpoint_agent/orchestrator.rs` | 对 `git_status_fallback` / `git_status_fallback_after_error` 这类兜底路径，如果检测路径数超过 `MAX_CHECKPOINT_FILES`，记录 `*_too_many_paths` 和 error 后直接跳过该噪声 checkpoint | 避免缺 pre-snapshot 时把整个 `d:/workspace` 的 12 万路径误当一次 AI bash 编辑继续采集；正常 snapshot diff 命中的路径仍保留，后续由 `build_checkpoint_files(...)` 按既有上限截断 |
+
+排除项：不是普通 git proxy 高频查询把日志撑到 115MB；`process_started` 3596 行合计约 `2.5MB`，`git_proxy_*` 也只是几百 KB 级别。不是当前机器还在持续写这个文件；现场大小复查 `delta=0`。不是看板上传或 stats 计算导致的体积暴涨；暴涨点在 checkpoint debug JSONL 写入。
+
+历史数据口径：这次修复只限制未来 debug 体积并跳过大工作区 fallback 噪声 checkpoint；已经存在的 `尚冠-20260630.jsonl` 不会自动缩小，也不会改变已上传的历史归因。如果需要清理该 115MB 文件，应单独做日志裁剪 / 压缩，不能把本地日志裁剪理解成远程看板历史修复。
+
+验证记录：
+
+| 命令 | 结论 |
+|------|------|
+| `cargo fmt --check` | 通过 |
+| `cargo test -q --lib debug_path_samples_are_bounded_and_report_omitted_count` | 通过 |
+| `cargo test -q --lib oversized_bash` | 通过，覆盖 fallback 超过 1000 路径时跳过、正常 snapshot diff 不提前跳过 |
+
+### 2026-07-01：高昂 Codex 排查 git-ai 时内存/CPU/IO 卡死的 bash checkpoint 限流
+
+现场问题：`logs/2026-06-30/高昂-20260630.jsonl` 已裁剪到 `2026-06-30 16:00:00` 至 `16:59:59` 后仍能复现异常链路。问题不是“日志大所以慢”，日志只是证据；真正会把电脑卡死的是 Codex / shell hook 把一次查询或诊断后的大工作区状态误当成一次 bash 编辑，随后读取几百到上千个文件内容、通过 daemon IPC 发送、写 blob、计算 checkpoint attribution。
+
+关键证据：裁剪后一小时样本共 216 行、约 3.05MB。其中 `daemon_checkpoint_request_resolved_files` 19 行合计约 1.29MB，`checkpoint_request_started` 19 行约 0.77MB，`checkpoint_request_finished` 15 行约 0.68MB。最大链路包括：
+
+| 时间 | repo | 事件链 | 规模 | 影响 |
+|------|------|--------|------|------|
+| 2026-06-30 16:05-16:08 | `D:/git-ai-main/ai-cr-manage-service` | 多个 Codex bash pre checkpoint 生成 `Human / WillEdit` baseline | 每次 `requestFileCount=686` | 重复读取、发送、处理 686 个文件，单次 daemon checkpoint 可持续 30 秒以上 |
+| 2026-06-30 16:08 / 16:27 / 16:37 | `D:/git-ai-main` | bash post 找不到 pre snapshot，进入 `git_status_fallback`，检测 `detectedPathCount=1245`，最终发出 `ai_agent Edited` checkpoint | `requestFileCount=965` | 把整个工作区近千个路径误当一次 AI bash 编辑，造成内存、CPU、IO 峰值 |
+
+根因：bash/shell checkpoint 的证据强度与明确 file-edit 不同。明确 file-edit hook 会给出本次工具实际编辑的文件路径，是强证据；而 bash pre/post 的 stat snapshot、missing-pre-snapshot 后的 `git status --untracked-files=all` fallback 属于弱证据，遇到大工作区、日志目录、生成目录、嵌套仓库或 snapshot 丢失时，可能把大量历史 dirty/untracked 文件合并成一次“AI 编辑”。旧代码只有 `MAX_CHECKPOINT_FILES=1000` 的 build 截断，仍允许 686/965 这种规模进入文件读取、IPC 和 daemon attribution，所以会卡死机器。
+
+本次代码修复：
+
+| 文件 | 修改 | 边界 |
+|------|------|------|
+| `src/commands/checkpoint_agent/orchestrator.rs` | 新增 `MAX_BASH_CHECKPOINT_FILES=200`，bash pre baseline 超过 200 个 dirty path 直接记录 `bash_pre_checkpoint_skipped_too_many_dirty_paths` 并跳过；bash post 无论是 snapshot diff 还是 `git_status_fallback`，超过 200 个候选路径都记录 `*_too_many_paths` / `bash_post_checkpoint_skipped_too_many_paths` 并跳过 | 只作用于 `PreBashCall` / `PostBashCall`；`PreFileEdit`、`PostFileEdit`、`KnownHumanEdit`、`UntrackedEdit` 仍走原正常路径 |
+| `src/commands/checkpoint_agent/orchestrator.rs` | 新增 `should_skip_bash_checkpoint_path(...)`，仅对 bash-derived 候选路径过滤 `logs/`、`*.log`、`*.jsonl`、`.git-ai`、`checkpoint-debug-logs`、`.code-review-graph`、`node_modules`、`target`、`dist`、`build`、`.next` 等运行时/生成噪声；并对 bash-derived 单文件内容读取加 `MAX_BASH_CHECKPOINT_FILE_BYTES=2MB` 上限 | 不改变普通 `build_checkpoint_files(...)` 的显式 file-edit 语义；如果 AI 明确编辑了 `.jsonl`、`.log` 或大文件，不会因为本次 bash 限流被默认排除 |
+| `src/daemon.rs` | daemon 端增加兜底：`metadata.edit_kind` 为 `bash` / `bash_pre` 且请求文件数超过 200 时，直接记录 `bash_request_too_many_files` 并丢弃 | 防止旧/异常前端漏过限流后继续把几百文件请求压进 daemon；明确 file-edit 请求不受这个 daemon 限流影响 |
+| `src/daemon.rs`、`src/commands/checkpoint_agent/orchestrator.rs` | checkpoint debug 事件继续只写 count、sample、omitted、truncated，不写完整路径数组 | 这是诊断日志限流，不参与归因决策 |
+| `src/commands/checkpoint_agent/presets/mod.rs` | 保留已有只读 shell 命令跳过逻辑，只跳过 `Get-Content`、`Select-String`、`rg`、`git diff/log/show/status`、`ls`、`cat` 等明确只读命令；不把 `cargo test`、`python -`、`npm test` 这类可能写文件的脚本/构建命令一概判为只读 | 避免影响其他用户通过 shell 生成/修改代码时的正常 AI bash 归因 |
+| `src/commands/checkpoint_agent/presets/github_copilot/cli.rs` | 更新旧单测，`ls` 现在按只读命令跳过，不再期待产生 PostBash checkpoint；测试改用明确写文件命令 | 测试预期与只读 shell 语义一致 |
+
+为什么不会影响正常逻辑：
+
+1. 正常 Copilot / Claude / Cursor / Codex `apply_patch` / file-edit 工具给出的明确文件路径仍走 `PostFileEdit`，不走 bash 200 文件限流，也不走 bash runtime log 过滤。
+2. `KnownHumanEdit`、`UntrackedEdit` 和显式 `git-ai checkpoint <files>` 仍使用原 `build_checkpoint_files(...)`，只保留旧有 `.git` / `.idea` / `.vscode` 跳过；不会因为文件是 `.jsonl`、`.log` 或超过 2MB 就被本次逻辑排除。
+3. 只有 bash/shell 自动探测出的弱证据批量路径被限流。超过 200 个文件的一次 bash checkpoint 在审计上本来就无法可靠证明“这一批全部由本次 AI bash 工具编辑”，跳过比误归因、卡死机器更安全。
+4. 已经上传的历史记录不自动改写；本修复只影响未来客户端采集与 daemon 处理。
+
+验证记录：
+
+| 命令 | 结果 |
+|------|------|
+| `cargo fmt --check` | 通过 |
+| `cargo test -q --lib bash_` | 通过，47 个相关测试通过；覆盖 bash 大批量跳过、bash runtime log 过滤不影响显式 file-edit、只读 bash 跳过等邻近逻辑 |
+
+### 2026-06-30：张彪 6/29-6/30 authorship note 未生成与 Windows 入口二次自修复
+
+现场问题：`logs/2026-06-30/张彪-20260630.jsonl` 中 2026-06-29 到 2026-06-30 共 11 次成功 commit 都进入了 git-ai wrapper，也都触发了 `wrapper_post_commit` 上传，但每次上传等待 5 秒后都找不到 authorship note，最终按 `hasAuthorshipNote=false` / `unknownAdditions=gitDiffAddedLines` 上传。日志里 `post_commit_started=0`、`post_commit_authorship_note_written=0`，说明问题不是“上传抢先一步”，而是 daemon/post-commit 收口根本没有生成 note。
+
+关键证据：
+
+- 11 次 commit 的入口进程都是 `C:\Users\admin\.git-ai\launcher\git.exe`，`gitAiVersion=2.2.45`。
+- 同一日志里的 `upload-stats`、`checkpoint`、`upgrade --background` 大量来自 `C:\Users\admin\.git-ai\launcher\git-ai.exe` 或 `C:\Users\admin\.git-ai\bin\git-ai.exe`，`gitAiVersion=2.2.46`。
+- `process_started` / `git_proxy_entered` / `git_proxy_route` 接近 3 万条，主要是 IDE 高频 `git log`、`rev-list`、`tag`、`reflog`、`fetch`、`config` 查询都被旧 `launcher\git.exe` 代理记录；11 次 commit 不是日志暴涨主因。
+
+根因：Windows 机器上出现 `launcher\git.exe` 与 `launcher\git-ai.exe` / `bin\git-ai.exe` 版本分裂。PATH 首位是 `.git-ai\launcher`，所以 commit 仍由旧 `launcher\git.exe 2.2.45` 拦截；而后续 fallback upload 又由新版 `git-ai.exe 2.2.46` 执行。旧 commit 入口没有完成新版 daemon/post-commit 收口，导致 authorship note 没有生成。排除项：不是 MCP 用户身份缺失，日志中上传有用户身份；不是 HTTP/后端失败，上传返回成功；也不是单纯“fallback 等待太短”，因为张彪日志里完全没有 `post_commit_started` / `post_commit_authorship_note_written`。
+
+本次代码修复：
+
+| 文件 | 修改点 | 影响 |
+|------|--------|------|
+| `src/commands/install_hooks.rs` | Windows `repair_git_proxy_entrypoint` 不再只修当前 exe 所在目录，而是识别 `.git-ai\launcher` / `.git-ai\bin` 根目录后，从权威 `launcher\git-ai.exe` 同步 `launcher\git.exe`、`bin\git-ai.exe`、`bin\git.exe`；跳过当前正在执行的 exe，避免 Windows 占用导致自覆盖失败 | 用户运行新版 `git-ai install-hooks` 时，即使当前入口来自 `bin\git-ai.exe`，也会修复 PATH 首位的 stale `launcher\git.exe`，防止 commit 继续由旧代理处理 |
+| `src/commands/install_hooks.rs` | 新增 helper 和 Windows 单测，覆盖“从 bin\git-ai.exe 运行 install-hooks 也能刷新 stale launcher\git.exe”和“从 launcher\git.exe 运行时不覆盖当前正在执行的代理” | 锁定张彪这类 launcher/bin 入口分裂回归 |
+| `src/commands/git_handlers.rs` | fallback 等待 authorship note 从 5 秒改为 15 秒 | 只解决龙宇这类 note 生成较慢、fallback 等太短的问题；不把张彪问题解释成抢先上传 |
+
+版本与历史数据口径：修复后续安装 / `git-ai install-hooks` 的入口一致性，保证后续 commit 使用同一套新版 git proxy / git-ai runtime 生成 note。张彪已经上传到远程的 11 条 `hasAuthorshipNote=false` 历史记录不会被客户端自动改写；若要修历史，只能在本地仍存在对应 authorship note 或可审计 working log 证据时显式重算并重传，不能凭空把 unknown 改成 AI 或人工。
+
+验证记录：
+
+| 命令 | 结论 |
+|------|------|
+| `cargo test -q --lib windows_install_hooks` | 通过，覆盖新增 Windows 入口树同步回归 |
+| `cargo test -q --lib post_commit_fallback_upload_waits_for_note_but_does_not_skip_on_note_found` | 通过，确认 fallback 参数仍包含等待 note、已上传跳过和 activity lock |
+| `cargo fmt --check` | 通过 |
+
 ### 2026-06-29: pasted/manual checkpoint additions and early no-note upload
 
 Incidents:

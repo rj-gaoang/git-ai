@@ -43,7 +43,7 @@ fn run_post_commit_followups(
     crate::commands::upgrade::maybe_schedule_background_update_check_after_commit();
 }
 
-const FALLBACK_UPLOAD_WAIT_FOR_AUTHORSHIP_NOTE_MS: &str = "5000";
+const FALLBACK_UPLOAD_WAIT_FOR_AUTHORSHIP_NOTE_MS: &str = "15000";
 const FALLBACK_UPLOAD_GUARD_ENV: &str = "GIT_AI_POST_COMMIT_FALLBACK_UPLOAD_SPAWNED";
 
 fn post_commit_fallback_upload_args(commit_sha: &str, source: &str) -> Vec<String> {

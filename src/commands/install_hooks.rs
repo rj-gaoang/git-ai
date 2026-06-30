@@ -271,8 +271,124 @@ fn sync_windows_git_proxy_entrypoint(
         return Ok(());
     }
 
+    if paths_refer_to_same_file(git_ai_exe, git_proxy) {
+        return Ok(());
+    }
+
+    if let Some(parent) = git_proxy.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
     fs::copy(git_ai_exe, git_proxy)?;
     Ok(())
+}
+
+#[cfg(windows)]
+fn paths_refer_to_same_file(left: &Path, right: &Path) -> bool {
+    if left == right {
+        return true;
+    }
+
+    match (fs::canonicalize(left), fs::canonicalize(right)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
+    }
+}
+
+#[cfg(windows)]
+fn is_windows_git_ai_entrypoint(path: &Path) -> bool {
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+
+    name.eq_ignore_ascii_case("git-ai.exe") || name.eq_ignore_ascii_case("git.exe")
+}
+
+#[cfg(windows)]
+fn windows_git_ai_root_from_entrypoint(current_exe: &Path) -> Option<PathBuf> {
+    let entrypoint_dir = current_exe.parent()?;
+    let entrypoint_dir_name = entrypoint_dir.file_name()?.to_str()?;
+
+    if !entrypoint_dir_name.eq_ignore_ascii_case("launcher")
+        && !entrypoint_dir_name.eq_ignore_ascii_case("bin")
+    {
+        return None;
+    }
+
+    let root = entrypoint_dir.parent()?;
+    let root_name = root.file_name()?.to_str()?;
+    if root_name.eq_ignore_ascii_case(".git-ai") {
+        Some(root.to_path_buf())
+    } else {
+        None
+    }
+}
+
+#[cfg(windows)]
+fn sync_windows_git_ai_entrypoint_tree(root: &Path, current_exe: &Path) -> Result<(), GitAiError> {
+    let launcher_git_ai = root.join("launcher").join("git-ai.exe");
+    let bin_git_ai = root.join("bin").join("git-ai.exe");
+
+    // The launcher is the authoritative entrypoint for normal Windows PATH
+    // usage.  If install-hooks is invoked through a compatibility bin copy,
+    // still use launcher\git-ai.exe as the source when it exists, so a stale
+    // bin hook cannot downgrade the stable launcher.
+    let source = if launcher_git_ai.exists() {
+        launcher_git_ai.clone()
+    } else if current_exe
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.eq_ignore_ascii_case("git-ai.exe"))
+    {
+        current_exe.to_path_buf()
+    } else if bin_git_ai.exists() {
+        bin_git_ai.clone()
+    } else {
+        return Ok(());
+    };
+
+    for target in [
+        launcher_git_ai,
+        root.join("launcher").join("git.exe"),
+        bin_git_ai,
+        root.join("bin").join("git.exe"),
+    ] {
+        // Do not try to overwrite the executable image of the current process.
+        // Windows commonly rejects that, and install.ps1 handles active binary
+        // replacement with its rename fallback.
+        if paths_refer_to_same_file(&target, current_exe) {
+            continue;
+        }
+
+        sync_windows_git_proxy_entrypoint(&source, &target, true)?;
+    }
+
+    Ok(())
+}
+
+#[cfg(windows)]
+fn repair_git_proxy_entrypoint_for_current_exe(current_exe: &Path) -> Result<(), GitAiError> {
+    if !is_windows_git_ai_entrypoint(current_exe) {
+        return Ok(());
+    }
+
+    if let Some(root) = windows_git_ai_root_from_entrypoint(current_exe) {
+        return sync_windows_git_ai_entrypoint_tree(&root, current_exe);
+    }
+
+    let Some(install_dir) = current_exe.parent() else {
+        return Ok(());
+    };
+
+    let current_name = current_exe
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    let git_ai_exe = install_dir.join("git-ai.exe");
+    let git_proxy = install_dir.join("git.exe");
+    let refresh_existing = current_name.eq_ignore_ascii_case("git-ai.exe");
+    sync_windows_git_proxy_entrypoint(&git_ai_exe, &git_proxy, refresh_existing)
 }
 
 #[cfg(windows)]
@@ -284,24 +400,8 @@ fn repair_git_proxy_entrypoint(dry_run: bool) -> Result<(), GitAiError> {
     let Ok(current_exe) = std::env::current_exe() else {
         return Ok(());
     };
-    let Some(install_dir) = current_exe.parent() else {
-        return Ok(());
-    };
 
-    let current_name = current_exe
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or_default();
-    if !current_name.eq_ignore_ascii_case("git-ai.exe")
-        && !current_name.eq_ignore_ascii_case("git.exe")
-    {
-        return Ok(());
-    }
-
-    let git_ai_exe = install_dir.join("git-ai.exe");
-    let git_proxy = install_dir.join("git.exe");
-    let refresh_existing = current_name.eq_ignore_ascii_case("git-ai.exe");
-    sync_windows_git_proxy_entrypoint(&git_ai_exe, &git_proxy, refresh_existing)
+    repair_git_proxy_entrypoint_for_current_exe(&current_exe)
 }
 
 #[cfg(unix)]
@@ -1279,6 +1379,69 @@ mod tests {
         sync_windows_git_proxy_entrypoint(&git_ai_exe, &git_proxy, false).unwrap();
 
         assert_eq!(fs::read(&git_proxy).unwrap(), b"old runtime");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_install_hooks_from_bin_refreshes_stale_launcher_git_proxy() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join(".git-ai");
+        let launcher = root.join("launcher");
+        let bin = root.join("bin");
+        fs::create_dir_all(&launcher).unwrap();
+        fs::create_dir_all(&bin).unwrap();
+
+        let launcher_git_ai = launcher.join("git-ai.exe");
+        let launcher_git = launcher.join("git.exe");
+        let bin_git_ai = bin.join("git-ai.exe");
+        let bin_git = bin.join("git.exe");
+
+        fs::write(&launcher_git_ai, b"new launcher runtime").unwrap();
+        fs::write(&launcher_git, b"old launcher proxy").unwrap();
+        fs::write(&bin_git_ai, b"old bin runtime").unwrap();
+        fs::write(&bin_git, b"old bin proxy").unwrap();
+
+        repair_git_proxy_entrypoint_for_current_exe(&bin_git_ai).unwrap();
+
+        assert_eq!(fs::read(&launcher_git).unwrap(), b"new launcher runtime");
+        assert_eq!(fs::read(&bin_git).unwrap(), b"new launcher runtime");
+        assert_eq!(fs::read(&launcher_git_ai).unwrap(), b"new launcher runtime");
+        assert_eq!(
+            fs::read(&bin_git_ai).unwrap(),
+            b"old bin runtime",
+            "the currently running compatibility git-ai.exe must not be overwritten by install-hooks"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_install_hooks_from_launcher_git_refreshes_bin_without_overwriting_running_proxy() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join(".git-ai");
+        let launcher = root.join("launcher");
+        let bin = root.join("bin");
+        fs::create_dir_all(&launcher).unwrap();
+        fs::create_dir_all(&bin).unwrap();
+
+        let launcher_git_ai = launcher.join("git-ai.exe");
+        let launcher_git = launcher.join("git.exe");
+        let bin_git_ai = bin.join("git-ai.exe");
+        let bin_git = bin.join("git.exe");
+
+        fs::write(&launcher_git_ai, b"new launcher runtime").unwrap();
+        fs::write(&launcher_git, b"old running proxy").unwrap();
+        fs::write(&bin_git_ai, b"old bin runtime").unwrap();
+        fs::write(&bin_git, b"old bin proxy").unwrap();
+
+        repair_git_proxy_entrypoint_for_current_exe(&launcher_git).unwrap();
+
+        assert_eq!(
+            fs::read(&launcher_git).unwrap(),
+            b"old running proxy",
+            "install-hooks must not overwrite the git.exe image that is currently executing"
+        );
+        assert_eq!(fs::read(&bin_git_ai).unwrap(), b"new launcher runtime");
+        assert_eq!(fs::read(&bin_git).unwrap(), b"new launcher runtime");
     }
 
     #[test]

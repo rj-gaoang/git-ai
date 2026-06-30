@@ -1405,6 +1405,20 @@ fn apply_checkpoint_side_effect(request: CheckpointRequest) -> Result<(), GitAiE
         );
         return Ok(());
     }
+    if request
+        .metadata
+        .get("edit_kind")
+        .is_some_and(|kind| kind == "bash" || kind == "bash_pre")
+        && request.files.len() > MAX_DAEMON_BASH_CHECKPOINT_FILES
+    {
+        append_checkpoint_request_resolution_debug_event(
+            &request,
+            None,
+            &[],
+            Some("bash_request_too_many_files"),
+        );
+        return Ok(());
+    }
 
     let repo_work_dir = &request.files[0].repo_work_dir;
     let repo = match discover_repository_in_path_no_git_exec(repo_work_dir) {
@@ -1589,11 +1603,10 @@ fn append_checkpoint_request_resolution_debug_event(
     resolved_files: &[String],
     reason: Option<&str>,
 ) {
-    let requested_filepaths = request
-        .files
-        .iter()
-        .map(|file| file.path.to_string_lossy().replace('\\', "/"))
-        .collect::<Vec<_>>();
+    let request_file_count = request.files.len();
+    let request_file_sample = checkpoint_request_path_sample(request);
+    let resolved_file_count = resolved_files.len();
+    let resolved_file_sample = debug_string_path_sample(resolved_files);
 
     crate::diagnostics::append_debug_event(
         "daemon_checkpoint_request_resolved_files",
@@ -1606,10 +1619,15 @@ fn append_checkpoint_request_resolution_debug_event(
             "checkpointKind": request.checkpoint_kind.to_str(),
             "toolUseId": request.metadata.get("tool_use_id"),
             "baseCommit": checkpoint_request_base_commit_for_debug(request),
-            "requestFileCount": requested_filepaths.len(),
-            "requestFilepaths": requested_filepaths,
-            "resolvedFileCount": resolved_files.len(),
-            "resolvedFilepaths": resolved_files,
+            "requestFileCount": request_file_count,
+            "requestFilepathSample": request_file_sample,
+            "requestFilepathOmitted": debug_omitted_path_count(request_file_count, request_file_sample.len()),
+            "requestFilepathsTruncated": request_file_count > request_file_sample.len(),
+            "resolvedFileCount": resolved_file_count,
+            "resolvedFilepathSample": resolved_file_sample,
+            "resolvedFilepathOmitted": debug_omitted_path_count(resolved_file_count, resolved_file_sample.len()),
+            "resolvedFilepathsTruncated": resolved_file_count > resolved_file_sample.len(),
+            "pathSampleLimit": CHECKPOINT_DEBUG_PATH_SAMPLE_LIMIT,
             "reason": reason,
         }),
     );
@@ -1624,6 +1642,31 @@ fn checkpoint_request_base_commit_for_debug(request: &CheckpointRequest) -> Opti
     })
 }
 
+const CHECKPOINT_DEBUG_PATH_SAMPLE_LIMIT: usize = 20;
+const MAX_DAEMON_BASH_CHECKPOINT_FILES: usize = 200;
+
+fn debug_omitted_path_count(total: usize, sample_len: usize) -> usize {
+    total.saturating_sub(sample_len)
+}
+
+fn debug_string_path_sample(paths: &[String]) -> Vec<String> {
+    let mut sample = paths.to_vec();
+    sample.sort();
+    sample.truncate(CHECKPOINT_DEBUG_PATH_SAMPLE_LIMIT);
+    sample
+}
+
+fn checkpoint_request_path_sample(request: &CheckpointRequest) -> Vec<String> {
+    let mut sample = request
+        .files
+        .iter()
+        .map(|file| file.path.to_string_lossy().replace('\\', "/"))
+        .collect::<Vec<_>>();
+    sample.sort();
+    sample.truncate(CHECKPOINT_DEBUG_PATH_SAMPLE_LIMIT);
+    sample
+}
+
 fn append_checkpoint_lifecycle_debug_event(
     event: &str,
     request: &CheckpointRequest,
@@ -1633,11 +1676,8 @@ fn append_checkpoint_lifecycle_debug_event(
     duration_ms: Option<u128>,
     error: Option<&GitAiError>,
 ) {
-    let requested_filepaths = request
-        .files
-        .iter()
-        .map(|file| file.path.to_string_lossy().replace('\\', "/"))
-        .collect::<Vec<_>>();
+    let request_file_count = request.files.len();
+    let request_file_sample = checkpoint_request_path_sample(request);
 
     crate::diagnostics::append_debug_event(
         event,
@@ -1649,8 +1689,11 @@ fn append_checkpoint_lifecycle_debug_event(
             "pathRole": format!("{:?}", request.path_role),
             "toolUseId": request.metadata.get("tool_use_id"),
             "baseCommit": checkpoint_request_base_commit_for_debug(request),
-            "requestFileCount": requested_filepaths.len(),
-            "requestFilepaths": requested_filepaths,
+            "requestFileCount": request_file_count,
+            "requestFilepathSample": request_file_sample,
+            "requestFilepathOmitted": debug_omitted_path_count(request_file_count, request_file_sample.len()),
+            "requestFilepathsTruncated": request_file_count > request_file_sample.len(),
+            "pathSampleLimit": CHECKPOINT_DEBUG_PATH_SAMPLE_LIMIT,
             "status": status,
             "durationMs": duration_ms,
             "error": error.map(|err| err.to_string()),

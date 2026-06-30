@@ -243,7 +243,7 @@ mod tests {
             "session_id": "sess-cli",
             "cwd": "/Users/a/project",
             "tool_name": "bash",
-            "tool_input": {"command": "ls", "description": "list", "mode": "sync", "initial_wait": 30},
+            "tool_input": {"command": "echo hi > out.txt", "description": "write", "mode": "sync", "initial_wait": 30},
             "tool_result": {"result_type": "success", "text_result_for_llm": ""}
         })
         .to_string();

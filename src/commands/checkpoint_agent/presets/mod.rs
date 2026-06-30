@@ -171,6 +171,7 @@ pub(crate) fn is_read_only_shell_command(command: &str) -> bool {
     }
 
     let lower = command.to_ascii_lowercase();
+    let trimmed_lower = lower.trim_start();
     let mutating_markers = [
         "apply_patch",
         "set-content",
@@ -193,13 +194,6 @@ pub(crate) fn is_read_only_shell_command(command: &str) -> bool {
         "git clean",
         "git merge",
         "git rebase",
-        "cargo ",
-        "npm ",
-        "pnpm ",
-        "yarn ",
-        "mvn ",
-        "gradle",
-        "task ",
     ];
     if mutating_markers.iter().any(|marker| lower.contains(marker)) {
         return false;
@@ -232,7 +226,6 @@ pub(crate) fn is_read_only_shell_command(command: &str) -> bool {
         "ls",
         "cat ",
     ];
-    let trimmed_lower = lower.trim_start();
     read_only_starts
         .iter()
         .any(|prefix| trimmed_lower.starts_with(prefix))
