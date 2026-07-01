@@ -68,6 +68,25 @@ Speckit 是团队使用的「规范驱动开发」框架，通过 `.specify/` �
 
 验证口径：本修复只影响 checkpoint 采集入口，不改变 post-commit authorship note、stats 计算和 upload payload。由于当前机器多次因测试/大日志解析卡死，本轮只做格式与 diff 检查，不跑集成测试。
 
+### 2026-07-01：庞福泽 6/24 后 VSCode / 真实 Git commit 没有进入上传链路
+
+现场问题：用户庞福泽在 `2026-06-23` 之后仍有成功提交，但远程看板没有记录。用户补充的目标窗口包括 `rj-ltc-web` 的 `2026-06-25 19:51`、`2026-06-29 18:51`，以及 `ces-vue-serve` 的 `2026-06-29 10:17`、`2026-06-29 18:35`。这些不是“IDEA 没配置 git-ai 包装 git”的问题；对照 `logs/2026-07-01/刘小渝2026-07-01.jsonl`，刘小渝同样没有在 IDEA 配置 git-ai wrapper，但 `2026-07-01 11:53:10`、`14:07:20`、`14:25:01` 的提交都会执行全局 `post-commit` hook：先跑 `repair-authorship-note HEAD --write`，再跑 `upload-stats HEAD --source git-global-post-commit-hook --skip-if-already-uploaded`，远程 HTTP 返回成功。
+
+证据链：庞福泽 `2026-06-23` 的成功上传不是 `C:\Users\admin\.git-ai\launcher\git.exe command=commit` 收口，而是 daemon / Trace2 收口，日志有 `post_commit_started` 和 `hasFinalStateOverride=true`，旁边没有 `git_proxy_entered command=commit`。`2.2.46` 的安装逻辑在 `install-hooks` 中清理了全局 `trace2`，把 Trace2 限定到 git-ai proxy 内部；庞福泽在 `2026-06-25 14:27` 运行过 `2.2.46 install-hooks` 后，VSCode / 真实 Git 创建的成功 commit 不再被全局 Trace2 观察。目标时间窗口里没有 `repair-authorship-note`、没有 `upload-stats --source git-global-post-commit-hook`，也没有 `upload_stats_manual_entered`。`rj-ltc-web 2026-06-29 18:51` 虽然有一次 wrapper `command=commit`，但真实 Git 子进程 `exitCode=1`，不是成功提交。
+
+根因：`2.2.46` 清理全局 Trace2 是为了避免所有 Git 查询都打到 daemon，这个方向保留；但清理后没有给非 wrapper 的成功 `git commit` 留下新的“提交创建后”入口。刘小渝机器之所以仍能上传，是因为全局 `core.hooksPath` 里已经有受控 `post-commit` hook；庞福泽机器缺少这条全局 hook，所以 6/24 之后 VSCode 调真实 Git 成功提交时没有进入 note 生成和上传链路。排除项：不是 HTTP / 后端失败，不是 MCP 用户身份缺失，不是 stats 计算失败，不是 IDEA 配置变化，也不是 `launcher\git.exe command=commit` 成功后没有收口。
+
+代码修复：
+
+| 文件 | 变更点 | 影响 |
+|------|--------|------|
+| `src/commands/install_hooks.rs` | `install-hooks` 新增受控全局 `post-commit` hook 安装项 `git-global-post-commit-hook`。当全局 `core.hooksPath` 为空或已指向 `.git-ai/managed-git-hooks` 时，写入托管 `post-commit` 并设置 hooksPath；当已有外部 hooksPath 且目录无 post-commit 时写入该目录；当已有非 git-ai post-commit 时不覆盖，只返回 failed/warning | 真实 Git / VSCode / IDEA / TortoiseGit 等未走 git-ai wrapper 的成功 commit，只要 Git 执行全局 hook，就会先后台执行 `repair-authorship-note HEAD --write`，再执行 `upload-stats HEAD --source git-global-post-commit-hook --skip-if-already-uploaded` |
+| `src/commands/install_hooks.rs` | 托管 hook 检测到 `GITAI_SKIP_MANAGED_HOOKS=1` 或 `GIT_AI_WRAPPER_INVOCATION_ID` 时直接退出 | git-ai wrapper 自己代理的 commit 继续走原有 daemon / wrapper 收口，不和全局 hook 双重消费同一个父 working log |
+| `src/authorship/post_commit.rs` | `repair-authorship-note` 不再只读 `old-<parent>` 归档 working log；当 active `<parent>` working log 仍存在时，也能用它生成 authorship note，并在写 note 后归档到 `old-<parent>`、把未提交 INITIAL 归因续写到新 HEAD bucket | 全局 hook 处理“commit 已经创建，但正常 post-commit 尚未跑过”的真实外部 Git 场景时，不会退化成 no-note metadata-only 上传；有本地 checkpoint / INITIAL 证据时可以生成真实 authorship note |
+| `tests/integration/post_commit_unit.rs` | 新增 `repair_authorship_note_uses_active_working_log_for_plain_git_commit` | 覆盖 plain Git commit 绕过 wrapper 后，repair 从 active 父 working log 写出 note、统计 AI 行并归档 working log 的场景 |
+
+验证记录：`cargo test -q --lib install_managed_global_post_commit_hook` 通过，覆盖无 hooksPath 安装、幂等、保护外部 post-commit 三种安装形态；`cargo test -q --test integration repair_authorship_note_uses_active_working_log_for_plain_git_commit` 通过，覆盖 active working log 收口；`cargo check -q --lib`、`cargo fmt --check`、`git diff --check` 通过。历史数据口径：本修复保证用户升级并重新运行 `git-ai install-hooks` 后的未来外部 Git commit 会进入全局 post-commit hook；已经发生且远端缺失的 6/25、6/29 提交不会被客户端凭空自动补传，若要修历史，需要先拿到 commit SHA，并在本地仍有 note 或可从 working log 修复时显式运行 `git-ai repair-authorship-note <sha> --write` / `git-ai upload-stats <sha> --source manual`。
+
 ### 2026-07-01：尚冠 115MB JSONL 日志暴涨与 bash fallback 全量路径 debug 截断
 
 现场问题：`logs/2026-06-30/尚冠-20260630.jsonl` 两天日志达到 `120781684` bytes，约 `115.2MB`。现场复查时文件 `LastWriteTime=2026/6/30 20:22:34`，等待 2 秒后大小仍为 `120781684` bytes，`delta=0`；因此不是当前仍在持续写入，而是 6/29 历史日志中已经写入了少数超大 JSONL 行。
@@ -2962,6 +2981,7 @@ GitHub Copilot VS Code native hook 的补充说明：当 hook payload 因为脱�
 | 2.46 | Windows launcher git proxy 与 git-ai 入口强制同步 | `git-ai/install.ps1`、`git-ai/src/commands/install_hooks.rs`、`git-ai/tests/windows_script_checks.rs`、`git-ai/docs/design-doc/git-ai看板方案.md` | 安装时同时刷新 `.git-ai\launcher\git.exe` 与 `.git-ai\bin\git.exe`，PATH 继续优先 launcher；`git-ai install-hooks` 通过新版 `git-ai.exe` 运行时也会覆盖同目录旧 `git.exe`。修复黄芳 2026-06-26 这类 `git-ai.exe` 已是 2.2.46、但 commit 仍由旧 `launcher\git.exe` 2.2.44 拦截，导致没有 post-commit/upload 事件的问题 |
 | 2.47 | Copilot mixed workspace 漏采与 replay Human 误报人工修复 | `git-ai/src/commands/checkpoint_agent/orchestrator.rs`、`git-ai/src/daemon/checkpoint.rs`、`git-ai/tests/integration/github_copilot_tools.rs`、`git-ai/tests/integration/post_commit_unit.rs`、`git-ai/tests/integration/repos/test_repo.rs`、`git-ai/docs/design-doc/git-ai看板方案.md` | Copilot 在上层工作区一次 payload 混入非 Git 仓库路径时，不再让该路径拖垮同批子仓库 AI checkpoint；synthetic replay / backfill Human checkpoint 保留 `git_ai_replay_checkpoint=true` 等弱证据标记，post-commit 不再把这类快照误判为 plain manual Human 并写入 `h_*`。修复锦召 `ai-rag-doc` / `ai-rag-service-python` 这类“目标提交没有 AI checkpoint、又被 replay Human 误补成人工”的本地坏数链路 |
 | 2.48 | 观察到新 HEAD/base 后补偿漏 post-commit 提交 | `git-ai/src/git/sync_authorship.rs`、`git-ai/src/daemon.rs`、`git-ai/tests/integration/post_commit_unit.rs`、`git-ai/docs/design-doc/git-ai看板方案.md` | 后续 checkpoint 的 `baseCommit` 或 IDE 触发的普通 Git 查询证明 HEAD 已推进时，如果目标 commit 缺 authorship note 且父 working log 仍有 checkpoint / INITIAL 证据，则复用 post-commit 收口生成 note 并进入上传；无本地证据的 raw commit 仍保持 unknown。修复龙宇 2026-06-27 `rj-ltc-web` 18:05 / 18:42 这类 commit 绕过 post-commit 且没有 push 兜底时看板漏传的问题 |
+| 2.49 | 受控全局 post-commit hook 覆盖非 wrapper 成功提交 | `git-ai/src/commands/install_hooks.rs`、`git-ai/src/authorship/post_commit.rs`、`git-ai/tests/integration/post_commit_unit.rs`、`git-ai/docs/design-doc/git-ai看板方案.md` | `install-hooks` 安装 `git-global-post-commit-hook`，让 VSCode / IDEA / 真实 Git 成功 commit 后执行 `repair-authorship-note HEAD --write` 和 `upload-stats HEAD --source git-global-post-commit-hook --skip-if-already-uploaded`；wrapper commit 通过 `GITAI_SKIP_MANAGED_HOOKS` / `GIT_AI_WRAPPER_INVOCATION_ID` 跳过全局 hook，继续走原有收口。`repair-authorship-note` 支持 active `<parent>` working log，避免非 wrapper commit 只能 no-note metadata-only 上传。修复庞福泽 2026-06-25 后外部 Git 提交不进入 `launcher\git.exe command=commit` 且缺少全局 hook 导致看板漏传的问题 |
 
 ### Phase 3（2-3 天）：Code Review 自动上传
 

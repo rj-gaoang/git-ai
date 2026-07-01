@@ -12,6 +12,10 @@ use std::process::{Command, Stdio};
 
 const CORE_HOOKS_PATH_KEY: &str = "core.hooksPath";
 const VISUAL_STUDIO_INSTALLER_ID: &str = "visual-studio";
+const GLOBAL_POST_COMMIT_HOOK_ID: &str = "git-global-post-commit-hook";
+const MANAGED_GLOBAL_HOOKS_DIR: &str = "managed-git-hooks";
+const MANAGED_GLOBAL_HOOK_MARKER: &str = "git-ai managed global post-commit hook";
+const GLOBAL_POST_COMMIT_SOURCE: &str = "git-global-post-commit-hook";
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct InstallOptions {
@@ -501,6 +505,213 @@ fn repair_stale_global_hooks_path(dry_run: bool) -> Result<Option<String>, GitAi
     Ok(Some(current))
 }
 
+#[derive(Debug, Clone)]
+struct ManagedGlobalPostCommitHookResult {
+    status: InstallStatus,
+    message: Option<String>,
+}
+
+impl ManagedGlobalPostCommitHookResult {
+    fn installed() -> Self {
+        Self {
+            status: InstallStatus::Installed,
+            message: None,
+        }
+    }
+
+    fn already_installed() -> Self {
+        Self {
+            status: InstallStatus::AlreadyInstalled,
+            message: None,
+        }
+    }
+
+    fn failed(message: impl Into<String>) -> Self {
+        Self {
+            status: InstallStatus::Failed,
+            message: Some(message.into()),
+        }
+    }
+}
+
+fn managed_global_hooks_dir() -> PathBuf {
+    home_dir().join(".git-ai").join(MANAGED_GLOBAL_HOOKS_DIR)
+}
+
+fn managed_global_hooks_path_value() -> String {
+    crate::utils::normalize_to_posix(&managed_global_hooks_dir().to_string_lossy())
+}
+
+fn path_value_for_git_config(path: &Path) -> String {
+    crate::utils::normalize_to_posix(&path.to_string_lossy())
+}
+
+fn shell_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+fn managed_global_post_commit_hook_content(git_ai_exe: &Path) -> String {
+    let git_ai_exe = shell_single_quote(&path_value_for_git_config(git_ai_exe));
+    let source = shell_single_quote(GLOBAL_POST_COMMIT_SOURCE);
+
+    format!(
+        r#"#!/bin/sh
+# {marker}.
+# Best-effort only. This hook must never block or break user commits.
+
+GIT_AI_EXE={git_ai_exe}
+SOURCE={source}
+
+if [ ! -x "$GIT_AI_EXE" ] && [ ! -f "$GIT_AI_EXE" ]; then
+  exit 0
+fi
+
+if [ "${{GITAI_SKIP_MANAGED_HOOKS:-}}" = "1" ] || [ -n "${{GIT_AI_WRAPPER_INVOCATION_ID:-}}" ]; then
+  exit 0
+fi
+
+(
+  GIT_AI_SKIP_ALL_HOOKS=1 \
+  GIT_AI_POST_COMMIT_FALLBACK_UPLOAD_SPAWNED=1 \
+  "$GIT_AI_EXE" repair-authorship-note HEAD --write
+
+  GIT_AI_SKIP_ALL_HOOKS=1 \
+  GIT_AI_POST_COMMIT_FALLBACK_UPLOAD_SPAWNED=1 \
+  "$GIT_AI_EXE" upload-stats HEAD --source "$SOURCE" --skip-if-already-uploaded
+) >/dev/null 2>&1 &
+
+exit 0
+"#,
+        marker = MANAGED_GLOBAL_HOOK_MARKER,
+        git_ai_exe = git_ai_exe,
+        source = source
+    )
+}
+
+fn is_managed_global_hook_content(content: &str) -> bool {
+    content.contains(MANAGED_GLOBAL_HOOK_MARKER)
+}
+
+fn current_global_hooks_path() -> Result<Option<String>, GitAiError> {
+    let config_path = global_git_config_path();
+    if !config_path.exists() {
+        return Ok(None);
+    }
+
+    let cfg = load_global_git_config(&config_path)?;
+    Ok(cfg
+        .string(CORE_HOOKS_PATH_KEY)
+        .map(|value| value.to_string())
+        .filter(|value| !value.trim().is_empty()))
+}
+
+fn set_global_hooks_path(value: &str) -> Result<(), GitAiError> {
+    ensure_global_git_config_dirs()?;
+    let config_path = global_git_config_path();
+    let mut cfg = load_global_git_config(&config_path)?;
+    cfg.set_raw_value(&CORE_HOOKS_PATH_KEY, value)
+        .map_err(|e| GitAiError::GixError(e.to_string()))?;
+    write_global_git_config(&config_path, &cfg)
+}
+
+fn should_use_managed_global_hooks_dir(current_hooks_path: Option<&str>) -> bool {
+    let Some(current) = current_hooks_path else {
+        return true;
+    };
+    let trimmed = current.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+
+    let managed = managed_global_hooks_dir();
+    let expanded = expanded_hooks_path(trimmed);
+    if expanded == managed {
+        return true;
+    }
+
+    match (fs::canonicalize(&expanded), fs::canonicalize(&managed)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
+    }
+}
+
+fn managed_global_hook_target_dir(current_hooks_path: Option<&str>) -> PathBuf {
+    if should_use_managed_global_hooks_dir(current_hooks_path) {
+        managed_global_hooks_dir()
+    } else {
+        expanded_hooks_path(current_hooks_path.unwrap_or_default())
+    }
+}
+
+fn can_overwrite_post_commit_hook(path: &Path) -> Result<bool, GitAiError> {
+    if !path.exists() {
+        return Ok(true);
+    }
+
+    let content = fs::read_to_string(path)?;
+    Ok(is_managed_global_hook_content(&content))
+}
+
+fn install_managed_global_post_commit_hook(
+    git_ai_exe: &Path,
+    dry_run: bool,
+) -> Result<ManagedGlobalPostCommitHookResult, GitAiError> {
+    let current_hooks_path = current_global_hooks_path()?;
+    let target_dir = managed_global_hook_target_dir(current_hooks_path.as_deref());
+    let post_commit_path = target_dir.join("post-commit");
+    let use_managed_dir = should_use_managed_global_hooks_dir(current_hooks_path.as_deref());
+    let desired_hooks_path = managed_global_hooks_path_value();
+    let desired_content = managed_global_post_commit_hook_content(git_ai_exe);
+
+    if !use_managed_dir
+        && post_commit_path.exists()
+        && !can_overwrite_post_commit_hook(&post_commit_path)?
+    {
+        return Ok(ManagedGlobalPostCommitHookResult::failed(format!(
+            "global core.hooksPath already has a non-git-ai post-commit hook: {}",
+            post_commit_path.display()
+        )));
+    }
+
+    let existing_content = fs::read_to_string(&post_commit_path).ok();
+    let hook_changed = existing_content.as_deref() != Some(desired_content.as_str());
+    let config_changed = if use_managed_dir {
+        current_hooks_path.as_deref().map(str::trim) != Some(desired_hooks_path.as_str())
+    } else {
+        false
+    };
+
+    if dry_run {
+        return Ok(if hook_changed || config_changed {
+            ManagedGlobalPostCommitHookResult::installed()
+        } else {
+            ManagedGlobalPostCommitHookResult::already_installed()
+        });
+    }
+
+    fs::create_dir_all(&target_dir)?;
+    if hook_changed {
+        fs::write(&post_commit_path, desired_content)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = fs::metadata(&post_commit_path)?.permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(&post_commit_path, permissions)?;
+        }
+    }
+
+    if config_changed {
+        set_global_hooks_path(&desired_hooks_path)?;
+    }
+
+    Ok(if hook_changed || config_changed {
+        ManagedGlobalPostCommitHookResult::installed()
+    } else {
+        ManagedGlobalPostCommitHookResult::already_installed()
+    })
+}
+
 #[allow(dead_code)]
 pub(crate) fn configure_async_mode_daemon_trace2_for_config(
     _daemon_config: &DaemonConfig,
@@ -810,11 +1021,73 @@ async fn async_run_install(
     params: &HookInstallerParams,
     options: &InstallOptions,
 ) -> Result<HashMap<String, InstallStatus>, GitAiError> {
-    let mut any_checked = false;
+    let mut any_checked = true;
     let mut has_changes = false;
     let mut statuses: HashMap<String, InstallStatus> = HashMap::new();
     // Track detailed results for metrics (tool_id, result)
     let mut detailed_results: Vec<(String, InstallResult)> = Vec::new();
+
+    // === Git Client ===
+    println!("\n\x1b[1mGit Client\x1b[0m");
+    let spinner = Spinner::new("Global post-commit hook: checking");
+    spinner.start();
+    match install_managed_global_post_commit_hook(&params.binary_path, options.dry_run) {
+        Ok(result) => {
+            statuses.insert(GLOBAL_POST_COMMIT_HOOK_ID.to_string(), result.status);
+            match result.status {
+                InstallStatus::Installed => {
+                    has_changes = true;
+                    if options.dry_run {
+                        spinner.pending("Global post-commit hook: Pending updates");
+                    } else {
+                        spinner.success("Global post-commit hook: Installed");
+                    }
+                    detailed_results.push((
+                        GLOBAL_POST_COMMIT_HOOK_ID.to_string(),
+                        InstallResult::installed(),
+                    ));
+                }
+                InstallStatus::AlreadyInstalled => {
+                    spinner.success("Global post-commit hook: Already installed");
+                    detailed_results.push((
+                        GLOBAL_POST_COMMIT_HOOK_ID.to_string(),
+                        InstallResult::already_installed(),
+                    ));
+                }
+                InstallStatus::Failed => {
+                    let message = result
+                        .message
+                        .unwrap_or_else(|| "failed to install global post-commit hook".to_string());
+                    spinner.error("Global post-commit hook: Failed");
+                    eprintln!("  Warning: {}", message);
+                    detailed_results.push((
+                        GLOBAL_POST_COMMIT_HOOK_ID.to_string(),
+                        InstallResult::failed(message),
+                    ));
+                }
+                InstallStatus::NotFound => {
+                    spinner.pending("Global post-commit hook: Not found");
+                    detailed_results.push((
+                        GLOBAL_POST_COMMIT_HOOK_ID.to_string(),
+                        InstallResult::not_found(),
+                    ));
+                }
+            }
+        }
+        Err(error) => {
+            let message = error.to_string();
+            spinner.error("Global post-commit hook: Failed");
+            eprintln!("  Warning: {}", message);
+            statuses.insert(
+                GLOBAL_POST_COMMIT_HOOK_ID.to_string(),
+                InstallStatus::Failed,
+            );
+            detailed_results.push((
+                GLOBAL_POST_COMMIT_HOOK_ID.to_string(),
+                InstallResult::failed(message),
+            ));
+        }
+    }
 
     // === Coding Agents ===
     println!("\n\x1b[1mCoding Agents\x1b[0m");
@@ -1557,6 +1830,129 @@ mod tests {
             cfg.string(CORE_HOOKS_PATH_KEY)
                 .map(|value| value.to_string()),
             Some(hooks_dir.to_string_lossy().replace('\\', "/"))
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn install_managed_global_post_commit_hook_sets_hooks_path_when_unset() {
+        let temp = tempdir().unwrap();
+        let config_path = temp.path().join(".gitconfig");
+        let git_ai_exe = test_binary_path(&temp.path().join("launcher"));
+        fs::create_dir_all(git_ai_exe.parent().unwrap()).unwrap();
+        fs::write(&git_ai_exe, b"runtime").unwrap();
+
+        let _global_config = EnvVarGuard::set("GIT_CONFIG_GLOBAL", config_path.to_str().unwrap());
+        let _home = EnvVarGuard::set("HOME", temp.path().to_str().unwrap());
+        #[cfg(windows)]
+        let _userprofile = EnvVarGuard::set("USERPROFILE", temp.path().to_str().unwrap());
+
+        let result = install_managed_global_post_commit_hook(&git_ai_exe, false).unwrap();
+
+        assert_eq!(result.status, InstallStatus::Installed);
+        let cfg = load_global_git_config(&config_path).unwrap();
+        assert_eq!(
+            cfg.string(CORE_HOOKS_PATH_KEY)
+                .map(|value| value.to_string()),
+            Some(managed_global_hooks_path_value())
+        );
+
+        let hook = managed_global_hooks_dir().join("post-commit");
+        let content = fs::read_to_string(hook).unwrap();
+        assert!(content.contains(MANAGED_GLOBAL_HOOK_MARKER));
+        assert!(content.contains("GITAI_SKIP_MANAGED_HOOKS"));
+        assert!(content.contains("GIT_AI_WRAPPER_INVOCATION_ID"));
+        assert!(content.contains("repair-authorship-note HEAD --write"));
+        assert!(
+            content.contains("upload-stats HEAD --source \"$SOURCE\" --skip-if-already-uploaded")
+        );
+        assert!(content.contains(") >/dev/null 2>&1 &"));
+        assert!(content.contains("GIT_AI_SKIP_ALL_HOOKS=1"));
+        assert!(content.contains("GIT_AI_POST_COMMIT_FALLBACK_UPLOAD_SPAWNED=1"));
+    }
+
+    #[test]
+    #[serial]
+    fn install_managed_global_post_commit_hook_is_idempotent() {
+        let temp = tempdir().unwrap();
+        let config_path = temp.path().join(".gitconfig");
+        let git_ai_exe = test_binary_path(&temp.path().join("launcher"));
+        fs::create_dir_all(git_ai_exe.parent().unwrap()).unwrap();
+        fs::write(&git_ai_exe, b"runtime").unwrap();
+
+        let _global_config = EnvVarGuard::set("GIT_CONFIG_GLOBAL", config_path.to_str().unwrap());
+        let _home = EnvVarGuard::set("HOME", temp.path().to_str().unwrap());
+        #[cfg(windows)]
+        let _userprofile = EnvVarGuard::set("USERPROFILE", temp.path().to_str().unwrap());
+
+        install_managed_global_post_commit_hook(&git_ai_exe, false).unwrap();
+        let result = install_managed_global_post_commit_hook(&git_ai_exe, false).unwrap();
+
+        assert_eq!(result.status, InstallStatus::AlreadyInstalled);
+    }
+
+    #[test]
+    #[serial]
+    fn install_managed_global_post_commit_hook_preserves_foreign_post_commit() {
+        let temp = tempdir().unwrap();
+        let config_path = temp.path().join(".gitconfig");
+        let hooks_dir = temp.path().join("foreign-hooks");
+        fs::create_dir_all(&hooks_dir).unwrap();
+        fs::write(hooks_dir.join("post-commit"), "#!/bin/sh\necho foreign\n").unwrap();
+        fs::write(
+            &config_path,
+            format!(
+                "[core]\n\thooksPath = {}\n",
+                hooks_dir.to_string_lossy().replace('\\', "/")
+            ),
+        )
+        .unwrap();
+        let git_ai_exe = test_binary_path(&temp.path().join("launcher"));
+        fs::create_dir_all(git_ai_exe.parent().unwrap()).unwrap();
+        fs::write(&git_ai_exe, b"runtime").unwrap();
+
+        let _global_config = EnvVarGuard::set("GIT_CONFIG_GLOBAL", config_path.to_str().unwrap());
+        let _home = EnvVarGuard::set("HOME", temp.path().to_str().unwrap());
+        #[cfg(windows)]
+        let _userprofile = EnvVarGuard::set("USERPROFILE", temp.path().to_str().unwrap());
+
+        let result = install_managed_global_post_commit_hook(&git_ai_exe, false).unwrap();
+
+        assert_eq!(result.status, InstallStatus::Failed);
+        assert!(
+            result
+                .message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("non-git-ai post-commit hook")
+        );
+        assert_eq!(
+            fs::read_to_string(hooks_dir.join("post-commit")).unwrap(),
+            "#!/bin/sh\necho foreign\n"
+        );
+        let cfg = load_global_git_config(&config_path).unwrap();
+        assert_eq!(
+            cfg.string(CORE_HOOKS_PATH_KEY)
+                .map(|value| value.to_string()),
+            Some(hooks_dir.to_string_lossy().replace('\\', "/"))
+        );
+    }
+
+    #[test]
+    fn managed_global_post_commit_hook_skips_wrapper_invocations() {
+        let content = managed_global_post_commit_hook_content(Path::new("C:/git-ai/git-ai.exe"));
+
+        assert!(content.contains("GITAI_SKIP_MANAGED_HOOKS"));
+        assert!(content.contains("GIT_AI_WRAPPER_INVOCATION_ID"));
+        assert!(
+            content.find("GITAI_SKIP_MANAGED_HOOKS").unwrap()
+                < content.find("repair-authorship-note HEAD --write").unwrap()
+        );
+        assert!(
+            content.find("GIT_AI_WRAPPER_INVOCATION_ID").unwrap()
+                < content
+                    .find("upload-stats HEAD --source \"$SOURCE\" --skip-if-already-uploaded")
+                    .unwrap()
         );
     }
 

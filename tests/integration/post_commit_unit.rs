@@ -3,6 +3,7 @@ use crate::repos::test_repo::TestRepo;
 use git_ai::authorship::attribution_tracker::LineAttribution;
 use git_ai::authorship::authorship_log_serialization::AuthorshipLog;
 use git_ai::authorship::working_log::{Checkpoint, CheckpointKind, WorkingLogEntry};
+use git_ai::git::repository as git_ai_repository;
 use std::collections::HashMap;
 
 #[test]
@@ -195,6 +196,80 @@ fn replay_human_checkpoint_does_not_fill_manual_gaps() {
     assert_eq!(stats.ai_additions, 0);
     assert_eq!(stats.human_additions, 0);
     assert_eq!(stats.unknown_additions, 3);
+}
+
+#[test]
+fn repair_authorship_note_uses_active_working_log_for_plain_git_commit() {
+    let repo = TestRepo::new();
+
+    std::fs::write(repo.path().join("seed.txt"), "seed\n").unwrap();
+    repo.git(&["add", "seed.txt"]).unwrap();
+    repo.stage_all_and_commit("Initial commit").unwrap();
+    let parent_sha = repo
+        .git_og(&["rev-parse", "HEAD"])
+        .unwrap()
+        .trim()
+        .to_string();
+
+    std::fs::write(repo.path().join("plain-ai.txt"), "generated line\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "plain-ai.txt"])
+        .unwrap();
+    let active_log = repo.current_working_logs();
+    assert!(
+        active_log.read_all_checkpoints().unwrap().len() >= 1,
+        "test setup should leave checkpoint evidence in the active parent working log"
+    );
+
+    repo.git_og(&["add", "plain-ai.txt"]).unwrap();
+    repo.git_og_with_env(
+        &[
+            "commit",
+            "-m",
+            "Plain git commit bypasses wrapper",
+            "--no-verify",
+        ],
+        &[
+            ("GIT_AUTHOR_DATE", "2023-01-01T12:00:00Z"),
+            ("GIT_COMMITTER_DATE", "2023-01-01T12:00:00Z"),
+            ("GIT_EDITOR", "true"),
+        ],
+    )
+    .unwrap();
+    let commit_sha = repo
+        .git_og(&["rev-parse", "HEAD"])
+        .unwrap()
+        .trim()
+        .to_string();
+    assert!(
+        repo.read_authorship_note(&commit_sha).is_none(),
+        "plain commit should not have a note before repair"
+    );
+
+    let git_ai_repo = git_ai_repository::find_repository_in_path(repo.path().to_str().unwrap())
+        .expect("test repo should be discoverable");
+    let result = git_ai::authorship::post_commit::repair_authorship_note_from_archived_working_log(
+        &git_ai_repo,
+        &commit_sha,
+        "Test User <test@example.com>".to_string(),
+        true,
+    )
+    .unwrap();
+
+    assert_eq!(result.stats.git_diff_added_lines, 1);
+    assert_eq!(result.stats.ai_additions, 1);
+    assert_eq!(result.stats.unknown_additions, 0);
+    assert!(repo.read_authorship_note(&commit_sha).is_some());
+    assert!(
+        !git_ai_repo.storage.has_working_log(&parent_sha),
+        "repair should archive the consumed active parent working log"
+    );
+    assert!(
+        git_ai_repo
+            .storage
+            .archived_working_log_for_base_commit(&parent_sha)
+            .is_ok(),
+        "repair should leave the consumed parent working log under old-<parent>"
+    );
 }
 
 #[test]

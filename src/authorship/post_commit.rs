@@ -48,6 +48,21 @@ pub struct RepairAuthorshipNoteResult {
     pub authorship_log: AuthorshipLog,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RepairWorkingLogSource {
+    Active,
+    Archived,
+}
+
+impl RepairWorkingLogSource {
+    fn as_str(self) -> &'static str {
+        match self {
+            RepairWorkingLogSource::Active => "active",
+            RepairWorkingLogSource::Archived => "archived",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 #[doc(hidden)]
 pub struct StatsCostEstimate {
@@ -762,18 +777,38 @@ pub fn repair_authorship_note_from_archived_working_log(
     } else {
         commit.parent(0)?.id()
     };
-    let working_log = repo
-        .storage
-        .archived_working_log_for_base_commit(&parent_sha)?;
+    let active_available = repo.storage.has_working_log(&parent_sha);
+    let (working_log, working_log_source) = if active_available {
+        (
+            repo.storage.working_log_for_base_commit(&parent_sha)?,
+            RepairWorkingLogSource::Active,
+        )
+    } else {
+        (
+            repo.storage
+                .archived_working_log_for_base_commit(&parent_sha)?,
+            RepairWorkingLogSource::Archived,
+        )
+    };
+    crate::diagnostics::append_debug_event(
+        "repair_authorship_note_working_log_loaded",
+        serde_json::json!({
+            "repo": repo.canonical_workdir().to_string_lossy().to_string(),
+            "commitSha": resolved_commit,
+            "parentSha": parent_sha,
+            "workingLogSource": working_log_source.as_str(),
+        }),
+    );
     let final_state = final_state_snapshot_for_working_log(repo, &resolved_commit, &working_log)?;
-    let (mut authorship_log, _initial_attributions) = build_authorship_log_from_working_log(
-        repo,
-        &parent_sha,
-        &resolved_commit,
-        &human_author,
-        &working_log,
-        Some(&final_state),
-    )?;
+    let (mut authorship_log, initial_attributions, initial_file_contents) =
+        build_authorship_log_from_working_log(
+            repo,
+            &parent_sha,
+            &resolved_commit,
+            &human_author,
+            &working_log,
+            Some(&final_state),
+        )?;
 
     apply_note_storage_policy(repo, &mut authorship_log)?;
 
@@ -804,12 +839,45 @@ pub fn repair_authorship_note_from_archived_working_log(
                 "repo": repo.canonical_workdir().to_string_lossy().to_string(),
                 "commitSha": resolved_commit,
                 "parentSha": parent_sha,
+                "workingLogSource": working_log_source.as_str(),
                 "authorshipJsonBytes": authorship_note_str.len(),
                 "statsSummary": commit_stats_debug_summary(&stats),
                 "promptSummary": prompt_debug_summary(&authorship_log),
                 "attestationFileCount": authorship_log.attestations.len(),
             }),
         );
+
+        if working_log_source == RepairWorkingLogSource::Active {
+            if !initial_attributions.files.is_empty() {
+                let new_working_log = repo.storage.working_log_for_base_commit(&resolved_commit)?;
+                new_working_log.write_initial_attributions_with_contents(
+                    initial_attributions.files,
+                    initial_attributions.prompts,
+                    initial_attributions.humans,
+                    initial_file_contents,
+                    initial_attributions.sessions,
+                )?;
+                crate::diagnostics::append_debug_event(
+                    "repair_authorship_note_initial_attributions_written",
+                    serde_json::json!({
+                        "repo": repo.canonical_workdir().to_string_lossy().to_string(),
+                        "commitSha": resolved_commit,
+                        "parentSha": parent_sha,
+                    }),
+                );
+            }
+            repo.storage
+                .delete_working_log_for_base_commit(&parent_sha)?;
+            crate::diagnostics::append_debug_event(
+                "repair_authorship_note_working_log_archived",
+                serde_json::json!({
+                    "repo": repo.canonical_workdir().to_string_lossy().to_string(),
+                    "commitSha": resolved_commit,
+                    "parentSha": parent_sha,
+                    "archiveBase": format!("old-{}", parent_sha),
+                }),
+            );
+        }
     }
 
     Ok(RepairAuthorshipNoteResult {
@@ -828,7 +896,14 @@ fn build_authorship_log_from_working_log(
     human_author: &str,
     working_log: &PersistedWorkingLog,
     final_state_override: Option<&HashMap<String, String>>,
-) -> Result<(AuthorshipLog, crate::git::repo_storage::InitialAttributions), GitAiError> {
+) -> Result<
+    (
+        AuthorshipLog,
+        crate::git::repo_storage::InitialAttributions,
+        HashMap<String, String>,
+    ),
+    GitAiError,
+> {
     let parent_working_log = working_log.read_all_checkpoints().unwrap_or_default();
     let mut pathspecs: HashSet<String> = HashSet::new();
     let mut ai_gap_fill_pathspecs: HashSet<String> = HashSet::new();
@@ -917,7 +992,10 @@ fn build_authorship_log_from_working_log(
     authorship_log.metadata.base_commit_sha = commit_sha.to_string();
     authorship_log.ensure_x_user_id_from_repo(repo);
 
-    Ok((authorship_log, initial_attributions))
+    let initial_file_contents =
+        working_va.snapshot_contents_for_files(initial_attributions.files.keys());
+
+    Ok((authorship_log, initial_attributions, initial_file_contents))
 }
 
 fn final_state_snapshot_for_working_log(
