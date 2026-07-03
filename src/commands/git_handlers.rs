@@ -774,7 +774,8 @@ fn proxy_to_git(
     let real_git_path = config::Config::get().git_cmd().to_string();
     #[cfg(windows)]
     let interactive_terminal = is_interactive_terminal();
-    let mut spawn_started_fields = serde_json::json!({
+    let spawn_started_fields = {
+        let fields = serde_json::json!({
         "realGitPath": real_git_path,
         "argsPreview": crate::diagnostics::sanitized_command_args(args),
         "argCount": args.len(),
@@ -783,14 +784,23 @@ fn proxy_to_git(
         "wrapperInvocationIdPresent": wrapper_invocation_id.is_some(),
         "trace2EventTargetPresent": trace2_event_target.is_some(),
         "currentDir": crate::diagnostics::current_dir_for_debug(),
-    });
-    #[cfg(windows)]
-    if let Some(fields) = spawn_started_fields.as_object_mut() {
-        fields.insert(
-            "interactiveTerminal".to_string(),
-            serde_json::json!(interactive_terminal),
-        );
-    }
+        });
+        #[cfg(windows)]
+        {
+            let mut fields = fields;
+            if let Some(fields) = fields.as_object_mut() {
+                fields.insert(
+                    "interactiveTerminal".to_string(),
+                    serde_json::json!(interactive_terminal),
+                );
+            }
+            fields
+        }
+        #[cfg(not(windows))]
+        {
+            fields
+        }
+    };
     crate::diagnostics::append_debug_event("git_proxy_spawn_started", spawn_started_fields);
 
     // Use spawn for interactive commands
