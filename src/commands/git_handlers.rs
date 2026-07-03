@@ -167,6 +167,9 @@ pub fn handle_git(args: &[String]) {
     }
 
     let repository = find_repository(&parsed.global_args).ok();
+    if let Some(repo) = repository.as_ref() {
+        crate::known_repos::record_known_repo_best_effort(repo, "git-wrapper");
+    }
 
     // Initialize the daemon telemetry handle so we can send wrapper state.
     // If the daemon isn't available, fall back to a plain passthrough proxy

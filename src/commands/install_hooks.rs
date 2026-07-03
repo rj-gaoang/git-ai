@@ -1,5 +1,6 @@
 use crate::daemon::DaemonConfig;
 use crate::error::GitAiError;
+use crate::git::repository::discover_repository_in_path_no_git_exec;
 use crate::mdm::agents::get_all_installers;
 use crate::mdm::hook_installer::HookInstallerParams;
 use crate::mdm::skills_installer;
@@ -16,6 +17,8 @@ const GLOBAL_POST_COMMIT_HOOK_ID: &str = "git-global-post-commit-hook";
 const MANAGED_GLOBAL_HOOKS_DIR: &str = "managed-git-hooks";
 const MANAGED_GLOBAL_HOOK_MARKER: &str = "git-ai managed global post-commit hook";
 const GLOBAL_POST_COMMIT_SOURCE: &str = "git-global-post-commit-hook";
+const KNOWN_REPO_POST_COMMIT_HOOK_ID: &str = "git-known-repo-post-commit-hook";
+const INSTALL_HOOKS_SOURCE: &str = "install-hooks";
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct InstallOptions {
@@ -712,6 +715,116 @@ fn install_managed_global_post_commit_hook(
     })
 }
 
+fn push_known_repo_candidate(
+    candidates: &mut Vec<PathBuf>,
+    seen: &mut HashSet<String>,
+    path: PathBuf,
+) {
+    let raw = path.to_string_lossy();
+    let raw = raw
+        .strip_prefix(r"\\?\")
+        .or_else(|| raw.strip_prefix("//?/"))
+        .unwrap_or(raw.as_ref());
+    let key = crate::utils::normalize_to_posix(raw).to_ascii_lowercase();
+    if seen.insert(key) {
+        candidates.push(path);
+    }
+}
+
+fn known_repo_candidates_for_install() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    let mut seen = HashSet::new();
+
+    if let Ok(cwd) = std::env::current_dir()
+        && let Ok(repo) = discover_repository_in_path_no_git_exec(&cwd)
+    {
+        push_known_repo_candidate(
+            &mut candidates,
+            &mut seen,
+            repo.canonical_workdir().to_path_buf(),
+        );
+        crate::known_repos::record_known_repo_best_effort(&repo, INSTALL_HOOKS_SOURCE);
+    }
+
+    if let Ok(registry) = crate::known_repos::load_known_repos() {
+        for worktree in registry.repos {
+            push_known_repo_candidate(&mut candidates, &mut seen, PathBuf::from(worktree));
+        }
+    }
+
+    candidates
+}
+
+fn install_known_repo_post_commit_hooks(
+    git_ai_exe: &Path,
+    dry_run: bool,
+) -> (InstallStatus, Option<String>) {
+    let mut saw_repo = false;
+    let mut changed = false;
+    let mut failures = Vec::new();
+
+    for candidate in known_repo_candidates_for_install() {
+        let repo = match discover_repository_in_path_no_git_exec(&candidate) {
+            Ok(repo) => repo,
+            Err(error) => {
+                crate::diagnostics::append_debug_event(
+                    "install_hooks_known_repo_skipped",
+                    serde_json::json!({
+                        "reason": "repo_discovery_failed",
+                        "path": candidate.to_string_lossy().to_string(),
+                        "error": error.to_string(),
+                    }),
+                );
+                continue;
+            }
+        };
+
+        let repo_path = repo.canonical_workdir().to_path_buf();
+        saw_repo = true;
+
+        let (status, message) =
+            match crate::commands::git_hook_handlers::ensure_repo_post_commit_dispatcher(
+                &repo, git_ai_exe, dry_run,
+            ) {
+                Ok(repo_changed) => {
+                    changed |= repo_changed;
+                    (
+                        if repo_changed {
+                            InstallStatus::Installed
+                        } else {
+                            InstallStatus::AlreadyInstalled
+                        },
+                        None,
+                    )
+                }
+                Err(error) => {
+                    let message = error.to_string();
+                    failures.push(format!("{}: {}", repo_path.to_string_lossy(), message));
+                    (InstallStatus::Failed, Some(message))
+                }
+            };
+        crate::diagnostics::append_debug_event(
+            "install_hooks_known_repo_post_commit_hook_checked",
+            serde_json::json!({
+                "repo": repo_path.to_string_lossy().to_string(),
+                "status": status.as_str(),
+                "message": message.as_deref(),
+                "dryRun": dry_run,
+            }),
+        );
+    }
+
+    if !failures.is_empty() {
+        (InstallStatus::Failed, Some(failures.join("; ")))
+    } else if !saw_repo {
+        (InstallStatus::NotFound, None)
+    } else if changed {
+        (InstallStatus::Installed, None)
+    } else {
+        (InstallStatus::AlreadyInstalled, None)
+    }
+}
+
 #[allow(dead_code)]
 pub(crate) fn configure_async_mode_daemon_trace2_for_config(
     _daemon_config: &DaemonConfig,
@@ -1088,6 +1201,35 @@ async fn async_run_install(
             ));
         }
     }
+
+    let (known_repo_status, known_repo_message) =
+        install_known_repo_post_commit_hooks(&params.binary_path, options.dry_run);
+    if known_repo_status == InstallStatus::Installed {
+        has_changes = true;
+    }
+    statuses.insert(
+        KNOWN_REPO_POST_COMMIT_HOOK_ID.to_string(),
+        known_repo_status,
+    );
+    let mut known_repo_install_result = match known_repo_status {
+        InstallStatus::Installed => InstallResult::installed(),
+        InstallStatus::AlreadyInstalled => InstallResult::already_installed(),
+        InstallStatus::NotFound => InstallResult::not_found(),
+        InstallStatus::Failed => {
+            InstallResult::failed(known_repo_message.clone().unwrap_or_else(|| {
+                "failed to install known repository post-commit hook".to_string()
+            }))
+        }
+    };
+    if let Some(message) = known_repo_message
+        && known_repo_status != InstallStatus::Failed
+    {
+        known_repo_install_result = known_repo_install_result.with_warning(message);
+    }
+    detailed_results.push((
+        KNOWN_REPO_POST_COMMIT_HOOK_ID.to_string(),
+        known_repo_install_result,
+    ));
 
     // === Coding Agents ===
     println!("\n\x1b[1mCoding Agents\x1b[0m");

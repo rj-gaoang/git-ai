@@ -11,6 +11,7 @@ pub mod feature_flags;
 pub mod git;
 pub mod http;
 pub mod integration;
+pub mod known_repos;
 pub mod mdm;
 pub mod metrics;
 pub mod notes;

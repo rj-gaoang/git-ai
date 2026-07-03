@@ -87,6 +87,21 @@ Speckit 是团队使用的「规范驱动开发」框架，通过 `.specify/` �
 
 验证记录：`cargo test -q --lib install_managed_global_post_commit_hook` 通过，覆盖无 hooksPath 安装、幂等、保护外部 post-commit 三种安装形态；`cargo test -q --test integration repair_authorship_note_uses_active_working_log_for_plain_git_commit` 通过，覆盖 active working log 收口；`cargo check -q --lib`、`cargo fmt --check`、`git diff --check` 通过。历史数据口径：本修复保证用户升级并重新运行 `git-ai install-hooks` 后的未来外部 Git commit 会进入全局 post-commit hook；已经发生且远端缺失的 6/25、6/29 提交不会被客户端凭空自动补传，若要修历史，需要先拿到 commit SHA，并在本地仍有 note 或可从 working log 修复时显式运行 `git-ai repair-authorship-note <sha> --write` / `git-ai upload-stats <sha> --source manual`。
 
+2026-07-01 晚间补充：用户安装 `2.2.49` 后上传 `logs/2026-07-01/庞福泽-2026070102.jsonl`，最新日志证明安装动作本身成功执行了两次：`2026-07-01T20:24:02` 与 `20:25:19` 均为 `C:\Users\admin\.git-ai\launcher\git-ai.exe install-hooks`，且安装探活成功。但 `20:25:19` 之后只出现 `git-ai blame` 与 `git.exe --exec-path` 查询，没有 `git_proxy_entered command=commit`、没有 `repair-authorship-note`、没有 `upload-stats`、也没有 `git-global-post-commit-hook`。同一份日志里可见的两次显式 wrapper commit，`2026-06-29T18:50:36 rj-ltc-web` 和 `2026-07-01T17:34:02 rj-ltc-contract-web`，真实 Git 子进程均为 `exitCode=1`，所以它们不是“成功创建但没上传”的 commit。另一个关键证据是 `2026-06-23T14:45:33` 项目执行过 `git config core.hooksPath D:\product\rj-ltc-contract-web\node_modules\.pnpm\@one+rscli@3.2.20\node_modules\@one\rscli`；仓库本地 / effective `core.hooksPath` 会覆盖全局 hooksPath，因此单纯安装全局 `.git-ai/managed-git-hooks/post-commit` 后，这类仓库的真实 Git commit 仍不会执行全局 hook。
+
+根因修正：问题不能靠扫 `debug.jsonl` 找仓库、向第三方 hooksPath 目录塞 `post-commit`、安装后补传当前 HEAD 来解决。正确入口是每个仓库真实生效的 `post-commit`：git-ai 维护一个小型 `known-repos.json` 路径列表，记录 checkpoint 与 wrapper 实际接触过的仓库；`install-hooks` 读取该列表加当前目录仓库，把这些仓库的 local `core.hooksPath` 接到仓库自己的 `.git/ai/hooks` 托管目录。托管 `post-commit` 先执行 `repair-authorship-note HEAD --write` 和 `upload-stats HEAD --source git-repo-post-commit-hook --wait-for-authorship-note-ms 15000 --skip-if-already-uploaded`，再转发到原本 effective hooksPath 下的同名 hook；其它常见 hook 只转发原 hook，不做 git-ai 上传动作。原仓库 local hooksPath 会写入 `.git/ai/git_hooks_state.json`，卸载时可恢复。
+
+本次根因修复：
+
+| 文件 | 变更点 | 影响 |
+|------|--------|------|
+| `src/known_repos.rs`、`src/lib.rs` | 新增 `~/.git-ai/internal/known-repos.json` 小路径列表，最多保存 256 个 worktree | `git-ai` 不再安装时读取巨大 `debug.jsonl`；已知仓库来自 checkpoint / wrapper 真实接触点 |
+| `src/commands/git_hook_handlers.rs` | 新增 repo-local hook dispatcher 安装器：local `core.hooksPath` 指向 `.git/ai/hooks`，保存原 local/effective hooksPath，`post-commit` 执行 git-ai 收口后链回原 hook，其它 hook 只链回原 hook | 修复仓库本地 hooksPath 覆盖全局 hook 时，VSCode / 真实 Git commit 不进入上传链路的问题；不覆盖第三方 hook 内容 |
+| `src/commands/install_hooks.rs` | `install-hooks` 读取 known-repos 加当前目录仓库，对每个仓库安装/刷新 repo-local dispatcher，并上报 `git-known-repo-post-commit-hook` 状态 | 用户升级并运行安装后，已知仓库的下一次真实 commit 会进入仓库自己的 post-commit 收口 |
+| `src/commands/checkpoint_agent/orchestrator.rs`、`src/commands/git_handlers.rs` | checkpoint 接触仓库时登记 known repo 并刷新 dispatcher；wrapper 接触仓库时登记 known repo | 新版本只在产生 AI 证据或经过 launcher 的仓库路径上登记，不让普通读命令顺手修改仓库 hook |
+
+验证记录：`cargo test -q --lib dispatcher_script_uploads_post_commit_and_forwards_existing_hooks_path` 通过，覆盖 repo-local dispatcher 的 post-commit 收口命令、等待 note、跳过重复上传、wrapper 防重复和原 hooksPath 转发；`cargo check -q --lib`、`cargo fmt --check` 通过。`cargo test --lib ... --no-run` 曾因 Windows 链接阶段测试 exe 被上一次超时进程占用报 `LNK1104`，清理遗留测试进程并改成纯函数单测后通过。
+
 ### 2026-07-01：尚冠 115MB JSONL 日志暴涨与 bash fallback 全量路径 debug 截断
 
 现场问题：`logs/2026-06-30/尚冠-20260630.jsonl` 两天日志达到 `120781684` bytes，约 `115.2MB`。现场复查时文件 `LastWriteTime=2026/6/30 20:22:34`，等待 2 秒后大小仍为 `120781684` bytes，`delta=0`；因此不是当前仍在持续写入，而是 6/29 历史日志中已经写入了少数超大 JSONL 行。

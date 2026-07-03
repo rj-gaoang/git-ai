@@ -566,6 +566,19 @@ fn split_files_into_requests(
         by_repo.entry(f.repo_work_dir.clone()).or_default().push(f);
     }
 
+    for repo_work_dir in by_repo.keys() {
+        if let Ok(repo) = discover_repository_in_path_no_git_exec(repo_work_dir) {
+            crate::known_repos::record_known_repo_best_effort(&repo, "checkpoint");
+            if let Ok(git_ai_exe) = crate::utils::current_git_ai_exe() {
+                let _ = crate::commands::git_hook_handlers::ensure_repo_post_commit_dispatcher(
+                    &repo,
+                    &git_ai_exe,
+                    false,
+                );
+            }
+        }
+    }
+
     by_repo
         .into_values()
         .map(|files| CheckpointRequest {

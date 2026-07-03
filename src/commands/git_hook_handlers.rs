@@ -1,11 +1,9 @@
-//! Residual git-hook infrastructure retained for the removal / migration path.
+//! Repository-local git hook infrastructure.
 //!
-//! The git core-hooks feature has been sunset.  This module now contains only:
-//! - detection of hook-style binary invocations (`is_git_hook_binary_name`)
-//! - the `remove_repo_hooks` command (so users can clean up old symlinks)
-//! - helpers consumed by the git wrapper to resolve a previous non-managed
-//!   hooks path and to set `ENV_SKIP_MANAGED_HOOKS` on child git processes
-//!   during the transition period.
+//! The legacy symlink-style git core-hooks feature has been sunset. This module
+//! still keeps removal helpers for old installs, and now installs a repo-local
+//! dispatcher so git-ai can attach to a repository's effective `post-commit`
+//! without overwriting existing hooks.
 
 use crate::error::GitAiError;
 use crate::git::repository::Repository;
@@ -19,10 +17,11 @@ use std::path::{Path, PathBuf};
 
 const CONFIG_KEY_CORE_HOOKS_PATH: &str = "core.hooksPath";
 const REPO_HOOK_STATE_FILE: &str = "git_hooks_state.json";
-const REPO_HOOK_ENABLEMENT_FILE: &str = "git_hooks_enabled";
 const REBASE_HOOK_MASK_STATE_FILE: &str = "rebase_hook_mask_state.json";
 const GIT_HOOKS_DIR_NAME: &str = "hooks";
 const REPO_HOOK_STATE_SCHEMA_VERSION: &str = "repo_hooks/2";
+const MANAGED_HOOK_MARKER: &str = "git-ai managed repository hook dispatcher";
+const REPO_POST_COMMIT_SOURCE: &str = "git-repo-post-commit-hook";
 
 pub const ENV_SKIP_ALL_HOOKS: &str = "GIT_AI_SKIP_ALL_HOOKS";
 // Intentionally avoid a GIT_* prefix so git alias shell-command tests don't
@@ -111,6 +110,110 @@ pub struct RemoveRepoHooksReport {
     pub managed_hooks_path: PathBuf,
 }
 
+/// Install or refresh the repository-local dispatcher used as the effective
+/// `core.hooksPath` for this repo.
+pub fn ensure_repo_post_commit_dispatcher(
+    repo: &Repository,
+    git_ai_exe: &Path,
+    dry_run: bool,
+) -> Result<bool, GitAiError> {
+    let managed_hooks_dir = managed_git_hooks_dir_for_repo(repo);
+    let state_path = repo_state_path(repo);
+    let local_config_path = repo_local_config_path(repo);
+    let current_local_hooks =
+        read_hooks_path_from_config(&local_config_path, gix_config::Source::Local)
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+    let current_effective_hooks = repo
+        .config_get_str(CONFIG_KEY_CORE_HOOKS_PATH)
+        .ok()
+        .flatten()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+
+    let current_points_to_managed = current_local_hooks.as_deref().is_some_and(|path| {
+        paths_equivalent(&hooks_path_value_to_path(repo, path), &managed_hooks_dir)
+    });
+
+    let prior_state = read_repo_hook_state(&state_path)?;
+    let original_local_hooks_path = if current_points_to_managed {
+        prior_state
+            .as_ref()
+            .and_then(|state| state.original_local_hooks_path.clone())
+            .filter(|value| !value.trim().is_empty())
+    } else {
+        current_local_hooks.clone()
+    };
+    let forward_hooks_path = if current_points_to_managed {
+        prior_state
+            .as_ref()
+            .and_then(|state| state.forward_hooks_path.clone())
+            .or_else(|| {
+                prior_state
+                    .as_ref()
+                    .and_then(|state| state.original_local_hooks_path.clone())
+            })
+            .filter(|value| !value.trim().is_empty())
+    } else {
+        current_effective_hooks.clone().or_else(|| {
+            Some(path_value_for_git_config(&default_git_hooks_dir_for_repo(
+                repo,
+            )))
+        })
+    }
+    .and_then(|value| {
+        let path = hooks_path_value_to_path(repo, &value);
+        if is_disallowed_forward_hooks_path(&path, Some(repo), Some(&managed_hooks_dir)) {
+            None
+        } else {
+            Some(path_value_for_git_config(&path))
+        }
+    });
+
+    let mut changed = false;
+    let managed_hooks_value = path_value_for_git_config(&managed_hooks_dir);
+    if !current_points_to_managed {
+        changed |= set_hooks_path_in_config(
+            &local_config_path,
+            gix_config::Source::Local,
+            &managed_hooks_value,
+            dry_run,
+        )?;
+    }
+
+    let desired_state = RepoHookState {
+        schema_version: REPO_HOOK_STATE_SCHEMA_VERSION.to_string(),
+        managed_hooks_path: managed_hooks_value.clone(),
+        original_local_hooks_path,
+        forward_mode: if forward_hooks_path.is_some() {
+            ForwardMode::RepoLocal
+        } else {
+            ForwardMode::None
+        },
+        forward_hooks_path: forward_hooks_path.clone(),
+        binary_path: path_value_for_git_config(git_ai_exe),
+    };
+
+    let state_changed = prior_state.as_ref() != Some(&desired_state);
+    if state_changed {
+        changed = true;
+        if !dry_run {
+            write_repo_hook_state(&state_path, &desired_state)?;
+        }
+    }
+
+    if ensure_dispatcher_scripts(
+        &managed_hooks_dir,
+        git_ai_exe,
+        forward_hooks_path.as_deref(),
+        dry_run,
+    )? {
+        changed = true;
+    }
+
+    Ok(changed)
+}
+
 /// Remove git-ai managed hooks from a repository, restoring the previous
 /// `core.hooksPath` value if one was saved in the hook state file.
 pub fn remove_repo_hooks(
@@ -119,7 +222,6 @@ pub fn remove_repo_hooks(
 ) -> Result<RemoveRepoHooksReport, GitAiError> {
     let managed_hooks_dir = managed_git_hooks_dir_for_repo(repo);
     let state_path = repo_state_path(repo);
-    let enablement_path = repo_enablement_path(repo);
     let rebase_state_path = rebase_hook_mask_state_path(repo);
     let local_config_path = repo_local_config_path(repo);
     let prior_state = read_repo_hook_state(&state_path)?;
@@ -166,7 +268,6 @@ pub fn remove_repo_hooks(
     }
 
     changed |= delete_state_file(&state_path, dry_run)?;
-    changed |= delete_state_file(&enablement_path, dry_run)?;
     changed |= delete_state_file(&rebase_state_path, dry_run)?;
 
     Ok(RemoveRepoHooksReport {
@@ -210,16 +311,46 @@ fn repo_state_path(repo: &Repository) -> PathBuf {
     repo_ai_dir(repo).join(REPO_HOOK_STATE_FILE)
 }
 
-fn repo_enablement_path(repo: &Repository) -> PathBuf {
-    repo_ai_dir(repo).join(REPO_HOOK_ENABLEMENT_FILE)
-}
-
 fn rebase_hook_mask_state_path(repo: &Repository) -> PathBuf {
     repo_worktree_ai_dir(repo).join(REBASE_HOOK_MASK_STATE_FILE)
 }
 
 fn managed_git_hooks_dir_for_repo(repo: &Repository) -> PathBuf {
     repo_ai_dir(repo).join(GIT_HOOKS_DIR_NAME)
+}
+
+fn default_git_hooks_dir_for_repo(repo: &Repository) -> PathBuf {
+    repo.common_dir().join(GIT_HOOKS_DIR_NAME)
+}
+
+fn path_value_for_git_config(path: &Path) -> String {
+    let raw = path.to_string_lossy();
+    let raw = raw
+        .strip_prefix(r"\\?\")
+        .or_else(|| raw.strip_prefix("//?/"))
+        .unwrap_or(raw.as_ref());
+    crate::utils::normalize_to_posix(raw)
+}
+
+fn shell_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+fn hooks_path_value_to_path(repo: &Repository, value: &str) -> PathBuf {
+    let trimmed = value.trim();
+    if let Some(rest) = trimmed
+        .strip_prefix("~/")
+        .or_else(|| trimmed.strip_prefix("~\\"))
+        && let Some(home) = dirs::home_dir()
+    {
+        return home.join(rest);
+    }
+    let path = PathBuf::from(trimmed);
+    if path.is_absolute() {
+        path
+    } else {
+        repo.canonical_workdir().join(path)
+    }
 }
 
 fn managed_git_hooks_dir_from_context() -> Option<PathBuf> {
@@ -231,6 +362,10 @@ fn managed_git_hooks_dir_from_context() -> Option<PathBuf> {
 
 fn normalize_path(path: &Path) -> PathBuf {
     fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn paths_equivalent(left: &Path, right: &Path) -> bool {
+    normalize_path(left) == normalize_path(right)
 }
 
 fn canonicalize_if_possible(path: PathBuf) -> PathBuf {
@@ -299,6 +434,16 @@ fn write_config(path: &Path, cfg: &gix_config::File<'_>) -> Result<(), GitAiErro
     }
     let bytes = cfg.to_bstring();
     fs::write(path, bytes.as_slice())?;
+    Ok(())
+}
+
+fn write_repo_hook_state(path: &Path, state: &RepoHookState) -> Result<(), GitAiError> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let content =
+        serde_json::to_string_pretty(state).map_err(|e| GitAiError::Generic(e.to_string()))?;
+    fs::write(path, content)?;
     Ok(())
 }
 
@@ -391,6 +536,109 @@ fn remove_hook_entry(hook_path: &Path) -> Result<(), GitAiError> {
         fs::remove_file(hook_path)?;
     }
     Ok(())
+}
+
+fn managed_hook_script_content(
+    hook_name: &str,
+    git_ai_exe: &Path,
+    previous_hooks_path: Option<&str>,
+) -> String {
+    let git_ai_exe = shell_single_quote(&path_value_for_git_config(git_ai_exe));
+    let hook_name_quoted = shell_single_quote(hook_name);
+    let source = shell_single_quote(REPO_POST_COMMIT_SOURCE);
+    let forward_hooks_path = shell_single_quote(previous_hooks_path.unwrap_or(""));
+
+    format!(
+        r#"#!/bin/sh
+# {marker}.
+
+GIT_AI_EXE={git_ai_exe}
+HOOK_NAME={hook_name}
+SOURCE={source}
+FORWARD_HOOKS_PATH={forward_hooks_path}
+
+run_forward_hook() {{
+  if [ -z "$FORWARD_HOOKS_PATH" ]; then
+    return 0
+  fi
+  FORWARD_HOOK="$FORWARD_HOOKS_PATH/$HOOK_NAME"
+  if [ ! -f "$FORWARD_HOOK" ]; then
+    return 0
+  fi
+  if [ "$GIT_AI_MANAGED_HOOK_FORWARD_DEPTH" = "1" ]; then
+    return 0
+  fi
+  GIT_AI_MANAGED_HOOK_FORWARD_DEPTH=1 "$FORWARD_HOOK" "$@"
+}}
+
+if [ "${{GIT_AI_SKIP_ALL_HOOKS:-}}" = "1" ] || [ "${{GITAI_SKIP_MANAGED_HOOKS:-}}" = "1" ] || [ -n "${{GIT_AI_WRAPPER_INVOCATION_ID:-}}" ]; then
+  run_forward_hook "$@"
+  exit $?
+fi
+
+if [ "$HOOK_NAME" = "post-commit" ] && ([ -x "$GIT_AI_EXE" ] || [ -f "$GIT_AI_EXE" ]); then
+  (
+    GIT_AI_SKIP_ALL_HOOKS=1 \
+    GIT_AI_POST_COMMIT_FALLBACK_UPLOAD_SPAWNED=1 \
+    "$GIT_AI_EXE" repair-authorship-note HEAD --write
+
+    GIT_AI_SKIP_ALL_HOOKS=1 \
+    GIT_AI_POST_COMMIT_FALLBACK_UPLOAD_SPAWNED=1 \
+    "$GIT_AI_EXE" upload-stats HEAD --source "$SOURCE" --wait-for-authorship-note-ms 15000 --skip-if-already-uploaded
+  ) >/dev/null 2>&1 &
+fi
+
+run_forward_hook "$@"
+exit $?
+"#,
+        marker = MANAGED_HOOK_MARKER,
+        git_ai_exe = git_ai_exe,
+        hook_name = hook_name_quoted,
+        source = source,
+        forward_hooks_path = forward_hooks_path
+    )
+}
+
+fn write_executable_script(path: &Path, content: &str, dry_run: bool) -> Result<bool, GitAiError> {
+    let existing = fs::read_to_string(path).ok();
+    if existing.as_deref() == Some(content) {
+        return Ok(false);
+    }
+
+    if !dry_run {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(path, content)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = fs::metadata(path)?.permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(path, permissions)?;
+        }
+    }
+
+    Ok(true)
+}
+
+fn ensure_dispatcher_scripts(
+    managed_hooks_dir: &Path,
+    git_ai_exe: &Path,
+    previous_hooks_path: Option<&str>,
+    dry_run: bool,
+) -> Result<bool, GitAiError> {
+    let mut changed = false;
+    if !dry_run {
+        fs::create_dir_all(managed_hooks_dir)?;
+    }
+
+    for hook_name in CORE_GIT_HOOK_NAMES {
+        let content = managed_hook_script_content(hook_name, git_ai_exe, previous_hooks_path);
+        changed |= write_executable_script(&managed_hooks_dir.join(hook_name), &content, dry_run)?;
+    }
+
+    Ok(changed)
 }
 
 // ---------------------------------------------------------------------------
@@ -612,4 +860,27 @@ fn should_forward_repo_state_first(repo: Option<&Repository>) -> Option<PathBuf>
     }
 
     Some(candidate)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dispatcher_script_uploads_post_commit_and_forwards_existing_hooks_path() {
+        let dispatcher = managed_hook_script_content(
+            "post-commit",
+            Path::new("C:/Users/admin/.git-ai/launcher/git-ai.exe"),
+            Some("D:/product/app/node_modules/@one/rscli"),
+        );
+
+        assert!(dispatcher.contains(MANAGED_HOOK_MARKER));
+        assert!(dispatcher.contains("FORWARD_HOOKS_PATH='D:/product/app/node_modules/@one/rscli'"));
+        assert!(dispatcher.contains("run_forward_hook \"$@\""));
+        assert!(dispatcher.contains("repair-authorship-note HEAD --write"));
+        assert!(dispatcher.contains(
+            "upload-stats HEAD --source \"$SOURCE\" --wait-for-authorship-note-ms 15000 --skip-if-already-uploaded"
+        ));
+        assert!(dispatcher.contains("GIT_AI_WRAPPER_INVOCATION_ID"));
+    }
 }
