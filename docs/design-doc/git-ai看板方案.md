@@ -33,6 +33,18 @@ Speckit 是团队使用的「规范驱动开发」框架，通过 `.specify/` �
 
 > **文档更新说明（2026-04-24）**：本文最初主要从“Speckit 如何集成 git-ai”的视角写，当前已经补充 `git-ai` 本身的源码改动，包括 `post_commit` 挂接点、原生上传模块、feature flag、环境变量约定、失败降级策略，以及代码级验证结果。也就是说，这份文档现在同时覆盖 Speckit 侧改造和 git-ai 侧改造，不再只是一份脚本集成方案。
 
+### 2026-07-04：repo-local repair 路径 partial commit 后未继承未提交 AI 文件
+
+现场问题：本机 `D:\rj-ltc\rj-ltc-contract-web` 提交 `31bb1b5a97974ec42bd9583f3e4a411a874a7806`（`2026-07-04 00:47:59 +0800`，作者 `gaoang <gaoang@ruijie.com.cn>`）只新增 `src/views/PmpManagement/ManagementList/components/ProjectNameEditDialog.vue` 一个文件，共 94 行，但本地 `git notes --ref=ai show 31bb1b5a` 无 note，`git-ai stats 31bb1b5a --json` 显示 `aiAdditions=0`、`unknownAdditions=94`。日志证明 repo-local `post-commit` 已执行：`00:48:11` 启动 `repair-authorship-note HEAD --write`，`00:48:13` 启动 `upload-stats HEAD --source git-repo-post-commit-hook --wait-for-authorship-note-ms 15000`；上传等待 15 秒仍 `foundAuthorshipNote=false`，最终以 `hasAuthorshipNote=false`、`unknownAdditions=94` 上传成功。因此问题不在上传入口、HTTP、用户 ID，也不是 hook 没安装。
+
+关键证据：`ProjectNameEditDialog.vue` 的 AI checkpoint 实际存在，位置在 `.git/ai/working_logs/old-c232d00116912d89ff6473da01a7e00f93699f7f/checkpoints.jsonl`，`line_attributions` 覆盖 1-94 行，tool 为 `codex`。但该 checkpoint 创建于 base `c232d001...`；`2026-07-03 23:32:18` 的上一个提交 `d078c619...` 没有提交这个文件，repo-local repair 路径为 `d078c619...` 写 note 后把 `c232d001...` working log 归档到 `old-c232...`，并没有在新 base `d078c619...` 下留下 `INITIAL` 继承归因。`31bb1b5a` 的 parent 正是 `d078c619...`，当前没有 `.git/ai/working_logs/d078c619...`，直接执行 `git-ai repair-authorship-note 31bb1b5a` 会报 `archived working log not found for d078c6193ea6bd3ff3f0a0ceaf48f8f61ff3970c`。
+
+根因：`repair-authorship-note` 为了重建目标提交的 note，使用 `final_state_snapshot_for_working_log(...)` 从“目标提交树”取 final snapshot。旧实现对目标提交里不存在的 checkpoint 文件直接写入空字符串；partial commit 场景下，这会把“本次没提交但仍留在工作区的 AI 文件”误认为已经消失，导致 `to_authorship_log_and_initial_working_log(...)` 无法把它写入下一轮 `INITIAL`。正常 wrapper post-commit 走 live worktree，可保留这类未提交归因；repo-local repair 路径使用提交树快照，因此暴露了这个断点。
+
+修复：`src/authorship/post_commit.rs` 中 `final_state_snapshot_for_working_log(...)` 在目标 commit 不含该路径时，改为读取当前 worktree 文件内容；只有 worktree 也不存在时才使用空内容。这样目标提交本身仍只按 commit diff 写 authorship note，不会把未提交文件算进当前 commit；但未提交 AI 文件会作为 unstaged/INITIAL 继承到新 base，下一次单独提交时仍能生成真实 AI note。新增 `tests/integration/post_commit_unit.rs::repair_authorship_note_carries_uncommitted_ai_to_next_plain_commit`，复现“同一 base 下两个 AI 文件，plain Git partial commit 先提交一个，repair 后另一个应继承到新 base，再提交时归为 AI”的链路。
+
+验证：`cargo fmt --check` 通过；`cargo check -q --lib` 通过；`cargo test -q --test integration repair_authorship_note_carries_uncommitted_ai_to_next_plain_commit` 通过；`cargo test -q --test integration repair_authorship_note_` 覆盖新增和原有 active working log repair 场景，2 个测试均通过；`git diff --check` 通过。历史数据说明：这个修复保证后续 repo-local repair partial commit 不再丢未提交 AI 归因；已经发生且已 metadata-only 上传的 `31bb1b5a` 远程记录不会被客户端自动改写，如需修历史需明确执行历史修复/重传。
+
 ### 2026-06-29：过滤 IDE 纯格式化改动，避免格式化行进入 unknown
 
 现场问题：`D:\rj-ltc\rj-ltc-contract-web` 在 `2026-06-29 18:03:28` 的提交 `e892a067b77795063fb5c0d5168f0bf815befb61` 已正常进入 git-ai，也成功上传一次；本地 `post_commit_stats_computed` 已经算出 `gitDiffAddedLines=791`、`aiAdditions=713`、`unknownAdditions=78`。这 78 行全部来自 7 个 `src/views/ContractManagement/ContractParsed*` 文件，diff 内容只是把同一行 `<el-option ... />` 展开成多行，属于 IDE/格式化器产生的纯格式化改动。

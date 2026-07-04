@@ -273,6 +273,83 @@ fn repair_authorship_note_uses_active_working_log_for_plain_git_commit() {
 }
 
 #[test]
+fn repair_authorship_note_carries_uncommitted_ai_to_next_plain_commit() {
+    let repo = TestRepo::new();
+
+    std::fs::write(repo.path().join("seed.txt"), "seed\n").unwrap();
+    repo.git(&["add", "seed.txt"]).unwrap();
+    repo.stage_all_and_commit("Initial commit").unwrap();
+
+    std::fs::write(repo.path().join("first-ai.txt"), "first generated line\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "first-ai.txt"])
+        .unwrap();
+    std::fs::write(repo.path().join("second-ai.txt"), "second generated line\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "second-ai.txt"])
+        .unwrap();
+
+    repo.git_og(&["add", "first-ai.txt"]).unwrap();
+    repo.git_og_with_env(
+        &["commit", "-m", "Plain git partial commit", "--no-verify"],
+        &[("GIT_EDITOR", "true")],
+    )
+    .unwrap();
+    let first_commit_sha = repo
+        .git_og(&["rev-parse", "HEAD"])
+        .unwrap()
+        .trim()
+        .to_string();
+
+    let git_ai_repo = git_ai_repository::find_repository_in_path(repo.path().to_str().unwrap())
+        .expect("test repo should be discoverable");
+    let first_result =
+        git_ai::authorship::post_commit::repair_authorship_note_from_archived_working_log(
+            &git_ai_repo,
+            &first_commit_sha,
+            "Test User <test@example.com>".to_string(),
+            true,
+        )
+        .unwrap();
+    assert_eq!(first_result.stats.ai_additions, 1);
+    assert_eq!(first_result.stats.unknown_additions, 0);
+
+    let next_working_log = git_ai_repo
+        .storage
+        .working_log_for_base_commit(&first_commit_sha)
+        .unwrap();
+    let initial = next_working_log.read_initial_attributions();
+    assert!(
+        initial.files.contains_key("second-ai.txt"),
+        "repair should carry uncommitted AI attribution into the new base"
+    );
+
+    repo.git_og(&["add", "second-ai.txt"]).unwrap();
+    repo.git_og_with_env(
+        &["commit", "-m", "Plain git second commit", "--no-verify"],
+        &[("GIT_EDITOR", "true")],
+    )
+    .unwrap();
+    let second_commit_sha = repo
+        .git_og(&["rev-parse", "HEAD"])
+        .unwrap()
+        .trim()
+        .to_string();
+
+    let second_result =
+        git_ai::authorship::post_commit::repair_authorship_note_from_archived_working_log(
+            &git_ai_repo,
+            &second_commit_sha,
+            "Test User <test@example.com>".to_string(),
+            true,
+        )
+        .unwrap();
+
+    assert_eq!(second_result.stats.git_diff_added_lines, 1);
+    assert_eq!(second_result.stats.ai_additions, 1);
+    assert_eq!(second_result.stats.unknown_additions, 0);
+    assert!(repo.read_authorship_note(&second_commit_sha).is_some());
+}
+
+#[test]
 fn test_post_commit_empty_repo_no_checkpoint() {
     // Create an empty repo (no commits yet)
     let repo = TestRepo::new();

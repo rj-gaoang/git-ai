@@ -1016,11 +1016,16 @@ fn final_state_snapshot_for_working_log(
     for path in paths {
         let content = match repo.get_file_content(&path, commit_sha) {
             Ok(bytes) => String::from_utf8(bytes).unwrap_or_default(),
-            Err(_) => String::new(),
+            Err(_) => worktree_file_content(repo, &path).unwrap_or_default(),
         };
         snapshot.insert(path, content);
     }
     Ok(snapshot)
+}
+
+fn worktree_file_content(repo: &Repository, path: &str) -> Option<String> {
+    let workdir = repo.workdir().ok()?;
+    std::fs::read_to_string(workdir.join(path)).ok()
 }
 
 fn apply_note_storage_policy(
