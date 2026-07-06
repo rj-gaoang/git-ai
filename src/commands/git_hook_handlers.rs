@@ -22,6 +22,7 @@ const GIT_HOOKS_DIR_NAME: &str = "hooks";
 const REPO_HOOK_STATE_SCHEMA_VERSION: &str = "repo_hooks/2";
 const MANAGED_HOOK_MARKER: &str = "git-ai managed repository hook dispatcher";
 const REPO_POST_COMMIT_SOURCE: &str = "git-repo-post-commit-hook";
+const REPO_POST_MERGE_SOURCE: &str = "git-repo-post-merge-hook";
 
 pub const ENV_SKIP_ALL_HOOKS: &str = "GIT_AI_SKIP_ALL_HOOKS";
 // Intentionally avoid a GIT_* prefix so git alias shell-command tests don't
@@ -545,7 +546,8 @@ fn managed_hook_script_content(
 ) -> String {
     let git_ai_exe = shell_single_quote(&path_value_for_git_config(git_ai_exe));
     let hook_name_quoted = shell_single_quote(hook_name);
-    let source = shell_single_quote(REPO_POST_COMMIT_SOURCE);
+    let post_commit_source = shell_single_quote(REPO_POST_COMMIT_SOURCE);
+    let post_merge_source = shell_single_quote(REPO_POST_MERGE_SOURCE);
     let forward_hooks_path = shell_single_quote(previous_hooks_path.unwrap_or(""));
 
     format!(
@@ -554,7 +556,8 @@ fn managed_hook_script_content(
 
 GIT_AI_EXE={git_ai_exe}
 HOOK_NAME={hook_name}
-SOURCE={source}
+POST_COMMIT_SOURCE={post_commit_source}
+POST_MERGE_SOURCE={post_merge_source}
 FORWARD_HOOKS_PATH={forward_hooks_path}
 
 run_forward_hook() {{
@@ -584,8 +587,13 @@ if [ "$HOOK_NAME" = "post-commit" ] && ([ -x "$GIT_AI_EXE" ] || [ -f "$GIT_AI_EX
 
     GIT_AI_SKIP_ALL_HOOKS=1 \
     GIT_AI_POST_COMMIT_FALLBACK_UPLOAD_SPAWNED=1 \
-    "$GIT_AI_EXE" upload-stats HEAD --source "$SOURCE" --wait-for-authorship-note-ms 15000 --skip-if-already-uploaded
+    "$GIT_AI_EXE" upload-stats HEAD --source "$POST_COMMIT_SOURCE" --wait-for-authorship-note-ms 15000 --skip-if-already-uploaded
   ) >/dev/null 2>&1 &
+fi
+
+if [ "$HOOK_NAME" = "post-merge" ] && ([ -x "$GIT_AI_EXE" ] || [ -f "$GIT_AI_EXE" ]); then
+  GIT_AI_SKIP_ALL_HOOKS=1 \
+  "$GIT_AI_EXE" sync-working-log-base --source "$POST_MERGE_SOURCE" >/dev/null 2>&1 || true
 fi
 
 run_forward_hook "$@"
@@ -594,7 +602,8 @@ exit $?
         marker = MANAGED_HOOK_MARKER,
         git_ai_exe = git_ai_exe,
         hook_name = hook_name_quoted,
-        source = source,
+        post_commit_source = post_commit_source,
+        post_merge_source = post_merge_source,
         forward_hooks_path = forward_hooks_path
     )
 }
@@ -879,8 +888,22 @@ mod tests {
         assert!(dispatcher.contains("run_forward_hook \"$@\""));
         assert!(dispatcher.contains("repair-authorship-note HEAD --write"));
         assert!(dispatcher.contains(
-            "upload-stats HEAD --source \"$SOURCE\" --wait-for-authorship-note-ms 15000 --skip-if-already-uploaded"
+            "upload-stats HEAD --source \"$POST_COMMIT_SOURCE\" --wait-for-authorship-note-ms 15000 --skip-if-already-uploaded"
         ));
         assert!(dispatcher.contains("GIT_AI_WRAPPER_INVOCATION_ID"));
+    }
+
+    #[test]
+    fn dispatcher_script_syncs_working_log_base_on_post_merge() {
+        let dispatcher = managed_hook_script_content(
+            "post-merge",
+            Path::new("C:/Users/admin/.git-ai/launcher/git-ai.exe"),
+            Some("D:/product/app/node_modules/@one/rscli"),
+        );
+
+        assert!(dispatcher.contains("HOOK_NAME='post-merge'"));
+        assert!(dispatcher.contains("POST_MERGE_SOURCE='git-repo-post-merge-hook'"));
+        assert!(dispatcher.contains("sync-working-log-base --source \"$POST_MERGE_SOURCE\""));
+        assert!(dispatcher.contains("run_forward_hook \"$@\""));
     }
 }

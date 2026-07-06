@@ -33,6 +33,20 @@ Speckit 是团队使用的「规范驱动开发」框架，通过 `.specify/` �
 
 > **文档更新说明（2026-04-24）**：本文最初主要从“Speckit 如何集成 git-ai”的视角写，当前已经补充 `git-ai` 本身的源码改动，包括 `post_commit` 挂接点、原生上传模块、feature flag、环境变量约定、失败降级策略，以及代码级验证结果。也就是说，这份文档现在同时覆盖 Speckit 侧改造和 git-ai 侧改造，不再只是一份脚本集成方案。
 
+### 2026-07-06：repo-local post-merge 同步 fast-forward 后的 working log base
+
+现场问题：本机 `D:\rj-ltc\rj-ltc-contract-web` 最新提交 `50d5166d93de0b60de3a436e5635e1c1aacbb214`（`2026-07-06 11:34:18 +0800`，作者 `gaoang <gaoang@ruijie.com.cn>`）只删除 3 个文件共 8 行、0 行新增。`git-ai stats HEAD --json` 显示 `unknown_additions=0`，但 `git notes --ref=ai show HEAD` 无 note；上传日志中 `upload_stats_wait_for_authorship_note_finished(foundAuthorshipNote=false)`，最终以 `hasAuthorshipNote=false` metadata-only 记录上传成功。HTTP 返回 200，因此问题不在服务端、用户 ID、上传入口，也不是 post-commit hook 未执行。
+
+关键证据：`2026-07-06 11:26` Copilot 已对这 3 个文件产生 `AiAgent` checkpoint，base 是 `e923fb507b9fce914b01e5044b814e554374cf10`，`line_stats.deletions=8`；但 `11:32:16` 本地分支通过 `merge origin/dev: Fast-forward` 前进到 `9d11118b34f829ebede17310ade25a9d39a41cfc`。这次 fast-forward 没有进入 git-ai wrapper/daemon 观测链，因此 `.git/ai/working_logs/e923fb5...` 没有迁移成 `.git/ai/working_logs/9d11118...`。`50d5166` 的 parent 正是 `9d11118...`，`repair-authorship-note HEAD --write` 查找 parent working log 时既找不到 active `9d11118...`，也找不到 `old-9d11118...`，手动执行会报 `archived working log not found for 9d11118b34f829ebede17310ade25a9d39a41cfc`。
+
+为什么之前修复没有覆盖：`2026-07-04` 的 partial commit 修复解决的是“repair 已经拿到 parent working log 后，如何把未提交 AI 文件继承到下一 base”；`2026-06-22` 的 archived AI restore 解决的是“post-commit 已经能加载当前 base working log，但里面缺旧 base AI 新增行时如何安全恢复”。本次断点更早：parent `9d11118...` 的 working log bucket 根本不存在，所以上述逻辑都没有机会执行；并且本次提交是 deletion-only，`restore_archived_ai_attributions_for_commit(...)` 当前只处理新增行归因恢复。
+
+修复：新增内部命令 `git-ai sync-working-log-base`，默认读取 `ORIG_HEAD` 和 `HEAD`，仅当 old head 是 new head 的祖先、old base 存在 working log、new base 尚无 working log 时，把 working log 从 old base 改名到 new base；不生成 authorship note、不上传、不把 unknown 猜成 AI/人工。repo-local managed hook dispatcher 的 `post-merge` 分支同步执行该命令，source 标记为 `git-repo-post-merge-hook`，随后继续转发原 hooksPath 的 `post-merge`。`post-commit` 逻辑保持不变：提交后仍执行 `repair-authorship-note HEAD --write` 和 `upload-stats HEAD --source git-repo-post-commit-hook --wait-for-authorship-note-ms 15000 --skip-if-already-uploaded`。
+
+代码变更：`src/commands/git_ai_handlers.rs` 增加 `sync-working-log-base` 命令、祖先校验、迁移结果 debug 事件 `sync_working_log_base_completed`；`src/commands/git_hook_handlers.rs` 在生成 repo-local `post-merge` dispatcher 时调用该命令，并保留原 hook 转发；`tests/integration/post_commit_unit.rs` 增加 deletion-only 回归测试，复现“旧 base 有 AI 删除 checkpoint -> 未被 git-ai 观察的 HEAD 前进 -> 迁移 working log -> 下一次 plain commit repair 写出 note”的链路。
+
+验证：`cargo fmt --check` 通过；`cargo check -q --lib` 通过；`cargo test -q dispatcher_script_syncs_working_log_base_on_post_merge --lib` 通过；`cargo test -q --test integration sync_working_log_base_after_unobserved_head_advance_allows_deletion_commit_repair` 通过。历史数据说明：该修复保证后续安装/升级后 repo-local `post-merge` 能在 fast-forward 后迁移 working log；已经以 `hasAuthorshipNote=false` 上传到远端的 `50d5166` 不会被客户端自动改写，如需修历史，需要基于本地仍存在的 checkpoint/working log 证据显式 repair 并重传。
+
 ### 2026-07-04：repo-local repair 路径 partial commit 后未继承未提交 AI 文件
 
 现场问题：本机 `D:\rj-ltc\rj-ltc-contract-web` 提交 `31bb1b5a97974ec42bd9583f3e4a411a874a7806`（`2026-07-04 00:47:59 +0800`，作者 `gaoang <gaoang@ruijie.com.cn>`）只新增 `src/views/PmpManagement/ManagementList/components/ProjectNameEditDialog.vue` 一个文件，共 94 行，但本地 `git notes --ref=ai show 31bb1b5a` 无 note，`git-ai stats 31bb1b5a --json` 显示 `aiAdditions=0`、`unknownAdditions=94`。日志证明 repo-local `post-commit` 已执行：`00:48:11` 启动 `repair-authorship-note HEAD --write`，`00:48:13` 启动 `upload-stats HEAD --source git-repo-post-commit-hook --wait-for-authorship-note-ms 15000`；上传等待 15 秒仍 `foundAuthorshipNote=false`，最终以 `hasAuthorshipNote=false`、`unknownAdditions=94` 上传成功。因此问题不在上传入口、HTTP、用户 ID，也不是 hook 没安装。

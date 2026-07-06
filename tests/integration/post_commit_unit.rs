@@ -350,6 +350,98 @@ fn repair_authorship_note_carries_uncommitted_ai_to_next_plain_commit() {
 }
 
 #[test]
+fn sync_working_log_base_after_unobserved_head_advance_allows_deletion_commit_repair() {
+    let repo = TestRepo::new();
+
+    std::fs::write(repo.path().join("victim.txt"), "keep\nremove me\n").unwrap();
+    repo.git(&["add", "victim.txt"]).unwrap();
+    repo.stage_all_and_commit("Initial victim").unwrap();
+    let old_base = repo
+        .git_og(&["rev-parse", "HEAD"])
+        .unwrap()
+        .trim()
+        .to_string();
+
+    std::fs::write(repo.path().join("victim.txt"), "keep\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "victim.txt"])
+        .unwrap();
+
+    let git_ai_repo = git_ai_repository::find_repository_in_path(repo.path().to_str().unwrap())
+        .expect("test repo should be discoverable");
+    assert!(
+        git_ai_repo.storage.has_working_log(&old_base),
+        "AI deletion evidence should be stored under the old base"
+    );
+
+    std::fs::write(repo.path().join("upstream-only.txt"), "upstream line\n").unwrap();
+    repo.git_og(&["add", "upstream-only.txt"]).unwrap();
+    repo.git_og_with_env(
+        &[
+            "commit",
+            "-m",
+            "External fast-forward target",
+            "--no-verify",
+        ],
+        &[("GIT_EDITOR", "true")],
+    )
+    .unwrap();
+    let new_base = repo
+        .git_og(&["rev-parse", "HEAD"])
+        .unwrap()
+        .trim()
+        .to_string();
+
+    repo.git_ai(&[
+        "sync-working-log-base",
+        "--old-head",
+        old_base.as_str(),
+        "--new-head",
+        new_base.as_str(),
+        "--source",
+        "test-post-merge",
+    ])
+    .unwrap();
+
+    assert!(
+        !git_ai_repo.storage.has_working_log(&old_base),
+        "post-merge sync should consume the old base working log"
+    );
+    assert!(
+        git_ai_repo.storage.has_working_log(&new_base),
+        "post-merge sync should make the working log available at the new parent"
+    );
+
+    repo.git_og(&["add", "victim.txt"]).unwrap();
+    repo.git_og_with_env(
+        &["commit", "-m", "Plain deletion commit", "--no-verify"],
+        &[("GIT_EDITOR", "true")],
+    )
+    .unwrap();
+    let deletion_commit = repo
+        .git_og(&["rev-parse", "HEAD"])
+        .unwrap()
+        .trim()
+        .to_string();
+    assert!(
+        repo.read_authorship_note(&deletion_commit).is_none(),
+        "plain commit should not have a note before repair"
+    );
+
+    let result = git_ai::authorship::post_commit::repair_authorship_note_from_archived_working_log(
+        &git_ai_repo,
+        &deletion_commit,
+        "Test User <test@example.com>".to_string(),
+        true,
+    )
+    .unwrap();
+
+    assert_eq!(result.stats.git_diff_added_lines, 0);
+    assert_eq!(result.stats.git_diff_deleted_lines, 1);
+    assert_eq!(result.stats.total_ai_deletions, 1);
+    assert!(repo.read_authorship_note(&deletion_commit).is_some());
+}
+
+#[test]
 fn test_post_commit_empty_repo_no_checkpoint() {
     // Create an empty repo (no commits yet)
     let repo = TestRepo::new();

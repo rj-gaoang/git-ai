@@ -109,6 +109,7 @@ pub fn handle_git_ai(args: &[String]) {
             | "install"
             | "post-install-probe"
             | "uninstall-hooks"
+            | "sync-working-log-base"
     );
     if needs_daemon {
         use crate::daemon::telemetry_handle::{
@@ -169,6 +170,9 @@ pub fn handle_git_ai(args: &[String]) {
         }
         "repair-authorship-note" => {
             handle_repair_authorship_note(&args[1..]);
+        }
+        "sync-working-log-base" => {
+            handle_sync_working_log_base(&args[1..]);
         }
         "status" => {
             commands::status::handle_status(&args[1..]);
@@ -1399,6 +1403,204 @@ fn handle_repair_authorship_note(args: &[String]) {
             std::process::exit(1);
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SyncWorkingLogBaseOutcome {
+    source: String,
+    old_head: Option<String>,
+    new_head: Option<String>,
+    old_spec: String,
+    new_spec: String,
+    action: String,
+    old_working_log_exists: bool,
+    new_working_log_exists: bool,
+    is_ancestor: bool,
+    error: Option<String>,
+}
+
+fn handle_sync_working_log_base(args: &[String]) {
+    let repo = match find_repository(&Vec::<String>::new()) {
+        Ok(repo) => repo,
+        Err(e) => {
+            eprintln!("sync-working-log-base: failed to find repository: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    let mut old_spec = "ORIG_HEAD".to_string();
+    let mut new_spec = "HEAD".to_string();
+    let mut source = "manual".to_string();
+    let mut json_output = false;
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--old-head" => {
+                if i + 1 >= args.len() {
+                    eprintln!("sync-working-log-base: --old-head requires a value");
+                    std::process::exit(1);
+                }
+                old_spec = args[i + 1].clone();
+                i += 2;
+            }
+            "--new-head" => {
+                if i + 1 >= args.len() {
+                    eprintln!("sync-working-log-base: --new-head requires a value");
+                    std::process::exit(1);
+                }
+                new_spec = args[i + 1].clone();
+                i += 2;
+            }
+            "--source" => {
+                if i + 1 >= args.len() {
+                    eprintln!("sync-working-log-base: --source requires a value");
+                    std::process::exit(1);
+                }
+                source = args[i + 1].clone();
+                i += 2;
+            }
+            "--json" => {
+                json_output = true;
+                i += 1;
+            }
+            value => {
+                eprintln!("sync-working-log-base: unknown argument {}", value);
+                std::process::exit(1);
+            }
+        }
+    }
+
+    let outcome = sync_working_log_base(&repo, &old_spec, &new_spec, source);
+
+    crate::diagnostics::append_debug_event(
+        "sync_working_log_base_completed",
+        serde_json::json!({
+            "source": outcome.source,
+            "oldSpec": outcome.old_spec,
+            "newSpec": outcome.new_spec,
+            "oldHead": outcome.old_head,
+            "newHead": outcome.new_head,
+            "action": outcome.action,
+            "oldWorkingLogExists": outcome.old_working_log_exists,
+            "newWorkingLogExists": outcome.new_working_log_exists,
+            "isAncestor": outcome.is_ancestor,
+            "error": outcome.error,
+        }),
+    );
+
+    if json_output {
+        println!("{}", serde_json::to_string(&outcome).unwrap_or_default());
+    } else {
+        println!(
+            "[git-ai] sync-working-log-base: {} old={} new={}",
+            outcome.action,
+            outcome
+                .old_head
+                .as_deref()
+                .map(short_commit_sha)
+                .unwrap_or("(unresolved)"),
+            outcome
+                .new_head
+                .as_deref()
+                .map(short_commit_sha)
+                .unwrap_or("(unresolved)"),
+        );
+    }
+}
+
+fn sync_working_log_base(
+    repo: &Repository,
+    old_spec: &str,
+    new_spec: &str,
+    source: String,
+) -> SyncWorkingLogBaseOutcome {
+    let mut outcome = SyncWorkingLogBaseOutcome {
+        source,
+        old_head: None,
+        new_head: None,
+        old_spec: old_spec.to_string(),
+        new_spec: new_spec.to_string(),
+        action: "skipped".to_string(),
+        old_working_log_exists: false,
+        new_working_log_exists: false,
+        is_ancestor: false,
+        error: None,
+    };
+
+    let old_head = match resolve_single_oid(repo, old_spec) {
+        Ok(sha) => sha,
+        Err(error) => {
+            outcome.action = "skipped_old_head_unresolved".to_string();
+            outcome.error = Some(error);
+            return outcome;
+        }
+    };
+    outcome.old_head = Some(old_head.clone());
+
+    let new_head = match resolve_single_oid(repo, new_spec) {
+        Ok(sha) => sha,
+        Err(error) => {
+            outcome.action = "skipped_new_head_unresolved".to_string();
+            outcome.error = Some(error);
+            return outcome;
+        }
+    };
+    outcome.new_head = Some(new_head.clone());
+
+    if old_head == new_head {
+        outcome.action = "skipped_same_head".to_string();
+        return outcome;
+    }
+
+    outcome.old_working_log_exists = repo.storage.has_working_log(&old_head);
+    outcome.new_working_log_exists = repo.storage.has_working_log(&new_head);
+    outcome.is_ancestor = is_ancestor_commit(repo, &old_head, &new_head);
+
+    if !outcome.is_ancestor {
+        outcome.action = "skipped_not_fast_forward".to_string();
+        return outcome;
+    }
+
+    if !outcome.old_working_log_exists {
+        outcome.action = "skipped_old_working_log_missing".to_string();
+        return outcome;
+    }
+
+    if outcome.new_working_log_exists {
+        outcome.action = "skipped_new_working_log_exists".to_string();
+        return outcome;
+    }
+
+    match repo.storage.rename_working_log(&old_head, &new_head) {
+        Ok(()) => {
+            outcome.action = "migrated".to_string();
+            outcome.old_working_log_exists = false;
+            outcome.new_working_log_exists = true;
+        }
+        Err(error) => {
+            outcome.action = "failed".to_string();
+            outcome.error = Some(error.to_string());
+        }
+    }
+
+    outcome
+}
+
+fn resolve_single_oid(repo: &Repository, spec: &str) -> Result<String, String> {
+    repo.revparse_single(spec)
+        .map(|object| object.id().to_string())
+        .map_err(|error| error.to_string())
+}
+
+fn is_ancestor_commit(repo: &Repository, ancestor: &str, descendant: &str) -> bool {
+    let mut args = repo.global_args_for_exec();
+    args.push("merge-base".to_string());
+    args.push("--is-ancestor".to_string());
+    args.push(ancestor.to_string());
+    args.push(descendant.to_string());
+    crate::git::repository::exec_git(&args).is_ok()
 }
 
 fn commit_author_for_repair(repo: &Repository, commit_sha: &str) -> String {
