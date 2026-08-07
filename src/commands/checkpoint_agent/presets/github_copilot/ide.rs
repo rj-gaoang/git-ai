@@ -236,14 +236,13 @@ pub(super) fn parse_vscode_native_hooks(
         }
         _ => crate::streams::sweep::StreamFormat::CopilotSessionJson,
     };
-    let (resolved_model, resolved_model_source) =
-        resolve_vscode_native_model(transcript_path.as_deref(), sweep_format);
-
     let context = PresetContext {
         agent_id: AgentId {
             tool: "github-copilot".to_string(),
             id: session_id.clone(),
-            model: resolved_model,
+            // Native hooks do not include the model. Resolve it once per session in the
+            // long-lived daemon instead of reading VS Code storage in every hook process.
+            model: "unknown".to_string(),
         },
         external_session_id: session_id,
         trace_id: trace_id.to_string(),
@@ -258,7 +257,7 @@ pub(super) fn parse_vscode_native_hooks(
             "traceId": trace_id,
             "sessionId": context.external_session_id.as_str(),
             "model": context.agent_id.model.as_str(),
-            "modelSource": resolved_model_source,
+            "modelSource": "deferred_to_daemon",
             "transcriptFormat": match transcript_format {
                 StreamFormat::CopilotEventStreamJsonl => "CopilotEventStreamJsonl",
                 StreamFormat::CopilotSessionJson => "CopilotSessionJson",

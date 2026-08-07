@@ -1395,7 +1395,7 @@ fn daemon_reflog_delta_from_offsets(
     Ok(out)
 }
 
-fn apply_checkpoint_side_effect(request: CheckpointRequest) -> Result<(), GitAiError> {
+fn apply_checkpoint_side_effect(mut request: CheckpointRequest) -> Result<(), GitAiError> {
     if request.files.is_empty() {
         append_checkpoint_request_resolution_debug_event(
             &request,
@@ -1418,6 +1418,12 @@ fn apply_checkpoint_side_effect(request: CheckpointRequest) -> Result<(), GitAiE
             Some("bash_request_too_many_files"),
         );
         return Ok(());
+    }
+
+    if request.checkpoint_kind.is_ai()
+        && let Some(agent_id) = request.agent_id.as_mut()
+    {
+        crate::streams::model_extraction::enrich_copilot_agent_model(agent_id, &request.metadata);
     }
 
     let repo_work_dir = &request.files[0].repo_work_dir;
