@@ -224,12 +224,6 @@ pub(super) fn parse_vscode_native_hooks(
     } else {
         StreamFormat::CopilotSessionJson
     };
-    let sweep_format = match transcript_format {
-        StreamFormat::CopilotEventStreamJsonl => {
-            crate::streams::sweep::StreamFormat::CopilotEventStreamJsonl
-        }
-        _ => crate::streams::sweep::StreamFormat::CopilotSessionJson,
-    };
     let context = PresetContext {
         agent_id: AgentId {
             tool: "github-copilot".to_string(),
@@ -361,40 +355,6 @@ pub(super) fn parse_vscode_native_hooks(
 // ---------------------------------------------------------------------------
 // IDE-specific helpers
 // ---------------------------------------------------------------------------
-
-fn resolve_vscode_native_model(
-    transcript_path: Option<&str>,
-    sweep_format: crate::streams::sweep::StreamFormat,
-) -> (String, &'static str) {
-    let Some(transcript_path) = transcript_path else {
-        return ("unknown".to_string(), "missing_transcript_path");
-    };
-
-    let path = Path::new(transcript_path);
-    if let Some(model) = model_extraction::extract_model(path, sweep_format, None)
-        .ok()
-        .flatten()
-    {
-        return (model, "transcript");
-    }
-
-    let ignored_default_model = model_extraction::extract_model_from_copilot_models_json(path)
-        .ok()
-        .flatten();
-    if let Some(ignored_default_model) = ignored_default_model {
-        crate::diagnostics::append_debug_event(
-            "checkpoint_copilot_models_json_default_ignored",
-            serde_json::json!({
-                "tool": "github-copilot",
-                "transcriptPath": transcript_path,
-                "ignoredDefaultModel": ignored_default_model,
-                "reason": "models_json_contains_chat_default_not_request_model",
-            }),
-        );
-    }
-
-    ("unknown".to_string(), "unknown")
-}
 
 fn transcript_path_from_hook_data(data: &serde_json::Value) -> Option<&str> {
     parse::optional_str_multi(
