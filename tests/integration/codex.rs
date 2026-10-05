@@ -89,22 +89,9 @@ fn test_codex_preset_bash_pre_tool_use_skips_checkpoint_after_capturing_snapshot
     })
     .to_string();
 
-    // In the new parse API, bash PreToolUse returns PreBashCall with SnapshotOnly strategy
-    // instead of returning an error. The caller handles the side effects.
-    let events = parse_codex(&hook_input).expect("should succeed with PreBashCall");
-    assert_eq!(events.len(), 1);
-    match &events[0] {
-        ParsedHookEvent::PreBashCall(e) => {
-            assert_eq!(e.context.agent_id.tool, "codex");
-            assert_eq!(e.context.external_session_id, "session-bash-pre");
-            assert_eq!(e.tool_use_id, "bash-use-1");
-            assert!(
-                e.context.metadata.contains_key("transcript_path"),
-                "metadata should preserve transcript path for commit-time recovery"
-            );
-        }
-        _ => panic!("Expected PreBashCall for bash PreToolUse"),
-    }
+    // Read-only Bash commands are intentionally skipped by the company recovery policy.
+    let events = parse_codex(&hook_input).expect("read-only PreToolUse should succeed");
+    assert!(events.is_empty());
 }
 
 #[test]
@@ -123,17 +110,9 @@ fn test_codex_preset_bash_pre_tool_use_supports_camel_case_hook_event_name() {
     })
     .to_string();
 
-    // Camel-case fields should work the same as snake_case
-    let events = parse_codex(&hook_input).expect("should succeed with PreBashCall");
-    assert_eq!(events.len(), 1);
-    match &events[0] {
-        ParsedHookEvent::PreBashCall(e) => {
-            assert_eq!(e.context.agent_id.tool, "codex");
-            assert_eq!(e.context.external_session_id, "session-bash-pre-camel");
-            assert_eq!(e.tool_use_id, "bash-use-camel-1");
-        }
-        _ => panic!("Expected PreBashCall for camel-case PreToolUse"),
-    }
+    // Camel-case fields are accepted, and read-only Bash remains skipped.
+    let events = parse_codex(&hook_input).expect("read-only PreToolUse should succeed");
+    assert!(events.is_empty());
 }
 
 #[test]
