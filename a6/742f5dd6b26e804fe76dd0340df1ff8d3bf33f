@@ -1,0 +1,41 @@
+src/streams/model_extraction.rs
+  s_fdf1fa5f0a0610::t_22b302351d17b1 16,87,91,94-96,98,100-102,111,118,126-128,130,135-138,184,187,191,195-197,200,411,417,421,425,427,431,434,441,444,453-457,466,472,476,478,483,489,495
+---
+{
+  "schema_version": "authorship/3.1.0",
+  "git_ai_version": "2.2.51",
+  "base_commit_sha": "a6742f5dd6b26e804fe76dd0340df1ff8d3bf33f",
+  "prompts": {
+    "s_fdf1fa5f0a0610::t_22b302351d17b1": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a10676-4d45-72e3-89e2-419c696fae4f",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "gaoang <gaoang@ruijie.com.cn>",
+      "messages": [],
+      "total_additions": 48,
+      "total_deletions": 1,
+      "accepted_lines": 48,
+      "overriden_lines": 0,
+      "custom_attributes": {
+        "archive_file": "src/streams/model_extraction.rs",
+        "archived_ai_state_restored": "true"
+      }
+    }
+  },
+  "sessions": {
+    "s_fdf1fa5f0a0610": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a10676-4d45-72e3-89e2-419c696fae4f",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "gaoang <gaoang@ruijie.com.cn>",
+      "custom_attributes": {
+        "archive_file": "src/streams/model_extraction.rs",
+        "archived_ai_state_restored": "true"
+      }
+    }
+  }
+}
