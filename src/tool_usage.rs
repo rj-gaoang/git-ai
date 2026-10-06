@@ -101,6 +101,13 @@ pub fn digest(value: &str) -> String {
     format!("sha256:{:x}", hasher.finalize())
 }
 
+/// Format timestamps for the ai-cr upload contract. The service maps this
+/// value directly to a Java `Date` using its global `yyyy-MM-dd HH:mm:ss`
+/// Jackson format, so RFC3339 offsets and fractional seconds are not valid.
+fn occurred_at_now() -> String {
+    chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string()
+}
+
 pub fn enabled() -> bool {
     Config::fresh().get_feature_flags().tool_usage_telemetry
 }
@@ -141,7 +148,7 @@ pub fn event_from_checkpoint(
     ToolUsageEvent {
         event_id: format!("evt_{}", generate_v4()),
         schema_version: TOOL_USAGE_SCHEMA_VERSION.to_string(),
-        occurred_at: chrono::Utc::now().to_rfc3339(),
+        occurred_at: occurred_at_now(),
         kind,
         event_type: event_type.to_string(),
         status: ToolUsageStatus::Success,
@@ -211,7 +218,7 @@ pub fn record_human_outcome(
     record(ToolUsageEvent {
         event_id: format!("evt_{}", generate_v4()),
         schema_version: TOOL_USAGE_SCHEMA_VERSION.to_string(),
-        occurred_at: chrono::Utc::now().to_rfc3339(),
+        occurred_at: occurred_at_now(),
         kind: ToolUsageKind::HumanOutcome,
         event_type: event_type.to_string(),
         status: ToolUsageStatus::Success,
@@ -255,6 +262,15 @@ mod tests {
     #[test]
     fn digest_does_not_return_plaintext() {
         assert!(!digest("secret").contains("secret"));
+    }
+
+    #[test]
+    fn occurred_at_uses_ai_cr_date_format() {
+        let value = occurred_at_now();
+        assert_eq!(value.len(), 19);
+        assert!(chrono::NaiveDateTime::parse_from_str(&value, "%Y-%m-%d %H:%M:%S").is_ok());
+        assert!(!value.contains('T'));
+        assert!(!value.ends_with('Z'));
     }
 
     #[test]
