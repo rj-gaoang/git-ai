@@ -7,6 +7,10 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::path::Path;
 
+const MAX_TRANSCRIPT_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_TRANSCRIPT_MESSAGES: usize = 256;
+const MAX_PROMPT_TEXT_BYTES: usize = 256 * 1024;
+
 pub enum PromptUpdateResult {
     Updated(AiTranscript, String),
     Unchanged,
@@ -34,7 +38,7 @@ pub fn update_prompt_from_tool(
     for path in candidate_paths {
         let transcript_path = Path::new(path);
 
-        match transcript_from_json_or_jsonl(transcript_path) {
+        match transcript_from_json_or_jsonl_for_tool(tool, transcript_path) {
             Ok(transcript) if !transcript.messages().is_empty() => {
                 let latest_model =
                     latest_model_from_transcript(tool, transcript_path, current_model);
@@ -106,7 +110,25 @@ fn latest_model_from_transcript(tool: &str, transcript_path: &Path, current_mode
         .unwrap_or_else(|| current_model.to_string())
 }
 
-fn transcript_from_json_or_jsonl(path: &Path) -> Result<AiTranscript, GitAiError> {
+fn transcript_from_json_or_jsonl_for_tool(
+    tool: &str,
+    path: &Path,
+) -> Result<AiTranscript, GitAiError> {
+    if let Ok(metadata) = std::fs::metadata(path)
+        && metadata.len() > MAX_TRANSCRIPT_BYTES
+    {
+        crate::diagnostics::append_debug_event(
+            "prompt_transcript_skipped",
+            serde_json::json!({
+                "tool": tool,
+                "path": path.to_string_lossy().replace('\\', "/"),
+                "reason": "transcript_too_large",
+                "bytes": metadata.len(),
+                "byteLimit": MAX_TRANSCRIPT_BYTES,
+            }),
+        );
+        return Ok(AiTranscript::new());
+    }
     let content = std::fs::read_to_string(path)?;
     let mut transcript = AiTranscript::new();
 
@@ -117,35 +139,70 @@ fn transcript_from_json_or_jsonl(path: &Path) -> Result<AiTranscript, GitAiError
             .filter(|line| !line.is_empty())
         {
             let value: Value = serde_json::from_str(line)?;
-            collect_messages_from_value(&value, &mut transcript);
+            collect_messages_from_value_for_tool(&value, &mut transcript, Some(tool));
         }
     } else {
         let value: Value = serde_json::from_str(&content)?;
-        collect_messages_from_value(&value, &mut transcript);
+        collect_messages_from_value_for_tool(&value, &mut transcript, Some(tool));
     }
 
     Ok(transcript)
 }
 
-fn collect_messages_from_value(value: &Value, transcript: &mut AiTranscript) {
+fn collect_messages_from_value_for_tool(
+    value: &Value,
+    transcript: &mut AiTranscript,
+    tool: Option<&str>,
+) {
+    if transcript.messages().len() >= MAX_TRANSCRIPT_MESSAGES {
+        return;
+    }
     match value {
         Value::Array(items) => {
             for item in items {
-                collect_messages_from_value(item, transcript);
+                collect_messages_from_value_for_tool(item, transcript, tool);
             }
         }
         Value::Object(object) => {
-            if let Some(message) = message_from_object(object) {
-                transcript.add_message(message);
+            if let Some(message) = message_from_object_for_tool(object, tool) {
+                if message
+                    .text()
+                    .is_none_or(|text| text.len() <= MAX_PROMPT_TEXT_BYTES)
+                {
+                    transcript.add_message(message);
+                }
                 return;
             }
 
             for nested in object.values() {
-                collect_messages_from_value(nested, transcript);
+                collect_messages_from_value_for_tool(nested, transcript, tool);
             }
         }
         _ => {}
     }
+}
+
+fn message_from_object_for_tool(
+    object: &serde_json::Map<String, Value>,
+    tool: Option<&str>,
+) -> Option<Message> {
+    if tool == Some("claude") && is_claude_tool_result(object) {
+        return None;
+    }
+    message_from_object(object)
+}
+
+fn is_claude_tool_result(object: &serde_json::Map<String, Value>) -> bool {
+    object.get("type").and_then(Value::as_str) == Some("user")
+        && object
+            .get("message")
+            .and_then(|message| message.get("content"))
+            .and_then(Value::as_array)
+            .is_some_and(|content| {
+                content
+                    .iter()
+                    .any(|block| block.get("type").and_then(Value::as_str) == Some("tool_result"))
+            })
 }
 
 fn message_from_object(object: &serde_json::Map<String, Value>) -> Option<Message> {
@@ -199,7 +256,8 @@ mod tests {
         .unwrap();
         file.flush().unwrap();
 
-        let transcript = transcript_from_json_or_jsonl(file.path()).unwrap();
+        let transcript =
+            transcript_from_json_or_jsonl_for_tool("github-copilot", file.path()).unwrap();
         let messages = transcript.messages();
 
         assert_eq!(messages.len(), 2);
@@ -291,6 +349,86 @@ mod tests {
             PromptUpdateResult::Unchanged => panic!("expected Updated result"),
             PromptUpdateResult::Failed(error) => panic!("unexpected error: {error}"),
         }
+    }
+
+    #[test]
+    fn claude_tool_results_are_not_recorded_as_user_prompts() {
+        let mut file = tempfile::NamedTempFile::with_suffix(".jsonl").unwrap();
+        writeln!(
+            file,
+            r#"{{"type":"user","message":{{"content":[{{"type":"tool_result","tool_use_id":"toolu_1","content":"tool output"}}]}}}}"#
+        )
+        .unwrap();
+        writeln!(
+            file,
+            r#"{{"type":"user","message":{{"content":[{{"type":"text","text":"fix the parser"}}]}}}}"#
+        )
+        .unwrap();
+        file.flush().unwrap();
+
+        let transcript = transcript_from_json_or_jsonl_for_tool("claude", file.path()).unwrap();
+        assert_eq!(transcript.messages().len(), 1);
+        assert!(matches!(
+            &transcript.messages()[0],
+            Message::User { text, .. } if text == "fix the parser"
+        ));
+    }
+
+    #[test]
+    fn generic_parser_keeps_user_events_with_nested_content() {
+        let mut file = tempfile::NamedTempFile::with_suffix(".jsonl").unwrap();
+        writeln!(
+            file,
+            r#"{{"type":"user.message","data":{{"content":"write tests"}}}}"#
+        )
+        .unwrap();
+        file.flush().unwrap();
+
+        let transcript =
+            transcript_from_json_or_jsonl_for_tool("github-copilot", file.path()).unwrap();
+        assert_eq!(transcript.messages().len(), 1);
+    }
+
+    #[test]
+    fn oversized_transcript_is_skipped_before_reading_contents() {
+        let file = tempfile::NamedTempFile::with_suffix(".jsonl").unwrap();
+        file.as_file().set_len(MAX_TRANSCRIPT_BYTES + 1).unwrap();
+
+        let transcript = transcript_from_json_or_jsonl_for_tool("claude", file.path()).unwrap();
+        assert!(transcript.messages().is_empty());
+    }
+
+    #[test]
+    fn transcript_message_count_is_bounded() {
+        let mut file = tempfile::NamedTempFile::with_suffix(".jsonl").unwrap();
+        for index in 0..(MAX_TRANSCRIPT_MESSAGES + 20) {
+            writeln!(
+                file,
+                r#"{{"type":"user.message","data":{{"content":"prompt-{index}"}}}}"#
+            )
+            .unwrap();
+        }
+        file.flush().unwrap();
+
+        let transcript =
+            transcript_from_json_or_jsonl_for_tool("github-copilot", file.path()).unwrap();
+        assert_eq!(transcript.messages().len(), MAX_TRANSCRIPT_MESSAGES);
+    }
+
+    #[test]
+    fn oversized_prompt_message_is_not_recorded() {
+        let mut file = tempfile::NamedTempFile::with_suffix(".jsonl").unwrap();
+        let oversized = "x".repeat(MAX_PROMPT_TEXT_BYTES + 1);
+        writeln!(
+            file,
+            "{{\"type\":\"user\",\"message\":{{\"content\":\"{}\"}}}}",
+            oversized
+        )
+        .unwrap();
+        file.flush().unwrap();
+
+        let transcript = transcript_from_json_or_jsonl_for_tool("claude", file.path()).unwrap();
+        assert!(transcript.messages().is_empty());
     }
 }
 

@@ -3956,3 +3956,12 @@ git-ai upload-stats --dry-run --ignore '*.md' --ignore 'src/generated/**' HEAD
 - `_external/spec-kit/.specify/scripts/powershell/upload-ai-stats.ps1`（自举副本）✅ 已同步
 - `_external/spec-kit/test-verify/.specify/scripts/powershell/upload-ai-stats.ps1`（验证副本）✅ 已同步
 - commit 级统计（`Get-CommitAiStats` 调用 `git-ai stats`）不受影响，仍使用原方案
+### 2026-10-06：降低提交期间的重复上传与超大文件 I/O
+
+针对 Windows 用户提交卡顿日志，确认正常 daemon 提交同时触发 daemon 自动上传和 wrapper 兜底上传，造成重复统计、锁竞争和 HTTP 请求。现已将 wrapper 兜底限制为 daemon 不可用路径；正常 daemon 路径只保留单一上传任务。另将 checkpoint 单文件 2 MiB 上限从仅 Bash 派生路径扩展到所有 checkpoint 输入，避免 Claude 等显式文件编辑读取数百 MiB 未跟踪文件并写入 working log。新增对应回归测试。
+### 2026-10-06 Claude prompt 巨大化修复
+
+- 现象：Claude 用户的单条上传 prompt 达到 MB 级甚至数百万字符，`refs/notes/ai` 迅速膨胀，提交时可能造成高内存/高 IO 卡顿。
+- 根因：Claude transcript 中 `type: "user"` 同时包含真人输入和工具执行结果回灌；通用解析器按 `type` 识别角色，并递归提取 `message.content`，因此把含 `tool_result` 的完整工具输出误保存成 `Message::User`。每次 checkpoint 又读取截至当前时刻的完整 transcript，导致历史内容重复进入多个 prompt。
+- 修复：`src/authorship/prompt_utils.rs` 对 Claude 专门过滤 `message.content` 含 `tool_result` 的 user 事件，只保留纯文本真人输入；其他 agent 的通用解析逻辑不变。解析还增加 16 MiB transcript 文件上限、256 条消息上限和 256 KiB 单消息上限，超限直接跳过，避免大文件读取和大 payload 造成内存/IO 卡顿。新增回归测试覆盖工具结果过滤、真人文本保留及各项上限。
+- 影响：仅阻止后续错误 prompt 继续落库/上传；历史 git notes 和 dashboard 数据不自动重写。此前的 2 MiB checkpoint 文件上限修复用于阻止超大文件快照读入，与本次 prompt 解析修复互补。

@@ -25,6 +25,10 @@ fn should_run_post_commit_followups(parsed: &ParsedGitInvocation, command_succee
     command_succeeded && parsed.command.as_deref() == Some("commit")
 }
 
+fn should_spawn_fallback_for_source(source: &str) -> bool {
+    source == "wrapper_no_daemon"
+}
+
 fn run_post_commit_followups(
     parsed: &ParsedGitInvocation,
     repository: Option<&Repository>,
@@ -39,7 +43,12 @@ fn run_post_commit_followups(
     // self-update. The update worker may stop/restart git-ai services during
     // install, so the upload must get the first chance to acquire its activity
     // lock and persist this commit's status.
-    maybe_spawn_post_commit_fallback_upload(repository, fallback_upload_source);
+    // The daemon owns the normal post-commit upload path. The wrapper fallback
+    // is only needed when the daemon was unavailable; spawning it on the normal
+    // path duplicates stats computation and HTTP traffic for every commit.
+    if should_spawn_fallback_for_source(fallback_upload_source) {
+        maybe_spawn_post_commit_fallback_upload(repository, fallback_upload_source);
+    }
     crate::commands::upgrade::maybe_schedule_background_update_check_after_commit();
 }
 
@@ -637,6 +646,12 @@ mod tests {
             !args.contains(&"--skip-if-authorship-note-found".to_string()),
             "fallback upload must still upload this commit after the daemon writes its note"
         );
+    }
+
+    #[test]
+    fn normal_daemon_post_commit_does_not_spawn_fallback_upload() {
+        assert!(!should_spawn_fallback_for_source("wrapper_post_commit"));
+        assert!(should_spawn_fallback_for_source("wrapper_no_daemon"));
     }
 
     #[test]

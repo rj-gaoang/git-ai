@@ -62,7 +62,7 @@ const MAX_CHECKPOINT_FILES: usize = 1000;
 const DEBUG_PATH_SAMPLE_LIMIT: usize = 20;
 const MAX_BASH_CHECKPOINT_FILES: usize = 200;
 const MAX_BASH_PRE_BASELINE_FILES: usize = 200;
-const MAX_BASH_CHECKPOINT_FILE_BYTES: u64 = 2 * 1024 * 1024;
+const MAX_CHECKPOINT_FILE_BYTES: u64 = 2 * 1024 * 1024;
 
 fn should_skip_checkpoint_path(path: &Path) -> Option<&'static str> {
     for component in path.components() {
@@ -264,8 +264,7 @@ fn build_checkpoint_files_with_policy(
         }
         if let Ok(metadata) = fs::metadata(path)
             && metadata.is_file()
-            && bash_derived
-            && metadata.len() > MAX_BASH_CHECKPOINT_FILE_BYTES
+            && metadata.len() > MAX_CHECKPOINT_FILE_BYTES
         {
             crate::diagnostics::append_debug_event(
                 "checkpoint_file_path_skipped",
@@ -273,7 +272,7 @@ fn build_checkpoint_files_with_policy(
                     "path": path.to_string_lossy().replace('\\', "/"),
                     "reason": "file_too_large",
                     "bytes": metadata.len(),
-                    "byteLimit": MAX_BASH_CHECKPOINT_FILE_BYTES,
+                    "byteLimit": MAX_CHECKPOINT_FILE_BYTES,
                 }),
             );
             continue;
@@ -1035,5 +1034,19 @@ mod tests {
             should_skip_bash_checkpoint_path(runtime_log),
             Some("runtime_log")
         );
+    }
+
+    #[test]
+    fn explicit_checkpoint_files_skip_oversized_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        let path = repo.join("large.txt");
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(MAX_CHECKPOINT_FILE_BYTES + 1).unwrap();
+
+        let files = build_checkpoint_files(std::slice::from_ref(&path)).unwrap();
+
+        assert!(files.is_empty());
     }
 }
