@@ -1,0 +1,316 @@
+src/feature_flags.rs
+  s_364b9432e76389::t_3cbaaaad83ccfa 106,171,185,249,263,279,298
+src/tool_usage.rs
+  s_364b9432e76389::t_32ea7a27e2867d 131-135,191-196,263-267,274-283,286-290
+  s_364b9432e76389::t_0b6ca05a1e7de0 1-23,25-128,130,136-190,242-262,268-273,284-285,291-292
+  s_364b9432e76389::t_551950ab08f37a 24,197-241
+  s_364b9432e76389::t_49814b115c0adc 129
+src/daemon/telemetry_worker.rs
+  s_364b9432e76389::t_d736c9aa7d0659 12,27,59,69,118-120,135,303-304,330-331,340-346
+  s_364b9432e76389::t_274ed99ab77367 305-306,335-339,347-348
+  s_364b9432e76389::t_6b4cf950d426d6 332-334
+src/observability/mod.rs
+  s_364b9432e76389::t_d736c9aa7d0659 5,88-95
+src/api/mod.rs
+  s_364b9432e76389::t_3dfed1f9e1867c 6
+src/lib.rs
+  s_364b9432e76389::t_d736c9aa7d0659 21
+src/api/tool_usage.rs
+  s_364b9432e76389::t_d736c9aa7d0659 1-22
+src/daemon/control_api.rs
+  s_364b9432e76389::t_d736c9aa7d0659 6,153-155
+src/daemon/checkpoint.rs
+  s_364b9432e76389::t_3dfed1f9e1867c 516
+  s_364b9432e76389::t_6b4cf950d426d6 504-515,517-522
+---
+{
+  "schema_version": "authorship/3.1.0",
+  "git_ai_version": "2.2.51",
+  "base_commit_sha": "f50f7ce3e522c2f126e088dd81173355bd4747c6",
+  "prompts": {
+    "s_364b9432e76389::t_0b6ca05a1e7de0": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a11083-3810-7302-94f2-175bc01ce98e",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "gaoang <gaoang@ruijie.com.cn>",
+      "messages": [],
+      "total_additions": 410,
+      "total_deletions": 25,
+      "accepted_lines": 214,
+      "overriden_lines": 0
+    },
+    "s_364b9432e76389::t_274ed99ab77367": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a11083-3810-7302-94f2-175bc01ce98e",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "gaoang <gaoang@ruijie.com.cn>",
+      "messages": [],
+      "total_additions": 410,
+      "total_deletions": 25,
+      "accepted_lines": 760,
+      "overriden_lines": 0
+    },
+    "s_364b9432e76389::t_32ea7a27e2867d": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a11083-3810-7302-94f2-175bc01ce98e",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "gaoang <gaoang@ruijie.com.cn>",
+      "messages": [],
+      "total_additions": 410,
+      "total_deletions": 25,
+      "accepted_lines": 31,
+      "overriden_lines": 0
+    },
+    "s_364b9432e76389::t_3cbaaaad83ccfa": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a11083-3810-7302-94f2-175bc01ce98e",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "gaoang <gaoang@ruijie.com.cn>",
+      "messages": [],
+      "total_additions": 410,
+      "total_deletions": 25,
+      "accepted_lines": 299,
+      "overriden_lines": 0
+    },
+    "s_364b9432e76389::t_3dfed1f9e1867c": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a11083-3810-7302-94f2-175bc01ce98e",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "gaoang <gaoang@ruijie.com.cn>",
+      "messages": [],
+      "total_additions": 410,
+      "total_deletions": 25,
+      "accepted_lines": 2111,
+      "overriden_lines": 0
+    },
+    "s_364b9432e76389::t_49814b115c0adc": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a11083-3810-7302-94f2-175bc01ce98e",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "gaoang <gaoang@ruijie.com.cn>",
+      "messages": [],
+      "total_additions": 410,
+      "total_deletions": 25,
+      "accepted_lines": 1,
+      "overriden_lines": 0
+    },
+    "s_364b9432e76389::t_551950ab08f37a": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a11083-3810-7302-94f2-175bc01ce98e",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "gaoang <gaoang@ruijie.com.cn>",
+      "messages": [],
+      "total_additions": 410,
+      "total_deletions": 25,
+      "accepted_lines": 46,
+      "overriden_lines": 0
+    },
+    "s_364b9432e76389::t_6b4cf950d426d6": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a11083-3810-7302-94f2-175bc01ce98e",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "gaoang <gaoang@ruijie.com.cn>",
+      "messages": [
+        {
+          "type": "user",
+          "text": "<environment_context>\n  <cwd>C:\\Users\\15126\\Desktop\\code\\git-ai-view</cwd>\n  <shell>powershell</shell>\n  <current_date>2026-10-06</current_date>\n  <timezone>Asia/Shanghai</timezone>\n  <filesystem><workspace_roots><root>C:\\Users\\15126\\Desktop\\code\\git-ai-view</root></workspace_roots><permission_profile type=\"disabled\"><file_system type=\"unrestricted\" /></permission_profile></filesystem>\n</environment_context>"
+        },
+        {
+          "type": "user",
+          "text": "怎么采集用户使用的Skill、Agent、MCP 工具调用数据，采集内容覆盖调用次数、使用场景、关联需求任务、产物类型、人工采纳或修改结果等\n"
+        },
+        {
+          "type": "user",
+          "text": "是需要git-ai进行采集并上传到远程看板\n"
+        },
+        {
+          "type": "user",
+          "text": "1.实现该功能  2.在远程看板的UI也需要好好优化一下，可以让让人一目了然看到调用的agent skill mcp等 3.该功能不要影响其他功能，默认关闭  4.该功能要支持copilot cluade codex等  先实现设计文档\n"
+        },
+        {
+          "type": "user",
+          "text": "git-ai和ai-cr的代码是不是都需要改\n"
+        },
+        {
+          "type": "user",
+          "text": "<environment_context>\n  <current_date>2026-10-07</current_date>\n  <timezone>Asia/Shanghai</timezone>\n  <filesystem><workspace_roots><root>C:\\Users\\15126\\Desktop\\code\\git-ai-view</root></workspace_roots><permission_profile type=\"disabled\"><file_system type=\"unrestricted\" /></permission_profile></filesystem>\n</environment_context>"
+        },
+        {
+          "type": "user",
+          "text": "先修改git-ai\n"
+        },
+        {
+          "type": "user",
+          "text": "怎么采集用户使用的Skill、Agent、MCP 工具调用数据，采集内容覆盖调用次数、使用场景、关联需求任务、产物类型、人工采纳或修改结果等\n"
+        },
+        {
+          "type": "user",
+          "text": "是需要git-ai进行采集并上传到远程看板\n"
+        },
+        {
+          "type": "user",
+          "text": "1.实现该功能  2.在远程看板的UI也需要好好优化一下，可以让让人一目了然看到调用的agent skill mcp等 3.该功能不要影响其他功能，默认关闭  4.该功能要支持copilot cluade codex等  先实现设计文档\n"
+        },
+        {
+          "type": "user",
+          "text": "git-ai和ai-cr的代码是不是都需要改\n"
+        },
+        {
+          "type": "user",
+          "text": "<environment_context>\n  <cwd>C:\\Users\\15126\\Desktop\\code\\git-ai-view</cwd>\n  <shell>powershell</shell>\n  <current_date>2026-10-07</current_date>\n  <timezone>Asia/Shanghai</timezone>\n  <filesystem><workspace_roots><root>C:\\Users\\15126\\Desktop\\code\\git-ai-view</root></workspace_roots><permission_profile type=\"disabled\"><file_system type=\"unrestricted\" /></permission_profile></filesystem>\n</environment_context>"
+        },
+        {
+          "type": "user",
+          "text": "先修改git-ai\n"
+        },
+        {
+          "type": "user",
+          "text": "Another language model started to solve this problem and produced a summary of its thinking process. You also have access to the state of the tools that were used by that language model. Use this to build on the work that has already been done and avoid duplicating work. Here is the summary produced by the other language model, use the information in this summary to assist with your own analysis:\n## 当前进展\n\n- 用户要求：先修改 `git-ai`，实现 Skill/Agent/MCP 使用数据采集并上传到远程看板；默认关闭；支持 Claude、Copilot、Codex；不影响既有功能。\n- 已完成设计文档：\n  - [design.md](C:/Users/15126/Desktop/code/git-ai-view/specs/002-git-ai-tool-telemetry/design.md)\n- 尚未修改 `git-ai` 实现代码。\n- 当前 git-ai 工作区已有用户/其他流程产生的未跟踪目录：\n  - `git-ai/agent-support/intellij/bin/`\n  - 不要删除或回滚。\n\n## 已确认的现有架构\n\n`git-ai` 已有：\n\n- `src/metrics/`：统一 Metrics 事件、`MetricEvent`、`MetricsBatch`\n- `src/daemon/control_api.rs`：`TelemetryEnvelope`\n- `src/daemon/telemetry_handle.rs`：客户端到 daemon 的 telemetry 控制 socket\n- `src/daemon/telemetry_worker.rs`：daemon 内部缓冲、定时 flush、远程上传\n- `src/api/metrics.rs`：现有 `/worker/metrics/upload`\n- `src/transcripts/` / `src/streams/`：Claude、Copilot、Codex 等 transcript 解析\n- checkpoint 的 `agent_metadata` 已包含：\n  - `tool_use_id`\n  - transcript/session/trace 等元数据\n- 现有 `MetricEventId`：\n  - `Committed = 1`\n  - `AgentUsage = 2`\n  - `InstallHooks = 3`\n  - `Checkpoint = 4`\n  - `SessionEvent = 5`\n  - `OtelTrace = 6`\n\n重要文件：\n\n- `git-ai/src/feature_flags.rs`\n- `git-ai/src/config.rs`\n- `git-ai/src/daemon/control_api.rs`\n- `git-ai/src/daemon/telemetry_worker.rs`\n- `git-ai/src/daemon/telemetry_handle.rs`\n- `git-ai/src/metrics/types.rs`\n- `git-ai/src/metrics/events.rs`\n- `git-ai/src/metrics/attrs.rs`\n- `git-ai/src/metrics/mod.rs`\n- `git-ai/src/commands/checkpoint_agent/`\n- `git-ai/src/streams/`\n\n## 已作出的关键设计决策\n\n1. 功能默认关闭：\n   - 建议新增 feature flag `tool_usage_telemetry`\n   - debug/release 默认都为 `false`\n   - 关闭时不解析新增事件、不建新上传队列、不发新请求\n2. 为避免服务端未升级破坏现有链路：\n   - 不直接把新事件混入旧 metrics 语义\n   - 后续应使用独立事件类型或独立 `/worker/tool-usage/upload`\n3. 采集失败、序列化失败、上传失败都不能阻塞 checkpoint、commit、Agent 或 MCP。\n4. 现有 metrics/daemon telemetry 通道尽量复用。\n5. 首期适配 Claude Code、GitHub Copilot、Codex；当前仓库已有三者相关 transcript/checkpoint 入口。\n6. 默认不上传完整 Prompt、transcript、MCP 参数/返回值；只保存名称、状态、耗时、ID、长度、hash、脱敏摘要。\n7. 用户当前要求“先修改 git-ai”，暂不改 `ai-cr-manage-service` 和 `ai-cr-manage-web`。\n\n## 探索到的具体代码细节\n\n### Feature flags\n\n`src/feature_flags.rs` 使用宏：\n\n```rust\ndefine_feature_flags!(\n    rewrite_stash: rewrite_stash, debug = true, release = true,\n    ...\n);\n```\n\n需要新增类似：\n\n```rust\ntool_usage_telemetry: tool_usage_telemetry, debug = false, release = false,\n```\n\n同时补充默认测试断言和序列化/clone 测试。\n\n### Config\n\n`Config` 当前有：\n\n```rust\nfeature_flags: FeatureFlags,\n```\n\n`Config::get_feature_flags()` / `feature_flags()` 可读取。\n\n现有配置字段 `telemetry_oss_disabled`、`api_base_url` 等，但新功能更适合使用 feature flag，而不是普通配置字段。\n\n环境变量会自动遵循：\n\n```text\nGIT_AI_TOOL_USAGE_TELEMETRY\n```\n\n因为 feature flag 宏会读取 `GIT_AI_` 前缀。\n\n### TelemetryEnvelope\n\n当前枚举只有：\n\n```rust\nError\nPerformance\nMessage\nMetrics { events: Vec<MetricEvent> }\n```\n\n可以新增独立 variant，例如：\n\n```rust\nToolUsage {\n    events: Vec<ToolUsageEvent>,\n}\n```\n\n但要同步修改：\n\n- `src/daemon/control_api.rs`\n- `src/daemon/telemetry_worker.rs`\n- flush 逻辑\n- `TelemetryBuffer`\n- 远程 API client/上传接口\n\n注意：如果先只落本地 daemon buffer 而没有远端上传，功能不完整；但服务端暂时没改，应该至少设计为独立 API，避免误发到旧 endpoint。\n\n### Metrics 现状\n\n`metrics::record()` 会构造 `MetricEvent` 并调用：\n\n```rust\ncrate::observability::log_metrics(vec![event]);\n```\n\n`observability` 会把 MetricEvent 送入 daemon telemetry worker 或本地日志。\n\n不要轻易修改现有 `MetricEventId` 的语义，否则可能影响现有 server 和看板。可以：\n- 新增独立 `ToolUsageEvent` JSON 模型和独立 envelope；或\n- 新增明确版本化的 MetricEvent 类型，但需要服务端同步理解。\n\n推荐第一阶段独立 `ToolUsageEvent`。\n\n## 远程看板现状\n\n`ai-cr-manage-service` 已存在：\n\n- `/git-ai/dashboard/*`\n- `GitAiStatsController`\n- 现有 `/worker/metrics/upload` 相关服务端逻辑\n\n`ai-cr-manage-web` 已存在：\n\n- `src/api/gitai/index.js`\n- `src/views/gitai/`\n- 旧 Git AI 提交统计看板\n\n但本轮不要改服务端和前端，除非为了让 git-ai 编译/协议结构必须改动；用户明确要求先改 git-ai。\n\n## 当前最后一个用户可见进度更新\n\n已告知用户：\n\n> 先落一个可独立启停的第一步：增加 `tool_usage_telemetry` 配置旗标（默认 debug/release 都关闭），定义通用 `ToolUsageEvent`，并让 Claude/Copilot/Codex 的 checkpoint 元数据可通过统一 API 记录。上传暂不复用旧 metrics endpoint，避免服务端未升级时破坏现有链路；事件先进入现有 daemon telemetry 通道，后续接 ai-cr 新 endpoint。\n\n这意味着下一步应实际开始编辑代码，而不是继续只做方案。\n\n## 建议的下一步实现顺序\n\n1. 阅读完整 `telemetry_worker.rs` flush 部分和 `api/client.rs`，确认远程 API client 结构。\n2. 在 `feature_flags.rs` 增加默认关闭的 `tool_usage_telemetry`。\n3. 在 `src/tool_usage_telemetry.rs` 或 `src/telemetry/tool_usage.rs` 新建：\n   - `ToolUsageEvent`\n   - `ToolUsageEventType`\n   - `ToolUsageKind`（agent/skill/mcp）\n   - 构造器、脱敏/hash 辅助\n   - feature gate\n4. 在 `control_api.rs` 增加 `TelemetryEnvelope::ToolUsage`。\n5. 在 `telemetry_worker.rs` 增加缓冲和 flush 分支。\n6. 在 `api` 增加独立上传方法，建议 endpoint：\n   - `/worker/tool-usage/upload`\n   - 当前服务端未实现时，客户端需在服务端返回 404/未支持时静默失败并保留重试/丢弃策略，不能影响旧功能。\n7. 从 checkpoint 现有 `agent_metadata` 接入统一记录函数：\n   - Claude/Copilot/Codex 根据 agent/tool/session/tool_use_id 写 `agent` 或 `mcp` 事件；\n   - 若只知道 Agent 调用，不要伪造 Skill/MCP 事件；\n   - 缺失字段保持 `None`。\n8. 增加单元测试：\n   - 默认 flag 为 false；\n   - 开关关闭时不会创建/发送 ToolUsageEvent；\n   - Claude/Copilot/Codex 元数据映射；\n   - 序列化/反序列化；\n   - MCP 敏感字段不落明文。\n9. 使用 `apply_patch` 编辑；不要用 shell 重定向写文件。\n10. 编译检查优先用仓库规定的：\n   - `task build`\n   - 针对性测试可用 `task test TEST_FILTER=...`\n   - 不要运行 `task dev`，除非用户明确要求安装/启动本机 git-ai。\n\n## 约束\n\n- 默认回复中文。\n- 不要启动子 Agent（当前 developer 明确禁止主动 delegation）。\n- 不要撤销其他人已有改动。\n- 修改前继续发送简短 commentary 更新。\n- 最终说明具体改动、测试结果、尚未完成的服务端接口依赖。\n"
+        },
+        {
+          "type": "user",
+          "text": "ai-cr的前后端代码\\\npro-codereview分支上进行开发，开发完成后在开发平台进行打包部署：[https://dev-platform.ruijie.com.cn/ci-deployment/aeb51caa4f0e40bb9a71c846f7b656ad?name=%E9%A3%9E%E4%B9%A6Aily%E5%AF%B9%E6%8E%A5%E7%B3%BB%E7%BB%9F](https://dev-platform.ruijie.com.cn/ci-deployment/aeb51caa4f0e40bb9a71c846f7b656ad?name=%E9%A3%9E%E4%B9%A6Aily%E5%AF%B9%E6%8E%A5%E7%B3%BB%E7%BB%9F)  确保数据能够正常上传，页面能够正常展示\n"
+        },
+        {
+          "type": "user",
+          "text": "怎么采集用户使用的Skill、Agent、MCP 工具调用数据，采集内容覆盖调用次数、使用场景、关联需求任务、产物类型、人工采纳或修改结果等\n"
+        },
+        {
+          "type": "user",
+          "text": "是需要git-ai进行采集并上传到远程看板\n"
+        },
+        {
+          "type": "user",
+          "text": "1.实现该功能  2.在远程看板的UI也需要好好优化一下，可以让让人一目了然看到调用的agent skill mcp等 3.该功能不要影响其他功能，默认关闭  4.该功能要支持copilot cluade codex等  先实现设计文档\n"
+        },
+        {
+          "type": "user",
+          "text": "git-ai和ai-cr的代码是不是都需要改\n"
+        },
+        {
+          "type": "user",
+          "text": "先修改git-ai\n"
+        },
+        {
+          "type": "user",
+          "text": "<environment_context>\n  <cwd>C:\\Users\\15126\\Desktop\\code\\git-ai-view</cwd>\n  <shell>powershell</shell>\n  <current_date>2026-10-07</current_date>\n  <timezone>Asia/Shanghai</timezone>\n  <filesystem><workspace_roots><root>C:\\Users\\15126\\Desktop\\code\\git-ai-view</root></workspace_roots><permission_profile type=\"disabled\"><file_system type=\"unrestricted\" /></permission_profile></filesystem>\n</environment_context>"
+        },
+        {
+          "type": "user",
+          "text": "ai-cr的前后端代码\\\npro-codereview分支上进行开发，开发完成后在开发平台进行打包部署：[https://dev-platform.ruijie.com.cn/ci-deployment/aeb51caa4f0e40bb9a71c846f7b656ad?name=%E9%A3%9E%E4%B9%A6Aily%E5%AF%B9%E6%8E%A5%E7%B3%BB%E7%BB%9F](https://dev-platform.ruijie.com.cn/ci-deployment/aeb51caa4f0e40bb9a71c846f7b656ad?name=%E9%A3%9E%E4%B9%A6Aily%E5%AF%B9%E6%8E%A5%E7%B3%BB%E7%BB%9F)  确保数据能够正常上传，页面能够正常展示\n"
+        },
+        {
+          "type": "user",
+          "text": "Another language model started to solve this problem and produced a summary of its thinking process. You also have access to the state of the tools that were used by that language model. Use this to build on the work that has already been done and avoid duplicating work. Here is the summary produced by the other language model, use the information in this summary to assist with your own analysis:\n## 当前任务\n\n用户要求：\n\n1. 在 `ai-cr` 前后端代码的 `pro-codereview` 分支开发 Skill/Agent/MCP 使用数据采集看板。\n2. 确保与此前 `git-ai` 的上传协议打通。\n3. 开发完成后通过开发平台部署：\n   - `https://dev-platform.ruijie.com.cn/ci-deployment/aeb51caa4f0e40bb9a71c846f7b656ad?...`\n4. 验证数据能上传、页面能正常展示。\n\n默认回复中文。\n\n---\n\n## 已完成：git-ai\n\n工作目录：`C:\\Users\\15126\\Desktop\\code\\git-ai-view\\git-ai`\n\n已新增并通过编译的功能：\n\n- Feature flag：\n  - `tool_usage_telemetry`\n  - debug/release 默认均为 `false`\n  - 环境变量：`GIT_AI_TOOL_USAGE_TELEMETRY=true`\n- 新事件模型：\n  - `ToolUsageEvent`\n  - `ToolUsageKind`: Agent、Skill、Mcp、HumanOutcome\n  - `ToolUsageStatus`\n  - `ToolUsageBatch`\n- 接入现有 daemon telemetry worker\n- 独立上传接口：\n  - `POST /worker/tool-usage/upload`\n- checkpoint 采集：\n  - Agent/Skill/MCP 调用事件\n  - session、trace、task、tool_use_id、模型、耗时\n  - artifact 数量、增删行数\n  - input/output hash\n  - 人工后续修改事件 `human.modified`\n- 不上传完整 prompt、transcript、MCP 参数和返回值\n- 无文件变更的调用也会记录，`artifact_count=0`\n- 上传失败静默，不影响旧 metrics、checkpoint、commit、Agent/MCP\n\n修改文件主要有：\n\n```text\ngit-ai/src/feature_flags.rs\ngit-ai/src/tool_usage.rs\ngit-ai/src/api/tool_usage.rs\ngit-ai/src/api/mod.rs\ngit-ai/src/daemon/control_api.rs\ngit-ai/src/daemon/telemetry_worker.rs\ngit-ai/src/daemon/checkpoint.rs\ngit-ai/src/observability/mod.rs\ngit-ai/src/lib.rs\n```\n\n验证通过：\n\n```text\ncargo fmt --all -- --check\ncargo check --lib\ncargo test --lib tool_usage\ncargo test --lib feature_flags::tests::test_default_feature_flags\n```\n\n`cargo check --all-targets` 会被仓库已有 `benches/notes_io.rs` 编译问题阻塞，与本次改动无关。\n\n---\n\n## 设计文档\n\n已存在：\n\n```text\nspecs/002-git-ai-tool-telemetry/design.md\n```\n\n核心协议：\n\n```json\n{\n  \"schema_version\": \"tool_usage/v1\",\n  \"events\": [\n    {\n      \"event_id\": \"evt_xxx\",\n      \"event_type\": \"agent.completed\",\n      \"kind\": \"agent\",\n      \"status\": \"success\",\n      \"agent_type\": \"claude\",\n      \"agent_id\": \"...\",\n      \"model\": \"...\",\n      \"session_id\": \"...\",\n      \"trace_id\": \"...\",\n      \"task_id\": \"...\",\n      \"tool_use_id\": \"...\",\n      \"skill_name\": \"...\",\n      \"mcp_server\": \"...\",\n      \"mcp_tool\": \"...\",\n      \"duration_ms\": 123,\n      \"artifact_count\": 2,\n      \"artifact_type\": \"unknown\",\n      \"lines_added\": 10,\n      \"lines_deleted\": 3\n    }\n  ]\n}\n```\n\n服务端应支持：\n\n```http\nPOST /worker/tool-usage/upload\nGET  /git-ai/dashboard/tool-usage/overview\nGET  /git-ai/dashboard/tool-usage/trend\nGET  /git-ai/dashboard/tool-usage/tasks\nGET  /git-ai/dashboard/tool-usage/task/{taskId}\nGET  /git-ai/dashboard/tool-usage/invocations\n```\n\n---\n\n## ai-cr 当前状态\n\n### 后端\n\n目录：\n\n```text\nC:\\Users\\15126\\Desktop\\code\\git-ai-view\\ai-cr-manage-service\n```\n\n已切换到：\n\n```text\npro-codereview\n```\n\n当前状态：\n\n```text\n## pro-codereview...origin/pro-codereview [behind 135]\n?? docs/design_center_menu_grant.sql\n?? scripts/fix_design_center_menu.py\n?? test-output/\n```\n\n注意：\n\n- 用户已有未跟踪文件，不要删除或回滚：\n  - `docs/design_center_menu_grant.sql`\n  - `scripts/fix_design_center_menu.py`\n  - `test-output/`\n- 本地分支落后远端 135 commits。\n- 不要直接强制 reset；如需更新先谨慎确认，避免覆盖用户改动。\n\n后端模块：\n\n```text\nai-cr-manage-service/ruijie-codereview-manage\n```\n\n已有 Git AI 代码：\n\n```text\nsrc/main/java/com/ruoyi/codereview/gitai/\n```\n\n关键类：\n\n```text\ncontroller/GitAiStatsController.java\nservice/GitAiStatsService.java\nservice/impl/GitAiStatsServiceImpl.java\ndomain/dto/\ndomain/vo/\nmapper/\n```\n\n已有旧接口：\n\n```text\n/git-ai/dashboard/stats\n/git-ai/dashboard/trend\n/git-ai/dashboard/member-top\n/git-ai/dashboard/member-ai-lines\n/git-ai/dashboard/quarter-champion\n/git-ai/dashboard/project-summary\n/git-ai/dashboard/detail\n```\n\n已有旧上传入口位于：\n\n```text\nCodereviewApiPublicDataController.java\n```\n\n其中已有：\n\n```text\nPOST/上传 Git AI stats\n```\n\n需要新增独立 tool usage endpoint，不要破坏旧 metrics 统计。\n\n### 前端\n\n目录：\n\n```text\nC:\\Users\\15126\\Desktop\\code\\git-ai-view\\ai-cr-manage-web\n```\n\n已新建并切换到：\n\n```text\npro-codereview\n```\n\n当前状态：\n\n```text\n## pro-codereview...origin/pro-codereview\n```\n\n关键文件：\n\n```text\nsrc/api/gitai/index.js\nsrc/views/gitai/index.vue\nsrc/views/gitai/rank.vue\nsrc/router/index.js\n```\n\n现有 Git AI 看板已经有提交、AI 行数、趋势、成员、项目等页面。\n\n---\n\n## 当前探索结果\n\n后端 Git AI 统计服务较大，`GitAiStatsServiceImpl.java` 约 1700 行。\n\n需要继续查看：\n\n```text\nGitAiStatsController.java\nGitAiStatsService.java\nGitAiStatsServiceImpl.java\nmapper XML 文件\n数据库建表/迁移目录\n```\n\n重点确认：\n\n- 项目使用 MyBatis 还是 MyBatis-Plus\n- 数据库迁移脚本位置\n- 统一返回类型 `R`\n- 权限/鉴权注解\n- 分页对象和现有查询 DTO 规范\n\n前端需要查看：\n\n```text\nsrc/api/gitai/index.js\nsrc/views/gitai/index.vue\nsrc/router/index.js\n```\n\n建议新增：\n\n```text\nsrc/api/gitai/toolUsage.js\nsrc/views/gitai/tool-usage.vue\n```\n\n或整合到现有 Git AI 页面新增“工具使用”Tab。\n\n---\n\n## 推荐实现方案\n\n### 后端\n\n新增独立表，避免影响旧 Git AI 表：\n\n```text\ngit_ai_tool_usage_event\n```\n\n建议字段：\n\n```text\nid\nevent_id unique\nschema_version\nevent_type\nkind\nstatus\noccurred_at\nagent_type\nagent_id\nmodel\nsession_id\ntrace_id\ntask_id\ntool_use_id\nskill_name\nskill_version\nmcp_server\nmcp_tool\nduration_ms\nartifact_count\nartifact_type\nlines_added\nlines_deleted\ninput_hash\noutput_hash\nerror_code\ncreated_at\n```\n\n上传 DTO：\n\n```java\nToolUsageUploadDTO {\n    String schemaVersion;\n    List<ToolUsageEventDTO> events;\n}\n```\n\n上传接口：\n\n```java\n@PostMapping(\"/worker/tool-usage/upload\")\npublic R<ToolUsageUploadResultVO> upload(@RequestBody ToolUsageUploadDTO dto)\n```\n\n要求：\n\n- 按 `event_id` 幂等\n- 单条非法事件不能导致整批失败\n- 返回成功数、重复数、失败项\n- 对旧客户端/空批次兼容\n- 不影响已有 `/worker/metrics/upload`\n- 默认可以正常接收；git-ai feature flag 仍负责默认关闭\n\n看板接口建议：\n\n```text\nGET /git-ai/dashboard/tool-usage/overview\nGET /git-ai/dashboard/tool-usage/trend\nGET /git-ai/dashboard/tool-usage/tasks\nGET /git-ai/dashboard/tool-usage/invocations\n```\n\n看板数据至少覆盖：\n\n- 总调用次数\n- Agent / Skill / MCP 分类次数\n- 各工具调用排行\n- 成功率/失败率\n- 平均耗时\n- 关联任务数\n- artifact 数量\n- 人工修改/采纳结果\n- 趋势\n- 调用明细\n\n### 前端\n\n建议新增“AI 工具使用”页面：\n\n顶部：\n\n- 时间范围\n- Agent\n- Skill\n- MCP Server\n- Task ID\n- 状态\n\n首屏卡片：\n\n- 总调用次数\n- Agent 调用\n- Skill 调用\n- MCP 调用\n- 成功率\n- 人工修改次数\n\n图表：\n\n- Agent/Skill/MCP 调用趋势\n- 工具排行\n- 调用状态分布\n- 人工采纳/修改结果\n\n明细表：\n\n- 时间\n- Agent\n- Skill\n- MCP\n- Task\n- 调用类型\n- 状态\n- 耗时\n- 产物类型\n- 人工结果\n\n推荐优先复用现有 Element UI、ECharts 和 Git AI 页面风格。\n\n---\n\n## 部署与验证\n\n尚未开始。\n\n需要先阅读浏览器技能说明：\n\n```text\nC:\\Users\\15126\\.codex\\plugins\\cache\\openai-bundled\\browser\\26.818.41509\\skills\\control-in-app-browser\\SKILL.md\n```\n\n然后使用浏览器打开用户提供的开发平台 URL：\n\n```text\nhttps://dev-platform.ruijie.com.cn/ci-deployment/aeb51caa4f0e40bb9a71c846f7b656ad?name=%E9%A3%9E%E4%B9%A6Aily%E5%AF%B9%E6%8E%A5%E7%B3%BB%E7%BB%9F\n```\n\n需要确认：\n\n- 是否已有登录会话\n- 前后端项目/分支选择方式\n- 构建参数\n- 部署环境\n- 是否需要手动触发流水线\n- 是否能查看部署日志和服务地址\n\n部署前最好：\n\n```text\ngit status\ngit diff\n后端 mvn test/package\n前端 npm run build\n```\n\n不要直接执行破坏性部署操作，不要覆盖已有用户修改。\n\n---\n\n## 关键约束\n\n- 不要修改或删除用户已有未跟踪文件。\n- 前后端都在 `pro-codereview` 分支开发。\n- 不要修改 `git-ai` 既有旧 metrics 协议。\n- 默认采集开关保持关闭。\n- 上传和解析失败不能影响主业务。\n- 默认不上传 prompt/transcript/MCP 参数和返回值。\n- 最终需要说明：\n  - 修改了哪些文件\n  - 测试结果\n  - 部署流水线结果\n  - 上传接口验证结果\n  - 页面展示验证结果\n  - 若部署平台因权限/登录/环境限制无法完成，要明确说明技术原因。"
+        },
+        {
+          "type": "user",
+          "text": "怎么采集用户使用的Skill、Agent、MCP 工具调用数据，采集内容覆盖调用次数、使用场景、关联需求任务、产物类型、人工采纳或修改结果等\n"
+        },
+        {
+          "type": "user",
+          "text": "是需要git-ai进行采集并上传到远程看板\n"
+        },
+        {
+          "type": "user",
+          "text": "1.实现该功能  2.在远程看板的UI也需要好好优化一下，可以让让人一目了然看到调用的agent skill mcp等 3.该功能不要影响其他功能，默认关闭  4.该功能要支持copilot cluade codex等  先实现设计文档\n"
+        },
+        {
+          "type": "user",
+          "text": "git-ai和ai-cr的代码是不是都需要改\n"
+        },
+        {
+          "type": "user",
+          "text": "先修改git-ai\n"
+        },
+        {
+          "type": "user",
+          "text": "<environment_context>\n  <cwd>C:\\Users\\15126\\Desktop\\code\\git-ai-view</cwd>\n  <shell>powershell</shell>\n  <current_date>2026-10-07</current_date>\n  <timezone>Asia/Shanghai</timezone>\n  <filesystem><workspace_roots><root>C:\\Users\\15126\\Desktop\\code\\git-ai-view</root></workspace_roots><permission_profile type=\"disabled\"><file_system type=\"unrestricted\" /></permission_profile></filesystem>\n</environment_context>"
+        },
+        {
+          "type": "user",
+          "text": "ai-cr的前后端代码\\\npro-codereview分支上进行开发，开发完成后在开发平台进行打包部署：[https://dev-platform.ruijie.com.cn/ci-deployment/aeb51caa4f0e40bb9a71c846f7b656ad?name=%E9%A3%9E%E4%B9%A6Aily%E5%AF%B9%E6%8E%A5%E7%B3%BB%E7%BB%9F](https://dev-platform.ruijie.com.cn/ci-deployment/aeb51caa4f0e40bb9a71c846f7b656ad?name=%E9%A3%9E%E4%B9%A6Aily%E5%AF%B9%E6%8E%A5%E7%B3%BB%E7%BB%9F)  确保数据能够正常上传，页面能够正常展示\n"
+        },
+        {
+          "type": "user",
+          "text": "Another language model started to solve this problem and produced a summary of its thinking process. You also have access to the state of the tools that were used by that language model. Use this to build on the work that has already been done and avoid duplicating work. Here is the summary produced by the other language model, use the information in this summary to assist with your own analysis:\n## 当前任务\n\n用户要求在 `ai-cr` 前后端 `pro-codereview` 分支实现 Skill/Agent/MCP 使用数据采集与远程看板，并部署到开发平台验证。\n\n工作目录：\n\n- 后端：`C:\\Users\\15126\\Desktop\\code\\git-ai-view\\ai-cr-manage-service`\n- 前端：`C:\\Users\\15126\\Desktop\\code\\git-ai-view\\ai-cr-manage-web`\n- git-ai：`C:\\Users\\15126\\Desktop\\code\\git-ai-view\\git-ai`\n\n---\n\n## 已完成\n\n### 1. git-ai 侧\n\n此前已完成并通过验证：\n\n- 默认关闭 feature flag：`tool_usage_telemetry`\n- 环境变量：`GIT_AI_TOOL_USAGE_TELEMETRY=true`\n- 支持 Agent / Skill / MCP / HumanOutcome 事件\n- 接入 daemon telemetry worker\n- 上传接口调用：\n  - `POST /worker/tool-usage/upload`\n- 采集：\n  - 调用次数\n  - Agent/Skill/MCP 类型\n  - session / trace / task / tool_use_id\n  - 模型\n  - 耗时\n  - artifact 数量和类型\n  - 增删行数\n  - input/output hash\n  - 人工后续修改事件\n- 不上传完整 prompt、transcript、MCP 参数和返回值\n- 无文件变更的调用也会记录\n- 支持 Claude、Copilot、Codex 等统一 checkpoint metadata\n\ngit-ai 验证已通过：\n\n```text\ncargo fmt --all -- --check\ncargo check --lib\ncargo test --lib tool_usage\ncargo test --lib feature_flags::tests::test_default_feature_flags\n```\n\n---\n\n### 2. ai-cr 后端\n\n后端当前分支：\n\n```text\npro-codereview\n```\n\n已有用户未跟踪文件必须保留：\n\n```text\ndocs/design_center_menu_grant.sql\nscripts/fix_design_center_menu.py\ntest-output/\n```\n\n新增文件：\n\n```text\ndocs/git_ai_tool_usage_event.sql\ndocs/git_ai_tool_usage_dashboard.md\n\nruijie-codereview-manage/src/main/java/com/ruoyi/codereview/gitai/controller/ToolUsageController.java\nruijie-codereview-manage/src/main/java/com/ruoyi/codereview/gitai/domain/dto/ToolUsageEventDTO.java\nruijie-codereview-manage/src/main/java/com/ruoyi/codereview/gitai/domain/dto/ToolUsageQueryDTO.java\nruijie-codereview-manage/src/main/java/com/ruoyi/codereview/gitai/domain/dto/ToolUsageUploadDTO.java\nruijie-codereview-manage/src/main/java/com/ruoyi/codereview/gitai/domain/po/GitAiToolUsageEvent.java\nruijie-codereview-manage/src/main/java/com/ruoyi/codereview/gitai/domain/vo/ToolUsageOverviewVO.java\nruijie-codereview-manage/src/main/java/com/ruoyi/codereview/gitai/domain/vo/ToolUsageTaskVO.java\nruijie-codereview-manage/src/main/java/com/ruoyi/codereview/gitai/domain/vo/ToolUsageTrendVO.java\nruijie-codereview-manage/src/main/java/com/ruoyi/codereview/gitai/domain/vo/ToolUsageUploadResultVO.java\nruijie-codereview-manage/src/main/java/com/ruoyi/codereview/gitai/mapper/GitAiToolUsageEventMapper.java\nruijie-codereview-manage/src/main/java/com/ruoyi/codereview/gitai/service/ToolUsageService.java\nruijie-codereview-manage/src/main/java/com/ruoyi/codereview/gitai/service/impl/ToolUsageServiceImpl.java\n```\n\n新增接口：\n\n```http\nPOST /worker/tool-usage/upload\nPOST /api/public/worker/tool-usage/upload\n\nGET /git-ai/dashboard/tool-usage/overview\nGET /git-ai/dashboard/tool-usage/trend\nGET /git-ai/dashboard/tool-usage/tasks\nGET /git-ai/dashboard/tool-usage/invocations\n```\n\n实现特点：\n\n- 独立表 `git_ai_tool_usage_event`\n- 不修改旧 Git AI metrics、提交、文件统计逻辑\n- `event_id` 幂等\n- 单条非法事件不会使整批失败\n- 上传支持空批次\n- 批量最大 1000 条\n- 查询支持时间、kind、status、agent、skill、MCP server、taskId 筛选\n- 看板返回：\n  - 总调用次数\n  - Agent / Skill / MCP 次数\n  - 成功失败次数\n  - 成功率\n  - 平均耗时\n  - 任务数\n  - artifact 数\n  - 人工修改次数\n  - 趋势\n  - 任务聚合\n  - 调用明细分页\n\n数据库脚本需要在部署前执行：\n\n```text\nai-cr-manage-service/docs/git_ai_tool_usage_event.sql\n```\n\n---\n\n### 3. ai-cr 前端\n\n前端当前分支：\n\n```text\npro-codereview\n```\n\n新增：\n\n```text\nsrc/api/gitai/toolUsage.js\nsrc/views/gitai/tool-usage.vue\n```\n\n修改：\n\n```text\nsrc/router/index.js\nsrc/views/gitai/index.vue\n```\n\n新增页面入口：\n\n```text\n/git-ai-tool-usage\n```\n\n现有 Git AI 首页增加按钮：\n\n```text\nAgent / Skill / MCP 使用\n```\n\n页面包含：\n\n- 时间范围筛选\n- 类型筛选 Agent / Skill / MCP / 人工结果\n- 状态筛选\n- Task ID 筛选\n- 总调用次数\n- Agent / Skill / MCP 卡片\n- 成功率\n- 人工修改次数\n- 调用趋势折线图\n- 调用类型饼图\n- 任务关联表\n- 调用明细表\n- 分页\n\n前端依赖已执行：\n\n```text\nnpm ci --ignore-scripts\n```\n\n生产构建首次因 Node/OpenSSL 兼容问题失败，使用以下命令成功：\n\n```powershell\n$env:NODE_OPTIONS='--openssl-legacy-provider'\nnpm run build:prod\n```\n\n构建结果：\n\n```text\nDONE Build complete. The html directory is ready to be deployed.\n```\n\n仅有仓库已有 warning，包括：\n\n- 旧模块 export warning\n- README.md 被 webpack 扫描 warning\n- 资源体积 warning\n\n---\n\n## 尚未完成\n\n### 1. 后端构建验证\n\n执行：\n\n```powershell\nmvn -pl ruijie-codereview-manage -am -DskipTests compile\n```\n\n失败原因不是本次代码：\n\n```text\ncom.ruijie.fileService.authentication.tokens:fileServicetokens:jar:2.0.0.5\n```\n\n该内部依赖在当前 Maven 仓库/缓存不可用。\n\n离线模式也失败：\n\n```text\nmvn -o -pl ruijie-codereview-manage -am -DskipTests compile\n```\n\n需要后续：\n\n- 使用开发平台构建验证，或\n- 配置正确内部 Maven 仓库后重新执行 Maven\n- 重点确认 `ToolUsageServiceImpl.java` 的 Java 8 编译兼容性\n\n### 2. 部署平台操作未完成\n\n用户提供平台地址：\n\n```text\nhttps://dev-platform.ruijie.com.cn/ci-deployment/aeb51caa4f0e40bb9a71c846f7b656ad?name=%E9%A3%9E%E4%B9%A6Aily%E5%AF%B9%E6%8E%A5%E7%B3%BB%E7%BB%9F\n```\n\n已阅读浏览器技能说明，但浏览器连接失败：\n\n```text\nNo browser is available\n```\n\n因此尚未：\n\n- 登录开发平台\n- 选择前后端 `pro-codereview` 分支\n- 触发构建\n- 执行数据库脚本\n- 部署服务\n- 获取服务访问地址\n- 验证上传接口\n- 验证页面展示\n\n后续应使用浏览器工具重新尝试；如果仍不可用，需要明确向用户说明当前环境没有可用浏览器会话，无法代替用户在开发平台点击部署。\n\n---\n\n## 关键约束\n\n- 不要删除或回滚用户已有未跟踪文件。\n- 不要强制 reset，本地分支落后远端约 135 commits。\n- 前后端必须保持 `pro-codereview` 分支。\n- git-ai 默认采集开关必须保持关闭。\n- 不要修改既有 Git AI metrics 协议。\n- 上传失败不能影响 checkpoint、commit、旧统计逻辑。\n- 不上传 prompt/transcript/MCP 参数和返回值。\n- 部署前必须执行数据库 DDL。\n- 远程验证至少包括：\n  1. POST tool usage upload\n  2. GET overview\n  3. 打开 `/git-ai-tool-usage`\n  4. 确认 Agent / Skill / MCP 数据显示\n\n---\n\n## 建议下一步\n\n1. 检查后端新增 Java 文件语法和 import。\n2. 运行 `git diff --check`。\n3. 查看前后端 `git status`，确认没有误删用户文件。\n4. 重新尝试开发平台浏览器连接。\n5. 在开发平台选择：\n   - 后端：`ai-cr-manage-service`\n   - 前端：`ai-cr-manage-web`\n   - 分支：`pro-codereview`\n6. 部署前执行：\n   ```sql\n   docs/git_ai_tool_usage_event.sql\n   ```\n7. 部署后使用测试事件验证：\n\n```json\n{\n  \"schema_version\": \"tool_usage/v1\",\n  \"events\": [\n    {\n      \"event_id\": \"evt_smoke_001\",\n      \"event_type\": \"agent.completed\",\n      \"kind\": \"agent\",\n      \"status\": \"success\",\n      \"agent_type\": \"codex\",\n      \"model\": \"gpt\",\n      \"session_id\": \"session_smoke\",\n      \"trace_id\": \"trace_smoke\",\n      \"task_id\": \"task_smoke_001\",\n      \"duration_ms\": 1200,\n      \"artifact_count\": 1,\n      \"artifact_type\": \"source_code\",\n      \"lines_added\": 10,\n      \"lines_deleted\": 2\n    }\n  ]\n}\n```\n\n8. 验证：\n   ```http\n   POST /worker/tool-usage/upload\n   GET /git-ai/dashboard/tool-usage/overview\n   GET /git-ai/dashboard/tool-usage/invocations\n   ```\n9. 最终反馈必须区分：\n   - 本地代码完成情况\n   - 前端构建结果\n   - 后端构建被内部依赖阻塞情况\n   - 开发平台部署是否成功\n   - 数据上传和页面展示是否验证成功"
+        },
+        {
+          "type": "user",
+          "text": "怎么采集用户使用的Skill、Agent、MCP 工具调用数据，采集内容覆盖调用次数、使用场景、关联需求任务、产物类型、人工采纳或修改结果等\n"
+        },
+        {
+          "type": "user",
+          "text": "是需要git-ai进行采集并上传到远程看板\n"
+        },
+        {
+          "type": "user",
+          "text": "1.实现该功能  2.在远程看板的UI也需要好好优化一下，可以让让人一目了然看到调用的agent skill mcp等 3.该功能不要影响其他功能，默认关闭  4.该功能要支持copilot cluade codex等  先实现设计文档\n"
+        },
+        {
+          "type": "user",
+          "text": "git-ai和ai-cr的代码是不是都需要改\n"
+        },
+        {
+          "type": "user",
+          "text": "先修改git-ai\n"
+        },
+        {
+          "type": "user",
+          "text": "<environment_context>\n  <cwd>C:\\Users\\15126\\Desktop\\code\\git-ai-view</cwd>\n  <shell>powershell</shell>\n  <current_date>2026-10-07</current_date>\n  <timezone>Asia/Shanghai</timezone>\n  <filesystem><workspace_roots><root>C:\\Users\\15126\\Desktop\\code\\git-ai-view</root></workspace_roots><permission_profile type=\"disabled\"><file_system type=\"unrestricted\" /></permission_profile></filesystem>\n</environment_context>"
+        },
+        {
+          "type": "user",
+          "text": "ai-cr的前后端代码\\\npro-codereview分支上进行开发，开发完成后在开发平台进行打包部署：[https://dev-platform.ruijie.com.cn/ci-deployment/aeb51caa4f0e40bb9a71c846f7b656ad?name=%E9%A3%9E%E4%B9%A6Aily%E5%AF%B9%E6%8E%A5%E7%B3%BB%E7%BB%9F](https://dev-platform.ruijie.com.cn/ci-deployment/aeb51caa4f0e40bb9a71c846f7b656ad?name=%E9%A3%9E%E4%B9%A6Aily%E5%AF%B9%E6%8E%A5%E7%B3%BB%E7%BB%9F)  确保数据能够正常上传，页面能够正常展示\n"
+        },
+        {
+          "type": "user",
+          "text": "Another language model started to solve this problem and produced a summary of its thinking process. You also have access to the state of the tools that were used by that language model. Use this to build on the work that has already been done and avoid duplicating work. Here is the summary produced by the other language model, use the information in this summary to assist with your own analysis:\n## 当前进度\n\n### 已完成\n\n1. **git-ai 侧已实现**\n   - 默认关闭 `tool_usage_telemetry`\n   - 支持 Agent / Skill / MCP / HumanOutcome\n   - 支持 Claude、Copilot、Codex 等统一 metadata\n   - 采集调用次数、任务/会话/trace、模型、耗时、产物、增删行、hash、人工修改结果\n   - 不采集 prompt、transcript、MCP 参数及返回值\n   - 上传接口：`POST /worker/tool-usage/upload`\n   - 已通过：\n     - `cargo fmt --all -- --check`\n     - `cargo test --lib tool_usage`\n   - git-ai 当前分支：`feature_20261006_gaoang`\n   - 有既有未跟踪目录：`agent-support/intellij/bin/`\n\n2. **ai-cr 后端已实现，分支为 `pro-codereview`**\n   - 新增独立表：`git_ai_tool_usage_event`\n   - 新增上传接口：\n     - `POST /worker/tool-usage/upload`\n     - `POST /api/public/worker/tool-usage/upload`\n   - 新增看板接口：\n     - `/git-ai/dashboard/tool-usage/overview`\n     - `/trend`\n     - `/tasks`\n     - `/invocations`\n   - 支持 event_id 幂等、批量最大 1000、单事件失败不影响其他事件\n   - 新增 SQL：\n     - `ai-cr-manage-service/docs/git_ai_tool_usage_event.sql`\n   - 后端 Maven 构建被既有内部依赖阻塞：\n     ```text\n     com.ruijie.fileService.authentication.tokens:fileServicetokens:jar:2.0.0.5\n     ```\n   - 未完成后端实际编译验证。\n\n3. **ai-cr 前端已实现，分支为 `pro-codereview`**\n   - 新增：\n     - `src/api/gitai/toolUsage.js`\n     - `src/views/gitai/tool-usage.vue`\n   - 修改：\n     - `src/router/index.js`\n     - `src/views/gitai/index.vue`\n   - 新增页面：\n     - `/git-ai-tool-usage`\n   - 页面包含筛选、Agent/Skill/MCP 指标卡、成功率、人工修改、趋势图、类型饼图、任务表、调用明细和分页。\n   - 已执行 `npm ci --ignore-scripts`\n   - 生产构建成功：\n     ```powershell\n     $env:NODE_OPTIONS='--openssl-legacy-provider'\n     npm run build:prod\n     ```\n   - 构建仅有仓库既有 warning。\n\n4. **开发平台**\n   - 用户要求的平台 URL：\n     ```text\n     https://dev-platform.ruijie.com.cn/ci-deployment/aeb51caa4f0e40bb9a71c846f7b656ad?name=%E9%A3%9E%E4%B9%A6Aily%E5%AF%B9%E6%8E%A5%E7%B3%BB%E7%BB%9F\n     ```\n   - HTTP 可访问，返回 200。\n   - 浏览器插件连接失败：\n     ```text\n     No browser is available\n     ```\n   - 尚未登录、选择分支、触发构建、执行 SQL、部署或验证线上接口。\n   - 页面使用的 API 网关为：\n     ```text\n     https://web-gw.ruijie.com.cn/api/develop-ser-manage\n     ```\n\n## 关键文件\n\n后端新增：\n\n```text\ndocs/git_ai_tool_usage_event.sql\ndocs/git_ai_tool_usage_dashboard.md\nruijie-codereview-manage/src/main/java/com/ruoyi/codereview/gitai/controller/ToolUsageController.java\nruijie-codereview-manage/src/main/java/com/ruoyi/codereview/gitai/domain/dto/ToolUsageEventDTO.java\nruijie-codereview-manage/src/main/java/com/ruoyi/codereview/gitai/domain/dto/ToolUsageQueryDTO.java\nruijie-codereview-manage/src/main/java/com/ruoyi/codereview/gitai/domain/dto/ToolUsageUploadDTO.java\nruijie-codereview-manage/src/main/java/com/ruoyi/codereview/gitai/domain/po/GitAiToolUsageEvent.java\nruijie-codereview-manage/src/main/java/com/ruoyi/codereview/gitai/domain/vo/*\nruijie-codereview-manage/src/main/java/com/ruoyi/codereview/gitai/mapper/GitAiToolUsageEventMapper.java\nruijie-codereview-manage/src/main/java/com/ruoyi/codereview/gitai/service/*\n```\n\n前端新增：\n\n```text\nsrc/api/gitai/toolUsage.js\nsrc/views/gitai/tool-usage.vue\n```\n\n## 必须保留的用户已有未跟踪文件\n\n```text\nai-cr-manage-service/docs/design_center_menu_grant.sql\nai-cr-manage-service/scripts/fix_design_center_menu.py\nai-cr-manage-service/test-output/\n```\n\n不要 reset、不要删除这些文件。两个 ai-cr 仓库当前均落后/基于 `pro-codereview`，不要强制同步远端。\n\n## 需要继续完成\n\n1. 检查后端新增 Java 文件的编译兼容性。\n2. 如有内部 Maven 仓库配置，重新执行：\n   ```powershell\n   mvn -pl ruijie-codereview-manage -am -DskipTests compile\n   ```\n3. 在开发平台：\n   - 后端项目选择 `ai-cr-manage-service`\n   - 前端项目选择 `ai-cr-manage-web`\n   - 分支均选 `pro-codereview`\n   - 部署前执行：\n     ```sql\n     ai-cr-manage-service/docs/git_ai_tool_usage_event.sql\n     ```\n4. 部署后用测试事件验证：\n\n```json\n{\n  \"schema_version\": \"tool_usage/v1\",\n  \"events\": [\n    {\n      \"event_id\": \"evt_smoke_001\",\n      \"event_type\": \"agent.completed\",\n      \"kind\": \"agent\",\n      \"status\": \"success\",\n      \"agent_type\": \"codex\",\n      \"model\": \"gpt\",\n      \"session_id\": \"session_smoke\",\n      \"trace_id\": \"trace_smoke\",\n      \"task_id\": \"task_smoke_001\",\n      \"duration_ms\": 1200,\n      \"artifact_count\": 1,\n      \"artifact_type\": \"source_code\",\n      \"lines_added\": 10,\n      \"lines_deleted\": 2\n    }\n  ]\n}\n```\n\n验证接口：\n\n```http\nPOST /worker/tool-usage/upload\nGET /git-ai/dashboard/tool-usage/overview\nGET /git-ai/dashboard/tool-usage/invocations\n```\n\n5. 打开：\n   ```text\n   /git-ai-tool-usage\n   ```\n   确认 Agent / Skill / MCP 卡片、图表和明细正常展示。\n\n## 最终回复需明确区分\n\n- 本地代码是否完成\n- 前端构建结果\n- 后端构建是否被内部依赖阻塞\n- 开发平台部署是否成功\n- 数据上传与页面展示是否完成真实验证"
+        }
+      ],
+      "total_additions": 410,
+      "total_deletions": 25,
+      "accepted_lines": 19,
+      "overriden_lines": 0
+    },
+    "s_364b9432e76389::t_d736c9aa7d0659": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a11083-3810-7302-94f2-175bc01ce98e",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "gaoang <gaoang@ruijie.com.cn>",
+      "messages": [],
+      "total_additions": 410,
+      "total_deletions": 25,
+      "accepted_lines": 393,
+      "overriden_lines": 0
+    }
+  },
+  "sessions": {
+    "s_364b9432e76389": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a11083-3810-7302-94f2-175bc01ce98e",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "gaoang <gaoang@ruijie.com.cn>"
+    }
+  }
+}
