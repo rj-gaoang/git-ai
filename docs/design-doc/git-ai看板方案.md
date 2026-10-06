@@ -3996,3 +3996,17 @@ $env:GIT_AI_TOOL_USAGE_REMOTE_URL = "https://service-gw.ruijie.com.cn/api/ai-cr-
 ```
 
 验证：补充空值 URL 单测，并执行 `cargo fmt --all -- --check`、`cargo test --lib tool_usage`、`cargo check`。
+
+### 2026-10-07：兼容 ai-cr 生产时间字段格式并完成链路验证
+
+生产接口首次联调返回 HTTP 500，根因是客户端发送 RFC3339（例如
+`2026-10-06T18:55:05.9550574Z`），而 ai-cr 的 `ToolUsageEventDTO.occurredAt`
+使用全局 Jackson 格式 `yyyy-MM-dd HH:mm:ss` 反序列化到 Java `Date`，数据库字段
+`occurred_at` 为 `datetime`。本次仅调整 Skill/Agent/MCP 遥测事件的 `occurred_at`，
+统一由 `src/tool_usage.rs` 生成 UTC 的 `yyyy-MM-dd HH:mm:ss` 字符串；既有日志、
+checkpoint、metrics 和其他 RFC3339 时间链路不变。
+
+新增回归测试 `occurred_at_uses_ai_cr_date_format`，并通过 `cargo fmt --all -- --check`、
+`cargo test --lib tool_usage`（4 passed）、`cargo check`。提交为 `5e1979c8`，已推送到
+`feature_20261006_gaoang`。生产 smoke 事件上传返回 `accepted: 1`，重复提交返回
+`duplicate: 1`，证明接口幂等和数据库落库链路正常。
