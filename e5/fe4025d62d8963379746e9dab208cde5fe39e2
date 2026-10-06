@@ -1,0 +1,142 @@
+src/commands/git_handlers.rs
+  s_bcde3baee92c75::t_a628d1cf7ea73e 170-171
+src/lib.rs
+  s_364b9432e76389::t_d736c9aa7d0659 14
+docs/design-doc/git-ai看板方案.md
+  s_bcde3baee92c75::t_278272a0cb62ff 90,92,94,98-104
+src/commands/checkpoint_agent/orchestrator.rs
+  s_bcde3baee92c75::t_a628d1cf7ea73e 569-576
+---
+{
+  "schema_version": "authorship/3.1.0",
+  "git_ai_version": "2.2.51",
+  "base_commit_sha": "e5fe4025d62d8963379746e9dab208cde5fe39e2",
+  "prompts": {
+    "s_364b9432e76389::t_d736c9aa7d0659": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a11083-3810-7302-94f2-175bc01ce98e",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "gaoang <gaoang@ruijie.com.cn>",
+      "messages": [],
+      "total_additions": 62,
+      "total_deletions": 0,
+      "accepted_lines": 1,
+      "overriden_lines": 0,
+      "custom_attributes": {
+        "archive_file": "src/lib.rs",
+        "archived_ai_state_restored": "true"
+      }
+    },
+    "s_bcde3baee92c75::t_278272a0cb62ff": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a10fd4-0658-7df0-bbb6-50d31ec12a7c",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "gaoang <gaoang@ruijie.com.cn>",
+      "messages": [
+        {
+          "type": "user",
+          "text": "<environment_context>\n  <cwd>C:\\Users\\15126\\Desktop\\code\\git-ai-view</cwd>\n  <shell>powershell</shell>\n  <current_date>2026-10-06</current_date>\n  <timezone>Asia/Shanghai</timezone>\n  <filesystem><workspace_roots><root>C:\\Users\\15126\\Desktop\\code\\git-ai-view</root></workspace_roots><permission_profile type=\"disabled\"><file_system type=\"unrestricted\" /></permission_profile></filesystem>\n</environment_context>"
+        },
+        {
+          "type": "user",
+          "text": "用户安装了git-ai，但是在提交代码时经常导致电脑整个卡死，这是他的日志 [徐建丰-20261006.jsonl](logs/徐建丰-20261006.jsonl) ，这是他在自己电脑上的分析报告 [git-ai 使用问题报告(1).md](<logs/git-ai 使用问题报告(1).md>) ，这是生产环境数据库：mysql -h dev-platform-bj-bastionhost-endpoint.ruijie.com.cn -P 30736 -u b086b650-1785-49f1-bec1-3bef69549799 -pil********5p6b  分析根因并解决问题\n"
+        },
+        {
+          "type": "user",
+          "text": "<environment_context>\n  <cwd>C:\\Users\\15126\\Desktop\\code\\git-ai-view</cwd>\n  <shell>powershell</shell>\n  <current_date>2026-10-06</current_date>\n  <timezone>Asia/Shanghai</timezone>\n  <filesystem><workspace_roots><root>C:\\Users\\15126\\Desktop\\code\\git-ai-view</root></workspace_roots><permission_profile type=\"disabled\"><file_system type=\"unrestricted\" /></permission_profile></filesystem>\n</environment_context>"
+        },
+        {
+          "type": "user",
+          "text": "用户安装了git-ai，但是在提交代码时经常导致电脑整个卡死，这是他的日志 [徐建丰-20261006.jsonl](logs/徐建丰-20261006.jsonl) ，这是他在自己电脑上的分析报告 [git-ai 使用问题报告(1).md](<logs/git-ai 使用问题报告(1).md>) ，这是生产环境数据库：mysql -h dev-platform-bj-bastionhost-endpoint.ruijie.com.cn -P 30736 -u b086b650-1785-49f1-bec1-3bef69549799 -pil********5p6b  分析根因并解决问题\n"
+        },
+        {
+          "type": "user",
+          "text": "Another language model started to solve this problem and produced a summary of its thinking process. You also have access to the state of the tools that were used by that language model. Use this to build on the work that has already been done and avoid duplicating work. Here is the summary produced by the other language model, use the information in this summary to assist with your own analysis:\n## 任务与用户意图\n用户用中文要求：分析 git-ai 用户提交代码时电脑卡死的根因，并解决问题。提供了：\n- [用户日志](C:/Users/15126/Desktop/code/git-ai-view/logs/徐建丰-20261006.jsonl)\n- [用户分析报告](C:/Users/15126/Desktop/code/git-ai-view/logs/git-ai%20使用问题报告(1).md)\n- 生产 MySQL 连接凭据\n\n用户尚未明确回复之前界面中的“可否查询生产库”和“是否直接修改并测试”选项。不要继续尝试请求输入；优先基于本地证据推进。不要在输出中暴露连接口令。没有实际查询生产库。\n\n## 当前环境与约束\n- 工作目录：`C:\\Users\\15126\\Desktop\\code\\git-ai-view`\n- git-ai Rust 工程在 `git-ai\\`\n- 顶层目录不是 Git 仓库；`git -C git-ai status --short` 显示用户已有未跟踪内容 `?? agent-support/intellij/bin/`，不得清理或覆盖。\n- 已阅读 `fix-git-ai-attribution` skill。相关要求：先证明根因、窄范围修复、加回归测试、跑定向测试与 `cargo fmt --check`、`git diff --check`，并在 `git-ai/docs/design-doc/git-ai看板方案.md` 加日期实施记录。不要跑广泛测试套件。\n- 用户偏好直接具体的中文分析。不要未经要求修复生产历史数据。\n- 不要访问或操作生产库，除非用户明确确认；已有日志足以证明部分因果。\n\n## 已取得的关键证据\n分析报告主要结论：\n- Claude Code CLI 使用 `PreToolUse` + `PostToolUse` 且 `matcher:\"*\"`，空 stdin checkpoint 单次约 45ms，活跃日 7,000–22,000 次启动；Windows `debug.jsonl` 累计 541,599 次 `process_started`。高频进程、debug 写盘与快照可造成显著资源压力。\n- `working_logs` 里整文件快照：单文件 62.1MB 与两行改动对应；还有 424.9MB 无引用 blob。未跟踪 `xl/` 共 487MB 被当普通文件纳入快照。\n- `debug.jsonl` 1.2GB；全局 metrics DB 2.77GB；notes 提示词存储另有约 431MB。Claude adapter 曾把大量 transcript `type:\"user\"`（含工具结果）作为消息保存。\n- 以上报告采集在 2026-09-21，日志文件是用户机器诊断快照；只可作为资源压力背景，不能单独证明提交瞬间当机的准确进程/耗时。\n\n日志本身：\n- 版本为 `2.2.51`，用户设备路径显示 Windows 和 `C:\\Users\\admin`。\n- `rg 'upload_stats_activity_lock_timeout' logs/徐建丰-20261006.jsonl` 未输出，也就是此日志没有明确上传锁超时事件。\n- 有大量 wrapper commit/post-commit 记录，但最近日志末尾有多个针对不同仓库的 checkpoint 请求，不能把所有 commit 都笼统归因于上传。\n- 搜索命令输出过于宽，注意后续做窄查询/PowerShell ConvertFrom-Json提取，不要再整份打印 JSONL。\n\n源码观察：\n1. [upload_stats.rs](C:/Users/15126/Desktop/code/git-ai-view/git-ai/src/integration/upload_stats.rs)\n   - `acquire_upload_activity_lock` 自动上传等待 5 秒、manual 等待 30 秒（常量在文件开头）。\n   - 上传时同步手工 wrapper fallback 和 daemon auto 上传会争用全局锁。\n   - 报告提到同 commit 在 wrapper 同时触发 manual + background auto，manual 成功后 background 成功重复上传；日志文件较早 9/21 15:01 有完整样本：manual 30s 锁等待仅 2ms，auto 3.2s 等待，重复 HTTP 上传但后端去重成功。该次没有造成 30s 等待，但有重复计算/并行压力。\n   - 需要看 `dispatch_upload` 的行为和 auto 参数，判断为什么默认后台方式可能同步等待。\n2. [git_handlers.rs](C:/Users/15126/Desktop/code/git-ai-view/git-ai/src/commands/git_handlers.rs)\n   - `run_post_commit_followups` 会 spawn 一个 fallback `upload-stats` 子进程，args 带 `--acquire-activity-lock-before-stats` / `--skip-if-already-uploaded`，Windows detached。\n   - `post_commit_fallback_upload_args` helper 与相关单测在文件下部。\n   - wrapper 的 commit 后触发 fallback，而 daemon `post_commit` 自己会调用 `maybe_upload_after_commit`。已经存在双上传源。\n3. [diagnostics.rs](C:/Users/15126/Desktop/code/git-ai-view/git-ai/src/diagnostics.rs)\n   - debug 默认开启，`GIT_AI_DEBUG=0/false/off/no` 可关。\n   - JSONL 到 2GB 才会裁剪到 512MB。用户分析报告与当前报告有差异：当时文件1.2GB没到现有上限，尚不会裁剪。\n4. [checkpoint.rs](C:/Users/15126/Desktop/code/git-ai-view/git-ai/src/daemon/checkpoint.rs)\n   - checkpoint 将文件快照写入 blob，查看附近实现以确认如何跳过大文件/控制快照。\n5. [claude preset](C:/Users/15126/Desktop/code/git-ai-view/git-ai/src/commands/checkpoint_agent/presets/claude.rs)\n   - Pre/Post hook 均会解析，并设置 `StreamSource` 指向 transcript。工具分类 Skip可避免 Read等，但 matcher wildcard 导致常见所有类型都启动 CLI。\n6. [claude stream adapter](C:/Users/15126/Desktop/code/git-ai-view/git-ai/src/streams/agents/claude.rs)\n   - 文件读取/事件解析位置，报告声称将 Claude transcript 类型 user 全量归为 User；还没检查 `stream` mapper 是否精确如此。需慎重核实才可修复。\n\n## 重要根因判断（未最终定案）\n不能声称“已证明电脑卡死就是上传锁”。提供日志里锁超时事件不存在。当前可支持的结论是：\n- 确定的资源压力：Claude 全工具 hook 每次工具事件至少生成两个 git-ai CLI 进程；频次很高。\n- 提交路径有并行重复上传：daemon post-commit auto upload + wrapper fallback upload-stats 子进程。\n- 上传锁可能增加等待，但日志样本缺少卡死时间附近的 timeout/event，且旧样本显示锁只等待毫秒到3秒，不证明整机挂死。\n- 大文件无界快照和过量 transcript/note 写入属于渐进性磁盘空间和I/O放大；分析报告是隔日采集的，仅为相关背景。\n- 需精准从日志中抽取当前文件中所有 commit 的 `post_commit_started` 到 `post_commit_stats_computed`/对应上传事件耗时，找具体 commits；还要对比当天最后时间记录、进程密度，报告版本时间和日志之间的关系。\n- 数据库如未经授权确认，不读、不改。\n\n## 已运行命令/结果\n- `git -C git-ai status --short`：仅显示 `?? agent-support/intellij/bin/`\n- `rg 'upload_stats_activity_lock_timeout' logs/徐建丰-20261006.jsonl`：无结果。\n- 日志文件超过 770k 行；避免输出过多。\n- 当前源码版本 `2.2.51`，报告也是`2.2.51`，但报告数据实际为2026-09-21，日志文件名 2026-10-06。\n\n## 下一步建议\n1. 简洁更新用户：本地证据表明高频 hook 和 post-commit 双上传会增加资源竞争；目前日志没有上传锁 timeout，不能确认它是整机挂死直接原因；正在做精确事件耗时归因。\n2. 用 PowerShell JSONL 流式解析 `logs/徐建丰-20261006.jsonl`，只输出具体事件摘要/时间窗：\n   - 按 `event` 计数、日期和时间范围；\n   - 筛出 `post_commit_started`, `post_commit_stats_computed`, `post_commit_stats_skipped`, `upload_stats_activity_lock_timeout`, `upload_stats_started`, `upload_stats_http_response_received`, `upload_stats_succeeded`, `checkpoint_request_started`；\n   - 按 commitSha/processId关联起止时间，不要打印过长 repo/path samples。\n   - 找到“整机卡死”附近最后事件/提交时间。\n3. 读取 `git_handlers.rs` 其余逻辑，`dispatch_upload` / lock范围与默认async设置，Claude event mapper，checkpoint大文件捕获实现。\n4. 窄范围设计修复：优先消除 wrapper fallback 与 daemon auto 双上传（wrapper fallback可能只应在 daemon 未启动/no daemon 场景触发；但现有语义确保升级/daemon不可用时上传，需保留后备上传）。最安全可能是为 wrapper fallback检测 post_commit auto dispatch 或只在 no-daemon路径运行；充分测现有链路。避免在 commit 主线程同步锁等待。可考虑 fallback upload 子进程是 detached，不过它仍然生成并行负载。\n5. 若证实根因，修改 Rust代码、回归测试、更新设计文档 dated note。\n6. 跑窄测试（例如 git_handlers的单测、upload_stats定向测试或cargo test --lib test名）、`cargo fmt --check`、`git diff --check`。不要广泛跑所有 cargo tests。\n7. 最终说明确定性区分“日志证明”和“工程推断”，列出未能验证的生产库因素。"
+        },
+        {
+          "type": "user",
+          "text": "还有个问题这个用户上传的提示词为什么是几百万个字符，到底是怎么回事\n"
+        },
+        {
+          "type": "user",
+          "text": "用户安装了git-ai，但是在提交代码时经常导致电脑整个卡死，这是他的日志 [徐建丰-20261006.jsonl](logs/徐建丰-20261006.jsonl) ，这是他在自己电脑上的分析报告 [git-ai 使用问题报告(1).md](<logs/git-ai 使用问题报告(1).md>) ，这是生产环境数据库：mysql -h dev-platform-bj-bastionhost-endpoint.ruijie.com.cn -P 30736 -u b086b650-1785-49f1-bec1-3bef69549799 -pil********5p6b  分析根因并解决问题\n"
+        },
+        {
+          "type": "user",
+          "text": "<environment_context>\n  <cwd>C:\\Users\\15126\\Desktop\\code\\git-ai-view</cwd>\n  <shell>powershell</shell>\n  <current_date>2026-10-06</current_date>\n  <timezone>Asia/Shanghai</timezone>\n  <filesystem><workspace_roots><root>C:\\Users\\15126\\Desktop\\code\\git-ai-view</root></workspace_roots><permission_profile type=\"disabled\"><file_system type=\"unrestricted\" /></permission_profile></filesystem>\n</environment_context>"
+        },
+        {
+          "type": "user",
+          "text": "还有个问题这个用户上传的提示词为什么是几百万个字符，到底是怎么回事\n"
+        },
+        {
+          "type": "user",
+          "text": "Another language model started to solve this problem and produced a summary of its thinking process. You also have access to the state of the tools that were used by that language model. Use this to build on the work that has already been done and avoid duplicating work. Here is the summary produced by the other language model, use the information in this summary to assist with your own analysis:\n## 当前进展\n\n用户追问：为什么上传的提示词达到几百万字符，实际是什么内容。\n\n已确认根因方向：\n\n1. 用户配置 Claude Code：\n   - `PreToolUse` + `PostToolUse`\n   - `matcher: \"*\"`\n   - 每次工具调用都会触发 git-ai checkpoint。\n2. Claude transcript 中，`type:\"user\"` 并不等于真人输入。\n   - Claude 会把工具执行结果、Read 文件内容、命令输出、子代理结果等包装在 `type:\"user\"` 事件里回灌给模型。\n3. 当前通用提示词解析器在：\n   - [prompt_utils.rs](C:/Users/15126/Desktop/code/git-ai-view/git-ai/src/authorship/prompt_utils.rs)\n   - `message_from_object()` 中执行：\n     ```rust\n     let role = object.get(\"role\").or_else(|| object.get(\"type\"))\n     ```\n     所以 Claude 的 `type:\"user\"` 被直接识别为 `Message::User`。\n   - 同时从 `text`、`content`、`message`、`data` 中提取文本。\n   - 这会把 Claude `tool_result` 内容作为用户提示词保存。\n4. 用户分析报告已有强证据：\n   - Claude 落库数据中约 `94.8%` 是 `tool_result`\n   - 真人提示词约 `1.7%`\n   - Claude 单条 prompt 平均约 `761 KB`\n   - `ai-price-service` 单条 prompt 最大约 `25.5 MB`\n   - 全机 `refs/notes/ai` 提示词约 `431 MB`\n   - 单次编辑还可能保存“截至当前时刻的完整 transcript 快照”，不是增量；同一编辑按多个 `tool_use_id` 重复保存。\n   - 报告相关章节：\n     - §6.2：Claude adapter 把所有 `type:\"user\"` 当提示词\n     - §6.3：tool_result 占 94.8%\n     - §6.4：全量快照及重复放大\n     - 结论 P13/P14/P16\n   - 文件：[git-ai 使用问题报告(1).md](C:/Users/15126/Desktop/code/git-ai-view/logs/git-ai%20使用问题报告(1).md)\n\n## 已完成的上一轮代码修改\n\n已经修复两个导致卡顿的资源问题：\n\n1. [git_handlers.rs](C:/Users/15126/Desktop/code/git-ai-view/git-ai/src/commands/git_handlers.rs)\n   - 正常 daemon 提交路径不再启动 wrapper fallback 上传。\n   - fallback 仅 `wrapper_no_daemon` 路径启动。\n   - 新增测试 `normal_daemon_post_commit_does_not_spawn_fallback_upload`。\n\n2. [orchestrator.rs](C:/Users/15126/Desktop/code/git-ai-view/git-ai/src/commands/checkpoint_agent/orchestrator.rs)\n   - checkpoint 文件统一限制 `2 MiB`。\n   - 之前只有 Bash 派生路径限制，现在 Claude 等显式文件路径也限制。\n   - 超大文件记录 `checkpoint_file_path_skipped`，不再读入/保存。\n   - 新增测试 `explicit_checkpoint_files_skip_oversized_files`。\n\n3. [git-ai看板方案.md](C:/Users/15126/Desktop/code/git-ai-view/git-ai/docs/design-doc/git-ai看板方案.md)\n   - 加了 2026-10-06 实施记录。\n\n验证通过：\n- 两个新增定向测试均通过。\n- `cargo fmt --check` 通过。\n- 编译通过，仅有既有 dead-code warning。\n- 顶层不是 Git 仓库，实际 Rust 仓库为 `git-ai/`。\n- `git -C git-ai status --short` 还有用户原有未跟踪目录：\n  `?? agent-support/intellij/bin/`\n  不得清理。\n\n## 重要约束\n\n- 用户给了生产 MySQL 凭据，但之前没有明确授权，未连接、未查询、未修改生产库。不要暴露密码。\n- 不要未经明确请求修复生产历史数据。\n- 用户偏好中文、直接、具体。\n- 已阅读 `fix-git-ai-attribution` skill：要先证明根因、窄范围修复、回归测试、`cargo fmt --check`、`git diff --check`，并更新设计文档。\n- 不要恢复/覆盖用户已有未跟踪文件。\n- 之前已有修改是当前代理完成的，可以继续在其上修改。\n\n## 当前需要继续做的事\n\n用户最新问题要求解释“提示词为什么几百万字符，到底怎么回事”。建议继续：\n\n1. **进一步读取并核实 Claude adapter / transcript 处理链**\n   - `git-ai/src/authorship/prompt_utils.rs`\n   - `git-ai/src/authorship/transcript.rs`\n   - `git-ai/src/daemon/stream_worker.rs`\n   - `git-ai/src/streams/agents/claude.rs`\n   - `git-ai/src/integration/upload_stats.rs` 中：\n     - `extract_prompt_text`\n     - `serialize_prompt_messages`\n   - 关键行：\n     - `prompt_utils.rs: message_from_object()`\n     - `prompt_utils.rs: collect_messages_from_value()`\n     - `prompt_utils.rs: transcript_from_json_or_jsonl()`\n     - `upload_stats.rs` 约 2123 行和 2139 行。\n2. 明确区分：\n   - “提交到 git notes 的 prompt”由 `PromptRecord.messages` 来自 transcript 全量解析；\n   - “上传 dashboard 的 payload”又把 `messages` 序列化，因此大 prompt 会再次上传；\n   - 当前 `prompt_storage: notes` 会把提示词放进 `refs/notes/ai`，随 push 传播。\n3. 重点查 `stream_worker` 是否将 checkpoint 时的 transcript snapshot 合并/保存，以及是否每个 tool_use_id 都生成一个 prompt。\n4. 设计修复建议：\n   - Claude 只采集真正真人输入，而不是所有 `type:\"user\"`。\n   - 对 Claude 明确过滤含 `message.content` 中 `tool_result` 的事件。\n   - 更安全的判断：\n     - 只接受 `type:\"user\"` 且 content 是纯文本；\n     - 如果 content 数组含任意 `tool_result`，跳过；\n     - 不把整个对象的 `content` 递归拼接成文本。\n   - 对 prompt 增加大小/消息数量上限，避免历史 transcript 全量快照：\n     - 例如单条 message 64 KiB 或 256 KiB；\n     - transcript 只保留最近真人 prompt，或只保留最近 N 条；\n     - 需要兼容已有数据，避免破坏其它 agent。\n   - 必须加 Claude 专项回归测试：\n     - `type:\"user\"` + `tool_result` 不应成为 `Message::User`\n     - 纯真人文本 `type:\"user\"` 应保留\n     - content 数组混合 text/tool_result 时只保留文本或整体跳过，需选择并解释。\n5. 如果直接修改代码，更新设计文档增加本次 2026-10-06 提示词解析修复记录，并跑定向测试。\n\n## 关键证据摘要\n\n用户报告原文中可直接引用：\n\n- `Claude 适配器把 transcript 中所有 type:\"user\" 行原样落库，而该行 94.8% 是 tool_result`\n- `真人提示词仅占 1.7%`\n- Claude 单条平均 `761 KB`\n- Copilot 单条平均 `15.6 KB`\n- 单条 prompt 最大约 `25.5 MB`\n- prompt 是会话截至编辑时的全量快照，某些消息快照逐字节重复 12 次\n- `refs/notes/ai` 总计约 `431 MB`\n\n最终回答应明确说明：\n\n> 这不是用户真的输入了几百万字符，而是 git-ai 的 Claude 解析逻辑把 Claude 回灌给模型的工具结果误识别成了用户 prompt；再加上每次 checkpoint 保存完整 transcript 快照和重复 prompt，导致单个 prompt 达到 MB 级，累计达到数亿字符。先前 2 MiB 文件快照修复不能解决这个 prompt 解析问题，需要针对 Claude transcript 做过滤和增量/上限控制。"
+        },
+        {
+          "type": "user",
+          "text": "进行验证了吗？本次修改比较大，必须做充分的测试，而且不能再使用户电脑卡死\n"
+        },
+        {
+          "type": "user",
+          "text": "提交代码\n"
+        }
+      ],
+      "total_additions": 10,
+      "total_deletions": 1,
+      "accepted_lines": 10,
+      "overriden_lines": 0,
+      "custom_attributes": {
+        "archived_ai_state_restored": "true",
+        "archive_file": "docs/design-doc/git-ai看板方案.md"
+      }
+    },
+    "s_bcde3baee92c75::t_a628d1cf7ea73e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a10fd4-0658-7df0-bbb6-50d31ec12a7c",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "gaoang <gaoang@ruijie.com.cn>",
+      "messages": [],
+      "total_additions": 4,
+      "total_deletions": 4,
+      "accepted_lines": 2,
+      "overriden_lines": 0,
+      "custom_attributes": {
+        "archived_ai_state_restored": "true",
+        "archive_file": "src/commands/git_handlers.rs"
+      }
+    }
+  },
+  "sessions": {
+    "s_364b9432e76389": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a11083-3810-7302-94f2-175bc01ce98e",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "gaoang <gaoang@ruijie.com.cn>",
+      "custom_attributes": {
+        "archive_file": "src/lib.rs",
+        "archived_ai_state_restored": "true"
+      }
+    },
+    "s_bcde3baee92c75": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a10fd4-0658-7df0-bbb6-50d31ec12a7c",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "gaoang <gaoang@ruijie.com.cn>",
+      "custom_attributes": {
+        "archived_ai_state_restored": "true",
+        "archive_file": "src/commands/git_handlers.rs"
+      }
+    }
+  }
+}
