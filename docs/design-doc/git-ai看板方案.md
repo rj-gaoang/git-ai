@@ -3965,3 +3965,21 @@ git-ai upload-stats --dry-run --ignore '*.md' --ignore 'src/generated/**' HEAD
 - 根因：Claude transcript 中 `type: "user"` 同时包含真人输入和工具执行结果回灌；通用解析器按 `type` 识别角色，并递归提取 `message.content`，因此把含 `tool_result` 的完整工具输出误保存成 `Message::User`。每次 checkpoint 又读取截至当前时刻的完整 transcript，导致历史内容重复进入多个 prompt。
 - 修复：`src/authorship/prompt_utils.rs` 对 Claude 专门过滤 `message.content` 含 `tool_result` 的 user 事件，只保留纯文本真人输入；其他 agent 的通用解析逻辑不变。解析还增加 16 MiB transcript 文件上限、256 条消息上限和 256 KiB 单消息上限，超限直接跳过，避免大文件读取和大 payload 造成内存/IO 卡顿。新增回归测试覆盖工具结果过滤、真人文本保留及各项上限。
 - 影响：仅阻止后续错误 prompt 继续落库/上传；历史 git notes 和 dashboard 数据不自动重写。此前的 2 MiB checkpoint 文件上限修复用于阻止超大文件快照读入，与本次 prompt 解析修复互补。
+
+### 2026-10-07：Skill / Agent / MCP 使用遥测首期实现
+
+**实现范围：**
+
+- 新增 `src/tool_usage.rs`，定义 `tool_usage/v1` 事件模型，覆盖 Agent、Skill、MCP 和人工结果事件。
+- 从统一 `CheckpointRequest.metadata` 读取 Claude、GitHub Copilot、Codex 及后续适配器提供的调用元数据；按 `mcp_*`、`skill_*` 字段识别工具类型，并关联 session、trace、task、模型、耗时、产物数量、增删行和哈希。
+- 复用 daemon telemetry worker 异步批量发送 `POST /worker/tool-usage/upload`，上传失败只丢弃可选遥测，不影响 checkpoint、commit、notes 或既有 metrics。
+- 新增 `tool_usage_telemetry` feature flag，默认关闭；只有显式设置 `GIT_AI_TOOL_USAGE_TELEMETRY=true`（或等价配置）才会采集和上传。关闭时不创建事件，也不发送请求。
+- 不采集 prompt、transcript、MCP 参数或返回值；人工结果仅记录脱敏的聚合元数据。
+
+**验证：**
+
+- `cargo fmt --all -- --check`
+- `cargo test --lib tool_usage`
+- `cargo check`
+
+上述命令均通过。服务端和看板位于 `ai-cr-manage-service`、`ai-cr-manage-web` 的 `pro-codereview` 分支，部署前需执行对应 SQL 建表并通过灰度环境开启客户端开关。远程开发平台发布需要已登录的开发平台会话，本机未能建立该会话，未宣称线上部署已完成。
