@@ -103,6 +103,7 @@ define_feature_flags!(
     transcript_streaming: transcript_streaming, debug = true, release = true,
     transcript_sweep: transcript_sweep, debug = true, release = true,
     checkpoint_debug_log: checkpoint_debug_log, debug = false, release = false,
+    tool_usage_telemetry: tool_usage_telemetry, debug = false, release = false,
 );
 
 impl FeatureFlags {
@@ -167,6 +168,7 @@ mod tests {
             assert!(flags.transcript_streaming);
             assert!(flags.transcript_sweep);
             assert!(!flags.checkpoint_debug_log);
+            assert!(!flags.tool_usage_telemetry);
         }
         #[cfg(not(debug_assertions))]
         {
@@ -180,6 +182,7 @@ mod tests {
             assert!(flags.transcript_streaming);
             assert!(flags.transcript_sweep);
             assert!(!flags.checkpoint_debug_log);
+            assert!(!flags.tool_usage_telemetry);
         }
     }
 
@@ -243,6 +246,7 @@ mod tests {
             transcript_streaming: true,
             transcript_sweep: true,
             checkpoint_debug_log: false,
+            tool_usage_telemetry: false,
         };
 
         let serialized = serde_json::to_string(&flags).unwrap();
@@ -256,6 +260,7 @@ mod tests {
         assert!(serialized.contains("transcript_streaming"));
         assert!(serialized.contains("transcript_sweep"));
         assert!(serialized.contains("checkpoint_debug_log"));
+        assert!(serialized.contains("tool_usage_telemetry"));
     }
 
     #[test]
@@ -271,6 +276,7 @@ mod tests {
             transcript_streaming: true,
             transcript_sweep: true,
             checkpoint_debug_log: true,
+            tool_usage_telemetry: true,
         };
         let cloned = flags.clone();
         assert_eq!(cloned.rewrite_stash, flags.rewrite_stash);
@@ -289,6 +295,7 @@ mod tests {
         assert_eq!(cloned.transcript_streaming, flags.transcript_streaming);
         assert_eq!(cloned.transcript_sweep, flags.transcript_sweep);
         assert_eq!(cloned.checkpoint_debug_log, flags.checkpoint_debug_log);
+        assert_eq!(cloned.tool_usage_telemetry, flags.tool_usage_telemetry);
     }
 
     #[test]

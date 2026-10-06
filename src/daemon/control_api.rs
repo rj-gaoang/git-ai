@@ -3,6 +3,7 @@ use crate::commands::checkpoint_agent::bash_tool::StatSnapshot;
 use crate::commands::checkpoint_agent::orchestrator::CheckpointRequest;
 use crate::daemon::domain::RepoContext;
 use crate::metrics::MetricEvent;
+use crate::tool_usage::ToolUsageEvent;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -148,6 +149,9 @@ pub enum TelemetryEnvelope {
     },
     Metrics {
         events: Vec<MetricEvent>,
+    },
+    ToolUsage {
+        events: Vec<ToolUsageEvent>,
     },
 }
 

@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use crate::metrics::MetricEvent;
+use crate::tool_usage::ToolUsageEvent;
 
 pub mod performance_targets;
 
@@ -82,6 +83,14 @@ pub fn log_metrics(
             submit_telemetry_envelope(vec![envelope]);
         }
     }
+}
+
+/// Log feature-gated Skill/Agent/MCP usage events.
+pub fn submit_tool_usage(events: Vec<ToolUsageEvent>) {
+    if events.is_empty() || !crate::tool_usage::enabled() {
+        return;
+    }
+    submit_telemetry_envelope(vec![crate::daemon::TelemetryEnvelope::ToolUsage { events }]);
 }
 
 #[cfg(test)]

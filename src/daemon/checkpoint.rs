@@ -501,6 +501,25 @@ fn execute_resolved_checkpoint(
         }
     }
 
+    // Tool usage telemetry is independent from legacy metrics and is fully
+    // feature-gated. It records calls even when no file was changed.
+    let total_added: u32 = file_stats.iter().map(|stats| stats.additions).sum();
+    let total_deleted: u32 = file_stats.iter().map(|stats| stats.deletions).sum();
+    crate::tool_usage::record_checkpoint(
+        &checkpoint_request,
+        checkpoint_request.agent_id.as_ref(),
+        total_added,
+        total_deleted,
+    );
+    if !effective_kind.is_ai() {
+        crate::tool_usage::record_human_outcome(
+            &checkpoint_request,
+            "human.modified",
+            total_added,
+            total_deleted,
+        );
+    }
+
     let agent_tool = if effective_kind.is_ai() {
         checkpoint_request
             .agent_id

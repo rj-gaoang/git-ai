@@ -18,5 +18,6 @@ pub mod notes;
 pub mod observability;
 pub mod repo_url;
 pub mod streams;
+pub mod tool_usage;
 pub mod utils;
 pub mod uuid;

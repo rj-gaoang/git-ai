@@ -9,6 +9,7 @@ use crate::daemon::control_api::{CasSyncPayload, TelemetryEnvelope};
 use crate::metrics::db::MetricsDatabase;
 use crate::metrics::{MetricEvent, MetricsBatch};
 use crate::observability::MAX_METRICS_PER_ENVELOPE;
+use crate::tool_usage::{ToolUsageBatch, ToolUsageEvent};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -23,6 +24,7 @@ struct TelemetryBuffer {
     performances: Vec<PerformanceEvent>,
     messages: Vec<MessageEvent>,
     metrics: Vec<MetricEvent>,
+    tool_usage: Vec<ToolUsageEvent>,
     cas_records: Vec<CasSyncPayload>,
 }
 
@@ -54,6 +56,7 @@ impl TelemetryBuffer {
             performances: Vec::new(),
             messages: Vec::new(),
             metrics: Vec::new(),
+            tool_usage: Vec::new(),
             cas_records: Vec::new(),
         }
     }
@@ -63,6 +66,7 @@ impl TelemetryBuffer {
             && self.performances.is_empty()
             && self.messages.is_empty()
             && self.metrics.is_empty()
+            && self.tool_usage.is_empty()
             && self.cas_records.is_empty()
     }
 
@@ -111,6 +115,9 @@ impl TelemetryBuffer {
                 TelemetryEnvelope::Metrics { events } => {
                     self.metrics.extend(events);
                 }
+                TelemetryEnvelope::ToolUsage { events } => {
+                    self.tool_usage.extend(events);
+                }
             }
         }
     }
@@ -125,6 +132,7 @@ impl TelemetryBuffer {
             performances: std::mem::take(&mut self.performances),
             messages: std::mem::take(&mut self.messages),
             metrics: std::mem::take(&mut self.metrics),
+            tool_usage: std::mem::take(&mut self.tool_usage),
             cas_records: std::mem::take(&mut self.cas_records),
         }
     }
@@ -292,6 +300,10 @@ fn flush_telemetry_batch(batch: TelemetryBuffer) {
         flush_metrics(&batch.metrics);
     }
 
+    if !batch.tool_usage.is_empty() {
+        flush_tool_usage(&batch.tool_usage);
+    }
+
     // Flush Sentry events (errors, performance, messages)
     let has_sentry_or_posthog =
         !batch.errors.is_empty() || !batch.performances.is_empty() || !batch.messages.is_empty();
@@ -313,6 +325,25 @@ fn flush_telemetry_batch(batch: TelemetryBuffer) {
 
     // Flush pending notes (reads directly from notes-db; no-op when kind != Http).
     flush_notes();
+}
+
+fn flush_tool_usage(events: &[ToolUsageEvent]) {
+    if !crate::tool_usage::enabled() || events.is_empty() {
+        return;
+    }
+    let context = ApiContext::new(None);
+    let using_default_api = context.base_url == crate::config::DEFAULT_API_BASE_URL;
+    let client = ApiClient::new(context);
+    if using_default_api && !client.is_logged_in() && !client.has_api_key() {
+        return;
+    }
+    let batch = ToolUsageBatch {
+        schema_version: crate::tool_usage::TOOL_USAGE_SCHEMA_VERSION.to_string(),
+        events: events.to_vec(),
+    };
+    // The endpoint is independently versioned.  A missing endpoint on an
+    // older server is intentionally treated as a best-effort telemetry miss.
+    let _ = client.upload_tool_usage(&batch);
 }
 
 fn flush_metrics(events: &[MetricEvent]) {
