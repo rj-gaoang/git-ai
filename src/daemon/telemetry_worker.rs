@@ -331,19 +331,16 @@ fn flush_tool_usage(events: &[ToolUsageEvent]) {
     if !crate::tool_usage::enabled() || events.is_empty() {
         return;
     }
+    let remote_url = crate::api::tool_usage::remote_url();
     let context = ApiContext::new(None);
-    let using_default_api = context.base_url == crate::config::DEFAULT_API_BASE_URL;
     let client = ApiClient::new(context);
-    if using_default_api && !client.is_logged_in() && !client.has_api_key() {
-        return;
-    }
     let batch = ToolUsageBatch {
         schema_version: crate::tool_usage::TOOL_USAGE_SCHEMA_VERSION.to_string(),
         events: events.to_vec(),
     };
     // The endpoint is independently versioned.  A missing endpoint on an
     // older server is intentionally treated as a best-effort telemetry miss.
-    let _ = client.upload_tool_usage(&batch);
+    let _ = client.upload_tool_usage_at(&remote_url, &batch);
 }
 
 fn flush_metrics(events: &[MetricEvent]) {

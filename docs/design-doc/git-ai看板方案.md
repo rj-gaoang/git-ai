@@ -3982,4 +3982,17 @@ git-ai upload-stats --dry-run --ignore '*.md' --ignore 'src/generated/**' HEAD
 - `cargo test --lib tool_usage`
 - `cargo check`
 
-上述命令均通过。服务端和看板位于 `ai-cr-manage-service`、`ai-cr-manage-web` 的 `pro-codereview` 分支，部署前需执行对应 SQL 建表并通过灰度环境开启客户端开关。远程开发平台发布需要已登录的开发平台会话，本机未能建立该会话，未宣称线上部署已完成。
+上述命令均通过。服务端和看板位于 `ai-cr-manage-service`、`ai-cr-manage-web` 的 `pro-codereview` 分支。
+
+### 2026-10-07：工具遥测生产上传地址独立配置
+
+确认生产 ai-cr 的公共上传接口为完整地址 `https://service-gw.ruijie.com.cn/api/ai-cr-manage-service/api/public/worker/tool-usage/upload`，而 `GIT_AI_API_BASE_URL` 默认指向 Git AI 服务，直接拼接会导致数据发往错误服务。`ApiContext` 新增完整 URL JSON POST 能力，遥测链路新增 `GIT_AI_TOOL_USAGE_REMOTE_URL`，配置后优先使用该地址；未配置时继续使用原有 API base 行为。遥测开关仍默认关闭，上传失败仍不影响 checkpoint、commit 和既有 metrics。
+
+生产客户端启用方式：
+
+```powershell
+$env:GIT_AI_TOOL_USAGE_TELEMETRY = "true"
+$env:GIT_AI_TOOL_USAGE_REMOTE_URL = "https://service-gw.ruijie.com.cn/api/ai-cr-manage-service/api/public/worker/tool-usage/upload"
+```
+
+验证：补充空值 URL 单测，并执行 `cargo fmt --all -- --check`、`cargo test --lib tool_usage`、`cargo check`。

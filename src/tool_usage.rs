@@ -289,4 +289,25 @@ mod tests {
                 .contains("mcp_server")
         );
     }
+
+    #[test]
+    #[serial_test::serial]
+    fn remote_url_ignores_empty_values() {
+        let previous = std::env::var(crate::api::tool_usage::TOOL_USAGE_REMOTE_URL_ENV).ok();
+        unsafe {
+            std::env::set_var(crate::api::tool_usage::TOOL_USAGE_REMOTE_URL_ENV, "  ");
+        }
+        assert_eq!(
+            crate::api::tool_usage::remote_url(),
+            crate::api::tool_usage::DEFAULT_TOOL_USAGE_REMOTE_URL
+        );
+        match previous {
+            Some(value) => unsafe {
+                std::env::set_var(crate::api::tool_usage::TOOL_USAGE_REMOTE_URL_ENV, value)
+            },
+            None => unsafe {
+                std::env::remove_var(crate::api::tool_usage::TOOL_USAGE_REMOTE_URL_ENV)
+            },
+        }
+    }
 }

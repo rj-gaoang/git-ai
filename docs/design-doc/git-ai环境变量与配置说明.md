@@ -186,7 +186,18 @@ git-ai config set prompt_storage notes
 
 如果上传失败，看 `debug.jsonl` 中这些事件：`post_commit_upload_dispatch_requested`、`upload_stats_auto_entered`、`upload_stats_payload_build_started`、`upload_stats_payload_build_succeeded`、`upload_stats_ready`、`upload_stats_started`、`upload_stats_http_request_ready`、`upload_stats_http_response_received`、`upload_stats_http_non_success`、`upload_stats_failed`。
 
-## 七、安装脚本相关变量
+## 七、Skill / Agent / MCP 使用遥测
+
+工具使用遥测默认关闭。启用后，客户端只采集调用类型、模型、会话/任务关联、耗时、产物类型和增删行等聚合元数据，不上传 prompt、transcript、MCP 参数或工具输出正文。
+
+| 变量 | 作用 | 默认/规则 |
+| --- | --- | --- |
+| `GIT_AI_TOOL_USAGE_TELEMETRY` | 开启 Skill / Agent / MCP 遥测 | `false`；显式设置为 `true` 才采集 |
+| `GIT_AI_TOOL_USAGE_REMOTE_URL` | 工具遥测完整上传 URL | 可选；未设置时使用生产 ai-cr 地址，也可覆盖为测试或自托管地址 |
+
+`GIT_AI_TOOL_USAGE_REMOTE_URL` 与旧的 `GIT_AI_REPORT_REMOTE_URL` 相互独立，避免把 commit 统计接口的路径错误地复用到工具遥测。未设置时使用生产 ai-cr 公共接口；启用测试或自托管环境时再显式覆盖该变量。
+
+## 八、安装脚本相关变量
 
 这些变量只影响 `install.ps1` / `install.sh`，不影响已安装后的日常归因逻辑。
 

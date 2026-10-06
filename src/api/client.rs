@@ -307,6 +307,18 @@ impl ApiContext {
         body: &T,
     ) -> Result<http::Response, GitAiError> {
         let url = self.build_url(endpoint)?;
+        self.post_json_url(&url, body)
+    }
+
+    /// Make a POST request with JSON body to an already-complete URL.
+    /// This avoids joining an endpoint owned by a separate service to the
+    /// configured API base URL.
+    pub fn post_json_url<T: serde::Serialize>(
+        &self,
+        url: &str,
+        body: &T,
+    ) -> Result<http::Response, GitAiError> {
+        Url::parse(url).map_err(|e| GitAiError::Generic(format!("Invalid URL: {}", e)))?;
         let body_json = serde_json::to_string(body).map_err(GitAiError::JsonError)?;
 
         let (_agent, mut request) = Self::http_post(&url, self.timeout_secs);
