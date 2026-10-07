@@ -9,7 +9,6 @@ use crate::authorship::working_log::AgentId;
 use crate::commands::checkpoint_agent::bash_tool::{self, Agent, ToolClass};
 use crate::error::GitAiError;
 use crate::mdm::utils::codex_home_dir;
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 pub struct CodexPreset;
@@ -95,6 +94,11 @@ impl AgentPreset for CodexPreset {
 
         let cwd = parse::required_str(&data, "cwd")?;
         let session_id = Self::session_id_from_hook_data(&data)?;
+        if let Some(event) =
+            crate::tool_usage::native_invocation(&data, "codex", &session_id, trace_id)
+        {
+            return Ok(vec![event]);
+        }
         let hook_event = parse::optional_str_multi(&data, &["hook_event_name", "hookEventName"]);
         let tool_name = parse::optional_str_multi(&data, &["tool_name", "toolName"]);
         let tool_use_id =
@@ -110,7 +114,7 @@ impl AgentPreset for CodexPreset {
         let transcript_path = Self::resolve_transcript_path(&data, &session_id);
         let tool_input = data.get("tool_input").or_else(|| data.get("toolInput"));
 
-        let mut metadata = HashMap::new();
+        let mut metadata = crate::tool_usage::hook_metadata(&data);
         if let Some(ref tp) = transcript_path {
             metadata.insert("transcript_path".to_string(), tp.clone());
         }

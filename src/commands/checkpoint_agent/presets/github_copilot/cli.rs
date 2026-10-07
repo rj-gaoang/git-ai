@@ -24,6 +24,16 @@ pub(super) fn parse_cli_hooks(
         parse::optional_str_multi(data, &["tool_name", "toolName"]).unwrap_or("unknown");
 
     let class = classify_cli_tool(tool_name);
+    if let Some(event) =
+        crate::tool_usage::native_invocation(data, "github-copilot-cli", &session_id, trace_id)
+    {
+        return Ok(vec![event]);
+    }
+    if hook_event_name == "PostToolUseFailure" {
+        return Err(GitAiError::PresetError(
+            "Skipping failed edit checkpoint".into(),
+        ));
+    }
     if class == ToolClass::Skip {
         return Err(GitAiError::PresetError(format!(
             "Skipping CopilotCLI hook for non-edit tool '{}'.",
@@ -78,7 +88,7 @@ pub(super) fn parse_cli_hooks(
 
     let session_state_path = resolve_copilot_cli_session_path(&session_id);
 
-    let mut metadata = HashMap::new();
+    let mut metadata = crate::tool_usage::hook_metadata(data);
     metadata.insert("source".to_string(), "copilot-cli".to_string());
 
     let context = PresetContext {

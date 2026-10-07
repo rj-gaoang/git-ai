@@ -7,7 +7,6 @@ use crate::authorship::authorship_log_serialization::generate_session_id;
 use crate::authorship::working_log::AgentId;
 use crate::commands::checkpoint_agent::bash_tool::{self, Agent, ToolClass};
 use crate::error::GitAiError;
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 pub struct ClaudePreset;
@@ -63,6 +62,12 @@ impl AgentPreset for ClaudePreset {
         let tool_use_id = parse::str_or_default_multi(&data, &["tool_use_id", "toolUseId"], "bash");
         let tool_input = data.get("tool_input").or_else(|| data.get("toolInput"));
 
+        let mut invocation =
+            crate::tool_usage::native_invocation(&data, "claude", &session_id, trace_id);
+        if invocation.is_some() && parse::file_paths_from_tool_input(&data, cwd).is_empty() {
+            return Ok(vec![invocation.take().unwrap()]);
+        }
+
         let is_bash = tool_name
             .map(|n| bash_tool::classify_tool(Agent::Claude, n) == ToolClass::Bash)
             .unwrap_or(false);
@@ -94,7 +99,14 @@ impl AgentPreset for ClaudePreset {
             external_session_id: session_id.clone(),
             trace_id: trace_id.to_string(),
             cwd: PathBuf::from(cwd),
-            metadata: HashMap::from([("transcript_path".to_string(), transcript_path.to_string())]),
+            metadata: {
+                let mut metadata = crate::tool_usage::hook_metadata(&data);
+                metadata.insert("transcript_path".into(), transcript_path.into());
+                if invocation.is_some() {
+                    metadata.insert("tool_usage_already_recorded".into(), "true".into());
+                }
+                metadata
+            },
         };
 
         let transcript_path_buf = PathBuf::from(transcript_path);
@@ -136,7 +148,9 @@ impl AgentPreset for ClaudePreset {
             }),
         };
 
-        Ok(vec![event])
+        let mut events: Vec<_> = invocation.into_iter().collect();
+        events.push(event);
+        Ok(events)
     }
 }
 

@@ -36,6 +36,10 @@ pub struct PresetContext {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ParsedHookEvent {
+    ToolInvocation {
+        event: Box<crate::tool_usage::ToolUsageEvent>,
+        cwd: PathBuf,
+    },
     PreFileEdit(PreFileEdit),
     PostFileEdit(PostFileEdit),
     PreBashCall(PreBashCall),

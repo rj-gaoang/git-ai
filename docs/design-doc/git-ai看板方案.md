@@ -3986,7 +3986,7 @@ git-ai upload-stats --dry-run --ignore '*.md' --ignore 'src/generated/**' HEAD
 
 ### 2026-10-07：工具遥测生产上传地址独立配置
 
-确认生产 ai-cr 的公共上传接口为完整地址 `https://service-gw.ruijie.com.cn/api/ai-cr-manage-service/api/public/worker/tool-usage/upload`，而 `GIT_AI_API_BASE_URL` 默认指向 Git AI 服务，直接拼接会导致数据发往错误服务。`ApiContext` 新增完整 URL JSON POST 能力，遥测链路新增 `GIT_AI_TOOL_USAGE_REMOTE_URL`，配置后优先使用该地址；未配置时继续使用原有 API base 行为。遥测开关仍默认关闭，上传失败仍不影响 checkpoint、commit 和既有 metrics。
+确认生产 ai-cr 的公共上传接口为完整地址 `https://service-gw.ruijie.com.cn/api/ai-cr-manage-service/api/public/worker/tool-usage/upload`，而 `GIT_AI_API_BASE_URL` 默认指向 Git AI 服务，直接拼接会导致数据发往错误服务。`ApiContext` 新增完整 URL JSON POST 能力，遥测链路新增 `GIT_AI_TOOL_USAGE_REMOTE_URL`，配置后优先使用该地址；未配置或配置为空时使用上述生产完整地址。遥测开关仍默认关闭，上传失败仍不影响 checkpoint、commit 和既有 metrics。
 
 生产客户端启用方式：
 
@@ -4010,3 +4010,23 @@ checkpoint、metrics 和其他 RFC3339 时间链路不变。
 `cargo test --lib tool_usage`（4 passed）、`cargo check`。提交为 `5e1979c8`，已推送到
 `feature_20261006_gaoang`。生产 smoke 事件上传返回 `accepted: 1`，重复提交返回
 `duplicate: 1`，证明接口幂等和数据库落库链路正常。
+
+### 2026-10-07：原生调用采集与生产接口回归验证
+
+**根因与修复：** 首期依赖文件 checkpoint 的 metadata，而各适配器未完整传递 Skill/MCP 字段；无文件路径时，checkpoint 拆分不会生成请求，纯工具调用因此丢失。另一方面，AI 编辑前的 Human 基线被误计为 Agent 完成，普通 Human 基线和没有实际增删行的事件被误计为人工修改。上传层只检查 HTTP 2xx，也会把业务拒绝当成成功。以上问题发生在客户端采集、分类和响应校验边界；本轮生产上传与重复回执没有显示服务端拒绝测试事件，不能把漏采归因于看板入库。旧客户端是否仍在运行须另行检查，本轮未更换系统安装，也未涉及自动更新。
+
+- 新增 `src/tool_usage/native_hook.rs`，Claude、Codex、Copilot IDE/CLI 在原有来源和 session 校验后，识别 Agent/Task/spawn_agent、Skill/read_skill/use_skill、`mcp__server__tool` 的完成调用；通过独立 `ToolInvocation` 事件提交到现有 telemetry worker，不依赖文件 checkpoint。顶层及 metadata 中只复制任务、Skill/MCP、产物类别等白名单字段，不上传 prompt、transcript、参数或返回值。
+- 原生调用有 tool call ID 时生成稳定 event ID，重放可去重；PreToolUse 不算完成。支持 PostToolUseFailure 和返回值中的 is_error/isError，失败记录为 failed。普通 Edit/Bash 保持原有归因路径；Claude 工具调用带显式 file_path 时同时保留 PostFileEdit，并通过内部 metadata 避免重复计数。
+- `src/tool_usage.rs` 和 `src/daemon/checkpoint.rs` 只从 AI 完成 checkpoint 记录调用；人工结果仅来自有效 KnownHuman 且确有增删行的事件，支持 `GIT_AI_TASK_ID` 关联。camelCase MCP 字段的分类与取值保持一致。
+- `src/api/tool_usage.rs` 同时验证 HTTP、业务 code、accepted/duplicate/rejected；缺失回执、拒绝事件或确认数量不完整均返回错误。可选遥测仍为尽力上传，失败不改变 checkpoint、notes、commit 或原有 metrics；目前没有持久重试队列，不能保证网络故障时不丢事件。
+
+**已完成验证：**
+
+- 使用 `task test` 默认 daemon 模式：工具遥测 12 项通过、1 项生产写入测试默认 ignored；feature flags 9 项通过；适配器 187 项通过；checkpoint_telemetry 集成测试 5 项通过；Copilot 模型提取 10 项通过；`test_recent_known_human_save_after_ai_does_not_reclaim_ai_lines`、`test_stats_for_mixed_commit` 各 1 项通过，共 225 项。
+- 适配器中两项旧测试已修正：Cursor 的 fallback ID 测试输入改为带写操作的 Shell，符合既有只读命令跳过规则；Copilot 模型测试改为验证 preset 保留 transcript/stream source 并交给 daemon 提取，符合 HEAD 既有行为。这两处未修改业务代码。
+- `cargo fmt --all -- --check`、`cargo check -q --lib`、`git diff --check` 通过。
+- 显式运行生产 smoke：Claude、Codex、Copilot IDE/CLI 各上传 Agent、Skill、MCP 共 12 个事件，ApiClient 验证完整业务回执通过；同批重传原始响应为 `accepted=0, duplicate=12, rejected=0, errors=[]`。查询任务标识为 `git-ai-smoke-37a29327-2cf6-4663-b6e6-99758f885e50`。该测试验证的是适配器解析到生产上传接口，不代表真实 IDE hook 安装和完整页面验收。
+
+**页面验证现状：** `https://aicr.ruijie.com.cn/git-ai-tool-usage` 的 HTTP 入口可达。独立网关签名后的 overview 请求返回 HTTP 200、业务 code 401、无 data，需要 ai-cr 登录会话；captchaImage 返回 captchaEnabled=true。本轮浏览器工具未连接可用浏览器，无法使用已有登录会话完成页面渲染、筛选和四个 GET 查询验收。此限制属于 ai-cr 看板认证和浏览器连接，不是开发平台不可达或部署无权限。不能将页面入口 HTTP 200 当成页面展示成功。
+
+**能力边界与版本说明：** 默认仍关闭，需显式启用。只有提供相应原生 hook 字段的客户端版本可识别具体调用，读取 SKILL.md 本身不等于 Skill 调用证据；当前安装器未默认订阅 PostToolUseFailure，解析支持不等于自动覆盖所有失败事件。无文件 checkpoint 的产物数量、增删行保持缺省，避免伪造零产物；人工修改信号不等于已采纳或拒绝，深入的采纳率分析尚未实现。时间字符串仍由 UTC 生成，但生产 Java 默认时区与数据库时区是否一致尚未验证，不应声称时间趋势已验收。本轮修复只影响使用新客户端后的事件，不回写历史数据。

@@ -22,7 +22,10 @@ impl AgentPreset for GithubCopilotPreset {
             return ide::parse_legacy_extension_hooks(&data, hook_event_name, trace_id);
         }
 
-        if hook_event_name == "PreToolUse" || hook_event_name == "PostToolUse" {
+        if hook_event_name == "PreToolUse"
+            || hook_event_name == "PostToolUse"
+            || (hook_event_name == "PostToolUseFailure" && crate::tool_usage::enabled())
+        {
             let has_transcript_path = parse::optional_str_multi(
                 &data,
                 &[

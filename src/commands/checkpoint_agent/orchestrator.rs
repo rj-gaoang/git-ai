@@ -542,6 +542,18 @@ fn execute_event(
     preset_name: &str,
 ) -> Result<Vec<CheckpointRequest>, GitAiError> {
     match event {
+        ParsedHookEvent::ToolInvocation { event, cwd } => {
+            let config = config::Config::get();
+            if config.has_repository_filters() {
+                let repo =
+                    crate::git::repository::discover_repository_in_path_no_git_exec(&cwd).ok();
+                if !config.is_allowed_repository(&repo) {
+                    return Ok(vec![]);
+                }
+            }
+            crate::tool_usage::record(*event);
+            Ok(vec![])
+        }
         ParsedHookEvent::PreFileEdit(e) => execute_pre_file_edit(e),
         ParsedHookEvent::PostFileEdit(e) => execute_post_file_edit(e, preset_name),
         ParsedHookEvent::PreBashCall(e) => execute_pre_bash_call(e),

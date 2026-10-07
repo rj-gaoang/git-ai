@@ -513,7 +513,7 @@ mod tests {
             "workspace_roots": ["/Users/aidan/Desktop/test-repo"],
             "hook_event_name": "preToolUse",
             "tool_name": "Shell",
-            "tool_input": {"command": "ls"}
+            "tool_input": {"command": "date > current_time.txt"}
         })
         .to_string();
         let events = CursorPreset.parse(&input, "t_test123456789a").unwrap();

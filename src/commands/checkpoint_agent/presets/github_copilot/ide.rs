@@ -150,14 +150,6 @@ pub(super) fn parse_vscode_native_hooks(
     let tool_name =
         parse::optional_str_multi(data, &["tool_name", "toolName"]).unwrap_or("unknown");
 
-    // Enforce tool filtering to avoid creating checkpoints for read/search tools
-    if !is_supported_vscode_edit_tool_name(tool_name) {
-        return Err(GitAiError::PresetError(format!(
-            "Skipping VS Code hook for unsupported tool_name '{}' (non-edit tool).",
-            tool_name
-        )));
-    }
-
     let tool_input = data.get("tool_input").or_else(|| data.get("toolInput"));
     let tool_response = data
         .get("tool_response")
@@ -178,6 +170,24 @@ pub(super) fn parse_vscode_native_hooks(
         return Err(GitAiError::PresetError(format!(
             "Skipping VS Code hook for non-Copilot session (tool_name: {}).",
             tool_name,
+        )));
+    }
+
+    if let Some(event) =
+        crate::tool_usage::native_invocation(data, "github-copilot", &session_id, trace_id)
+    {
+        return Ok(vec![event]);
+    }
+    if hook_event_name == "PostToolUseFailure" {
+        return Err(GitAiError::PresetError(
+            "Skipping failed edit checkpoint".into(),
+        ));
+    }
+    // Utility telemetry must pass source validation without creating checkpoints.
+    if !is_supported_vscode_edit_tool_name(tool_name) {
+        return Err(GitAiError::PresetError(format!(
+            "Skipping VS Code hook for unsupported tool_name '{}' (non-edit tool).",
+            tool_name
         )));
     }
 
@@ -208,7 +218,7 @@ pub(super) fn parse_vscode_native_hooks(
     );
     let extracted_paths = path_resolution.paths;
 
-    let mut metadata = HashMap::new();
+    let mut metadata = crate::tool_usage::hook_metadata(data);
     if let Some(ref path) = transcript_path {
         metadata.insert("transcript_path".to_string(), path.clone());
         metadata.insert("chat_session_path".to_string(), path.clone());
@@ -1170,7 +1180,7 @@ mod tests {
     }
 
     #[test]
-    fn test_copilot_native_uses_transcript_model_when_present() {
+    fn test_copilot_native_defers_transcript_model_to_daemon() {
         let temp_dir = tempfile::tempdir().unwrap();
         let copilot_dir = temp_dir
             .path()
@@ -1207,7 +1217,20 @@ mod tests {
             .unwrap();
         match &events[0] {
             ParsedHookEvent::PostFileEdit(e) => {
-                assert_eq!(e.context.agent_id.model, "copilot/claude-sonnet-4");
+                assert_eq!(e.context.agent_id.model, "unknown");
+                let source = e
+                    .stream_source
+                    .as_ref()
+                    .expect("daemon needs the transcript source");
+                assert_eq!(source.path, transcript_path);
+                assert!(matches!(
+                    source.format,
+                    StreamFormat::CopilotEventStreamJsonl
+                ));
+                assert_eq!(
+                    e.context.metadata.get("transcript_path"),
+                    Some(&transcript_path.to_string_lossy().to_string())
+                );
             }
             other => panic!("Expected PostFileEdit, got {:?}", other),
         }

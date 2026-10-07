@@ -13,6 +13,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 
+mod native_hook;
+pub(crate) use native_hook::{hook_metadata, native_invocation};
+
 pub const TOOL_USAGE_SCHEMA_VERSION: &str = "tool_usage/v1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -122,7 +125,12 @@ pub fn event_from_checkpoint(
     lines_deleted: u32,
 ) -> ToolUsageEvent {
     let metadata = &request.metadata;
-    let kind = if metadata_value(metadata, &["mcp_server", "mcp_tool", "mcp_name"]).is_some() {
+    let kind = if metadata_value(
+        metadata,
+        &["mcp_server", "mcpServer", "mcp_tool", "mcpTool", "mcp_name"],
+    )
+    .is_some()
+    {
         ToolUsageKind::Mcp
     } else if metadata_value(metadata, &["skill_name", "skill"]).is_some() {
         ToolUsageKind::Skill
@@ -151,7 +159,11 @@ pub fn event_from_checkpoint(
         occurred_at: occurred_at_now(),
         kind,
         event_type: event_type.to_string(),
-        status: ToolUsageStatus::Success,
+        status: match metadata_value(metadata, &["status"]).as_deref() {
+            Some("failed") => ToolUsageStatus::Failed,
+            Some("unknown") => ToolUsageStatus::Unknown,
+            _ => ToolUsageStatus::Success,
+        },
         agent_type: Some(agent_id.tool.clone()),
         agent_id: Some(agent_id.id.clone()),
         model: (!agent_id.model.is_empty()).then(|| agent_id.model.clone()),
@@ -172,7 +184,7 @@ pub fn event_from_checkpoint(
         lines_deleted: Some(lines_deleted),
         input_hash: metadata_value(metadata, &["input_hash", "inputHash"]),
         output_hash: metadata_value(metadata, &["output_hash", "outputHash"]),
-        error_code: None,
+        error_code: metadata_value(metadata, &["error_code", "errorCode"]),
     }
 }
 
@@ -192,7 +204,7 @@ pub fn record_checkpoint(
     lines_deleted: u32,
 ) {
     let Some(agent_id) = agent_id else { return };
-    if !enabled() {
+    if !enabled() || !is_completed_checkpoint(request) {
         return;
     }
     record(event_from_checkpoint(
@@ -203,6 +215,22 @@ pub fn record_checkpoint(
     ));
 }
 
+fn is_completed_checkpoint(request: &CheckpointRequest) -> bool {
+    request.checkpoint_kind.is_ai()
+        && request.path_role != crate::daemon::checkpoint::PreparedPathRole::WillEdit
+        && request
+            .metadata
+            .get("tool_usage_already_recorded")
+            .map(String::as_str)
+            != Some("true")
+}
+
+fn is_human_modification(request: &CheckpointRequest, added: u32, deleted: u32) -> bool {
+    request.checkpoint_kind == crate::authorship::working_log::CheckpointKind::KnownHuman
+        && request.path_role != crate::daemon::checkpoint::PreparedPathRole::WillEdit
+        && (added > 0 || deleted > 0)
+}
+
 /// Record a conservative human follow-up signal. Detailed accepted/rejected
 /// classification requires later Git history and is left to server aggregation.
 pub fn record_human_outcome(
@@ -211,7 +239,7 @@ pub fn record_human_outcome(
     lines_added: u32,
     lines_deleted: u32,
 ) {
-    if !enabled() {
+    if !enabled() || !is_human_modification(request, lines_added, lines_deleted) {
         return;
     }
     let metadata = &request.metadata;
@@ -231,7 +259,11 @@ pub fn record_human_outcome(
             .map(|source| source.session_id.clone())
             .or_else(|| metadata_value(metadata, &["session_id", "sessionId"])),
         trace_id: Some(request.trace_id.clone()),
-        task_id: metadata_value(metadata, &["task_id", "taskId"]),
+        task_id: metadata_value(metadata, &["task_id", "taskId"]).or_else(|| {
+            std::env::var("GIT_AI_TASK_ID")
+                .ok()
+                .filter(|v| !v.trim().is_empty())
+        }),
         tool_use_id: metadata_value(metadata, &["tool_use_id", "toolUseId"]),
         skill_name: None,
         skill_version: None,
@@ -258,6 +290,86 @@ mod tests {
     use crate::authorship::working_log::CheckpointKind;
     use crate::commands::checkpoint_agent::orchestrator::CheckpointRequest;
     use crate::daemon::checkpoint::PreparedPathRole;
+
+    pub(super) struct TelemetryFlag(Option<String>);
+
+    impl TelemetryFlag {
+        pub(super) fn set(value: &str) -> Self {
+            let old = std::env::var("GIT_AI_TOOL_USAGE_TELEMETRY").ok();
+            unsafe {
+                std::env::set_var("GIT_AI_TOOL_USAGE_TELEMETRY", value);
+            }
+            Self(old)
+        }
+    }
+
+    impl Drop for TelemetryFlag {
+        fn drop(&mut self) {
+            unsafe {
+                match &self.0 {
+                    Some(value) => std::env::set_var("GIT_AI_TOOL_USAGE_TELEMETRY", value),
+                    None => std::env::remove_var("GIT_AI_TOOL_USAGE_TELEMETRY"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn excludes_pre_edit_baselines_and_untracked_changes() {
+        let mut request = CheckpointRequest {
+            trace_id: "trace".into(),
+            checkpoint_kind: CheckpointKind::Human,
+            agent_id: None,
+            files: vec![],
+            path_role: PreparedPathRole::WillEdit,
+            stream_source: None,
+            metadata: HashMap::new(),
+        };
+        assert!(!is_completed_checkpoint(&request));
+        assert!(!is_human_modification(&request, 5, 1));
+        request.path_role = PreparedPathRole::Edited;
+        assert!(!is_human_modification(&request, 5, 1));
+        request.checkpoint_kind = CheckpointKind::AiAgent;
+        assert!(is_completed_checkpoint(&request));
+        request
+            .metadata
+            .insert("tool_usage_already_recorded".into(), "true".into());
+        assert!(!is_completed_checkpoint(&request));
+        request.metadata.clear();
+        assert!(!is_human_modification(&request, 5, 1));
+        request.checkpoint_kind = CheckpointKind::KnownHuman;
+        assert!(!is_completed_checkpoint(&request));
+        assert!(!is_human_modification(&request, 0, 0));
+        assert!(is_human_modification(&request, 0, 1));
+    }
+
+    #[test]
+    fn camel_case_mcp_metadata_is_classified_consistently() {
+        let request = CheckpointRequest {
+            trace_id: "trace".into(),
+            checkpoint_kind: CheckpointKind::AiAgent,
+            agent_id: None,
+            files: vec![],
+            path_role: PreparedPathRole::Edited,
+            stream_source: None,
+            metadata: HashMap::from([
+                ("mcpServer".into(), "review".into()),
+                ("mcpTool".into(), "search".into()),
+            ]),
+        };
+        let event = event_from_checkpoint(
+            &request,
+            &AgentId {
+                tool: "codex".into(),
+                id: "a".into(),
+                model: "".into(),
+            },
+            0,
+            0,
+        );
+        assert_eq!(event.kind, ToolUsageKind::Mcp);
+        assert_eq!(event.mcp_server.as_deref(), Some("review"));
+    }
 
     #[test]
     fn digest_does_not_return_plaintext() {
