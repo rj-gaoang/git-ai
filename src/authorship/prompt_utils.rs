@@ -11,6 +11,21 @@ const MAX_TRANSCRIPT_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_TRANSCRIPT_MESSAGES: usize = 256;
 const MAX_PROMPT_TEXT_BYTES: usize = 256 * 1024;
 
+/// Copilot records asynchronous terminal output as `user.message` too. This
+/// exact provider envelope is generated context, not a human prompt. Keep this
+/// guard at upload time as well, since existing notes predate parser fixes.
+pub(crate) fn is_generated_user_text(text: &str) -> bool {
+    static TERMINAL_NOTIFICATION: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    TERMINAL_NOTIFICATION
+        .get_or_init(|| {
+            regex::Regex::new(
+                r"\A\[Terminal [0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12} notification: command completed(?: with exit code -?\d+)?\. The terminal has been cleaned up\.\]\r?\nTerminal output:\r?\n",
+            )
+            .expect("valid terminal notification pattern")
+        })
+        .is_match(text)
+}
+
 pub enum PromptUpdateResult {
     Updated(AiTranscript, String),
     Unchanged,
@@ -272,7 +287,9 @@ fn message_from_object(object: &serde_json::Map<String, Value>) -> Option<Messag
         .map(ToString::to_string);
 
     match normalized_role {
-        "user" | "human" | "user_message" => Some(Message::user(text, timestamp)),
+        "user" | "human" | "user_message" if !is_generated_user_text(&text) => {
+            Some(Message::user(text, timestamp))
+        }
         "assistant" | "ai" | "agent_message" => Some(Message::assistant(text, timestamp)),
         "thinking" => Some(Message::thinking(text, timestamp)),
         "plan" => Some(Message::plan(text, timestamp)),
@@ -284,6 +301,26 @@ fn message_from_object(object: &serde_json::Map<String, Value>) -> Option<Messag
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn copilot_terminal_notifications_are_not_human_prompts() {
+        let notification = "[Terminal 092bcfda-91c1-49f2-962c-e69922f24cc2 notification: command completed. The terminal has been cleaned up.]\nTerminal output:\nAI generated text";
+        let failed =
+            notification.replace("command completed.", "command completed with exit code 1.");
+        let value = serde_json::json!({"events": [
+            {"type": "user.message", "data": {"content": notification}},
+            {"type": "user.message", "data": {"content": failed}},
+            {"type": "user.message", "data": {"content": "请修复终端错误"}},
+            {"type": "user.message", "data": {"content": format!("解释这段日志：\n{notification}")}}
+        ]});
+        let mut transcript = AiTranscript::new();
+        collect_messages_from_value_for_tool(&value, &mut transcript, Some("github-copilot"));
+        assert_eq!(transcript.messages().len(), 2);
+        assert_eq!(transcript.messages()[0].text().unwrap(), "请修复终端错误");
+        assert!(!is_generated_user_text(
+            "[Terminal test notification: command completed.]"
+        ));
+    }
 
     #[test]
     fn nested_output_roles_and_mixed_tool_blocks_are_not_user_input() {

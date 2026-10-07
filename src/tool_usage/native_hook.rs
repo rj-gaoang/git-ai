@@ -457,30 +457,61 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join(".github/agents/speckit.plan.agent.md");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, "---\nname: speckit.plan\n---\n制定计划").unwrap();
+        let agent_body = format!(
+            "---\nname: speckit.plan\n---\n{}\n配置正文结尾",
+            "制定计划：拆解需求、检查依赖并制定验证步骤。\n".repeat(200)
+        );
+        std::fs::write(&path, &agent_body).unwrap();
         for provider in ["claude", "codex", "github-copilot", "github-copilot-cli"] {
             let mut data = hook(provider, "Agent", "PostToolUse");
             data["cwd"] = json!(root.path());
             data["toolInput"]["subagent_type"] = json!("speckit.plan");
             let event = parse(provider, data);
             assert_eq!(event.agent_name.as_deref(), Some("speckit.plan"));
-            assert!(event.definition_content.unwrap().contains("制定计划"));
+            assert_eq!(
+                event.definition_content.as_deref(),
+                Some(agent_body.as_str())
+            );
+            assert_ne!(event.content_truncated, Some(true));
             let mut data = hook(provider, "Read", "PostToolUse");
             data["cwd"] = json!(root.path());
             data["toolInput"] = json!({"file_path": path});
             let event = parse(provider, data);
             assert_eq!(event.agent_name.as_deref(), Some("speckit.plan"));
             assert_eq!(event.event_type, "agent.configuration_loaded");
+            assert_eq!(
+                event.definition_content.as_deref(),
+                Some(agent_body.as_str())
+            );
         }
         let skill = root.path().join(".agents/skills/review/SKILL.md");
         std::fs::create_dir_all(skill.parent().unwrap()).unwrap();
-        std::fs::write(&skill, "审查规则").unwrap();
+        let skill_body = format!(
+            "{}\n技能正文结尾",
+            "审查规则：逐条检查业务逻辑、边界条件与回归验证。\n".repeat(200)
+        );
+        std::fs::write(&skill, &skill_body).unwrap();
         let mut data = hook("codex", "exec_command", "PostToolUse");
         data["cwd"] = json!(root.path());
         data["toolInput"] = json!({"cmd": format!("cat '{}'", skill.display())});
         let event = parse("codex", data);
         assert_eq!(event.skill_name.as_deref(), Some("review"));
-        assert_eq!(event.definition_content.as_deref(), Some("审查规则"));
+        assert_eq!(
+            event.definition_content.as_deref(),
+            Some(skill_body.as_str())
+        );
+        assert_ne!(event.content_truncated, Some(true));
+        for provider in ["claude", "codex", "github-copilot", "github-copilot-cli"] {
+            let mut data = hook(provider, "Read", "PostToolUse");
+            data["cwd"] = json!(root.path());
+            data["toolInput"] = json!({"file_path": skill});
+            let event = parse(provider, data);
+            assert_eq!(event.event_type, "skill.configuration_loaded");
+            assert_eq!(
+                event.definition_content.as_deref(),
+                Some(skill_body.as_str())
+            );
+        }
 
         let command = root.path().join(".claude/commands/speckit.implement.md");
         std::fs::create_dir_all(command.parent().unwrap()).unwrap();

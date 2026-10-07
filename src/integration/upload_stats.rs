@@ -2125,7 +2125,11 @@ fn extract_prompt_text(messages: &[Message]) -> Option<String> {
     let prompt_parts = messages
         .iter()
         .filter_map(|message| match message {
-            Message::User { text, .. } => trim_non_empty(text),
+            Message::User { text, .. }
+                if !crate::authorship::prompt_utils::is_generated_user_text(text) =>
+            {
+                trim_non_empty(text)
+            }
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -2140,7 +2144,10 @@ fn extract_prompt_text(messages: &[Message]) -> Option<String> {
 fn serialize_prompt_messages(messages: &[Message]) -> Value {
     let user_messages = messages
         .iter()
-        .filter(|message| matches!(message, Message::User { .. }))
+        .filter(|message| {
+            matches!(message, Message::User { text, .. }
+            if !crate::authorship::prompt_utils::is_generated_user_text(text))
+        })
         .cloned()
         .collect::<Vec<_>>();
     serde_json::to_value(user_messages).unwrap_or_else(|_| Value::Array(Vec::new()))
@@ -2795,6 +2802,20 @@ mod tests {
             derive_project_name(None, Path::new("/tmp/my-app")),
             "my-app"
         );
+    }
+
+    #[test]
+    fn old_note_terminal_notifications_are_filtered_from_both_upload_fields() {
+        let messages = vec![
+            Message::user("继续执行".into(), None),
+            Message::user("[Terminal 092bcfda-91c1-49f2-962c-e69922f24cc2 notification: command completed. The terminal has been cleaned up.]\nTerminal output:\nAI output".into(), None),
+            Message::assistant("AI reply".into(), None),
+        ];
+        assert_eq!(extract_prompt_text(&messages).as_deref(), Some("继续执行"));
+        let serialized = serialize_prompt_messages(&messages);
+        assert_eq!(serialized.as_array().unwrap().len(), 1);
+        assert_eq!(serialized[0]["text"], "继续执行");
+        assert!(!serialized.to_string().contains("AI output"));
     }
 
     #[test]

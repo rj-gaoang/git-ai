@@ -4041,3 +4041,14 @@ checkpoint、metrics 和其他 RFC3339 时间链路不变。
 - 遥测仍默认关闭，配置读取事件不建立文件归因 checkpoint，原代码归因和 metrics 保持既有路径。旧事件没有正文无法补全；旧 Agent 事件缺具体名称不作为新 Agent 展示。
 - 验证：task test 的 tool_usage（13 passed / 1 ignored）、prompt_utils（9 passed）、build_prompt_stats（3 passed），cargo fmt 与 diff 检查；后端用户过滤、会话关联和上传回执三项 main 测试通过。前端真实 Chrome headless 渲染源码组件，验证三类正文、类型筛选、600px 布局、快速切换提交响应隔离、失败与无提示词状态。UI 测试使用测试数据，不能替代生产上传及页面验收。
 - 发布顺序：已有 v1 表先执行 ai-cr 的 `docs/git_ai_tool_usage_v2_migration.sql`，部署前后端，再升级采集客户端；本条记录不代表已经发布。
+
+### 2026-10-07：排除 Copilot 自动终端通知并澄清配置正文
+
+- 实际核查 `return-exchange-ai-repo` 18:51:51（`1279448a58dbde53fab0c1905a678463376f3f74`）和 `ai-cr-manage-web` 18:53:58（`ecdf5e7ad0248f3424bc82df707d0e4c9a20d5d1`）：Copilot 源 transcript 将后台终端完成通知及整段输出写为 `user.message`；数据库两条消息列表分别混入 19 / 10 条自动通知。污染在源消息角色分类边界发生，角色过滤不足以识别人类输入；不是服务端把 assistant 改成 user，也没有证据指向自动更新或代码归因逻辑。
+- `src/authorship/prompt_utils.rs` 精确匹配 Copilot 的 UUID 终端通知包头，在解析时剔除；`src/integration/upload_stats.rs` 同时过滤 promptText 和 messages，覆盖旧 note 的重新上传。保留正常人工输入和带解释前缀的用户引用日志，不按正文是否像 AI 作答进行猜测。后端 `UserPromptContent` 增加同样的接收/历史结构化读取防线。既有归因条目及代码增删行不改。
+- “已读取配置文件”只证明读操作，不证明具体 Agent 或 Skill 被执行。正文 61 / 71 字的旧 `ui_test_` 事件是人工插入的短样例，不能作为截断证据；样例中的 `speckit.code-review` 实际属于 Agent。前端增加读操作说明、样例标记、正文字符数。
+- 扩展原生 hook 回归，以长配置正文断言全量快照及末尾，覆盖 Claude、Codex、Copilot IDE/CLI。前端真实源码组件验证长正文末尾、滚动及模拟记录说明。
+- 验证：task test 默认 daemon 模式，prompt_utils 10 项、build_prompt_stats 3 项、native_hook 6 项通过（1 项远程写入测试默认忽略），两项终端通知回归通过；cargo fmt / git diff 检查通过。后端 UserPromptContentTest 和前端 Chrome headless 组件测试通过；前后端构建成功。
+- 历史修复脚本在 ai-cr `scripts/repair_gitai_prompt_incident_20261007.py`，默认只读计划；显式执行时先备份、锁定目标行，清理两条提示词，使用真实 `speckit.plan` Agent 和 `ces-testpoint-testing` Skill 全文纠正 UI 样例，再做入库全文回读验证；不会把模拟调用冒充实际执行。数据库跳板令牌 19:39:02 过期，当前尚未执行历史清理。
+- 事件采集开关仍默认关闭。出问题记录客户端版本为 2.2.51；本轮修复在 2.2.52 源码上完成，不能仅凭安装版本相同认定已含修复。前后端构建和本地组件验证不等于平台部署或线上 UI 验收。
+- 已使用 `task dev` 安装本轮 debug 构建（2.2.52 debug）；target/debug、bin、launcher 三处 SHA256 一致，并更新 hooks。没有修改全局遥测开关。Chrome 在运行但缺失 ChatGPT 扩展及 native host，无法连接既有登录窗口；平台页面 HTTP 200 可达，尚未触发本轮部署。
