@@ -7,6 +7,112 @@ use crate::daemon::checkpoint::PreparedPathRole;
 use serde_json::Value;
 use std::path::PathBuf;
 
+const CONTENT_LIMIT: usize = 64 * 1024;
+
+fn configuration_identity(path: &std::path::Path) -> Option<(ToolUsageKind, String)> {
+    let normalized = path.to_string_lossy().replace('\\', "/");
+    let file = path.file_name()?.to_str()?;
+    if file == "SKILL.md" {
+        return Some((
+            ToolUsageKind::Skill,
+            path.parent()?.file_name()?.to_str()?.into(),
+        ));
+    }
+    let name = file
+        .strip_suffix(".agent.md")
+        .or_else(|| file.strip_suffix(".prompt.md"))
+        .or_else(|| {
+            ((normalized.contains("/.claude/agents/") || normalized.contains("/.claude/commands/"))
+                && file.ends_with(".md"))
+            .then(|| file.trim_end_matches(".md"))
+        })?;
+    Some((ToolUsageKind::Agent, name.into()))
+}
+
+fn loaded_definition_is_read(tool: &str) -> bool {
+    matches!(
+        tool,
+        "Read"
+            | "read"
+            | "read_file"
+            | "readFile"
+            | "Bash"
+            | "bash"
+            | "exec_command"
+            | "functions.exec_command"
+            | "run_in_terminal"
+    )
+}
+
+fn configuration_read(
+    tool: &str,
+    input: &Value,
+    cwd: &str,
+) -> Option<(ToolUsageKind, String, PathBuf)> {
+    if !loaded_definition_is_read(tool) {
+        return None;
+    }
+    let path = string(input, &["file_path", "filePath", "path"]).or_else(|| {
+        let command = string(input, &["command", "cmd"])?;
+        // Only a single explicit read. Do not interpret scripts or execute commands.
+        let argument = command
+            .strip_prefix("cat ")
+            .or_else(|| command.strip_prefix("Get-Content "))?;
+        let argument = argument.trim().trim_matches(['\'', '"']);
+        (!argument.contains([';', '|', '&', '\n', '$', '`']) && !argument.starts_with('-'))
+            .then(|| argument.to_owned())
+    })?;
+    let path = PathBuf::from(cwd).join(path);
+    let (kind, name) = configuration_identity(&path)?;
+    Some((kind, name, path))
+}
+
+fn resolve_definition(cwd: &str, kind: ToolUsageKind, name: &str) -> Option<PathBuf> {
+    if name.is_empty() || name.contains(['/', '\\', ':']) || name == ".." {
+        return None;
+    }
+    let relative = match kind {
+        ToolUsageKind::Agent => vec![
+            format!(".github/agents/{name}.agent.md"),
+            format!(".github/prompts/{name}.prompt.md"),
+            format!(".claude/agents/{name}.md"),
+            format!(".claude/commands/{name}.md"),
+        ],
+        ToolUsageKind::Skill => vec![
+            format!(".agents/skills/{name}/SKILL.md"),
+            format!(".github/skills/{name}/SKILL.md"),
+            format!(".claude/skills/{name}/SKILL.md"),
+            format!(".codex/skills/{name}/SKILL.md"),
+        ],
+        _ => return None,
+    };
+    let mut candidates: Vec<_> = relative
+        .iter()
+        .map(|p| PathBuf::from(cwd).join(p))
+        .collect();
+    if kind == ToolUsageKind::Skill {
+        if let Some(home) = std::env::var_os("CODEX_HOME") {
+            candidates.push(
+                PathBuf::from(home)
+                    .join("skills")
+                    .join(name)
+                    .join("SKILL.md"),
+            );
+        }
+        if let Some(home) = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")) {
+            for folder in [".codex/skills", ".claude/skills", ".agents/skills"] {
+                candidates.push(
+                    PathBuf::from(&home)
+                        .join(folder)
+                        .join(name)
+                        .join("SKILL.md"),
+                );
+            }
+        }
+    }
+    candidates.into_iter().find(|p| p.is_file())
+}
+
 fn string(data: &Value, keys: &[&str]) -> Option<String> {
     keys.iter()
         .find_map(|key| data.get(*key).and_then(Value::as_str))
@@ -23,6 +129,7 @@ pub(crate) fn hook_metadata(data: &Value) -> HashMap<String, String> {
     let mut metadata = HashMap::new();
     for (key, aliases) in [
         ("task_id", &["task_id", "taskId"][..]),
+        ("agent_name", &["agent_name", "agentName"][..]),
         ("skill_name", &["skill_name", "skillName"][..]),
         ("skill_version", &["skill_version", "skillVersion"][..]),
         ("mcp_server", &["mcp_server", "mcpServer"][..]),
@@ -62,10 +169,27 @@ pub(crate) fn native_invocation(
     }
     let tool = string(data, &["tool_name", "toolName"])?;
     let input = data.get("tool_input").or_else(|| data.get("toolInput"));
+    let cwd = string(data, &["cwd", "workspace_folder", "workspaceFolder"])?;
+    let loaded_definition = input.and_then(|v| configuration_read(&tool, v, &cwd));
     // Only named invocations are intercepted. Ordinary edit/bash hooks retain
     // their original checkpoint and attribution behavior.
     let mut metadata = hook_metadata(data);
-    let kind = if let Some(name) = tool.strip_prefix("mcp__") {
+    let kind = if let Some((kind, name, path)) = &loaded_definition {
+        metadata.insert(
+            if *kind == ToolUsageKind::Agent {
+                "agent_name"
+            } else {
+                "skill_name"
+            }
+            .into(),
+            name.clone(),
+        );
+        metadata.insert(
+            "definition_path".into(),
+            path.to_string_lossy().into_owned(),
+        );
+        *kind
+    } else if let Some(name) = tool.strip_prefix("mcp__") {
         let (server, method) = name.split_once("__")?;
         if server.is_empty() || method.is_empty() {
             return None;
@@ -81,17 +205,94 @@ pub(crate) fn native_invocation(
             .get("skill_name")
             .cloned()
             .or_else(|| input.and_then(|v| string(v, &["skill", "name", "skill_name"])))?;
-        metadata.insert("skill_name".into(), name);
-        ToolUsageKind::Skill
+        // Claude exposes command configurations through its Skill tool too.
+        // Use the actual configuration file to distinguish an Agent from a Skill.
+        if resolve_definition(&cwd, ToolUsageKind::Skill, &name).is_none()
+            && resolve_definition(&cwd, ToolUsageKind::Agent, &name).is_some()
+        {
+            metadata.remove("skill_name");
+            metadata.insert("agent_name".into(), name);
+            ToolUsageKind::Agent
+        } else {
+            metadata.insert("skill_name".into(), name);
+            ToolUsageKind::Skill
+        }
     } else if matches!(
         tool.as_str(),
         "Agent" | "Task" | "agent" | "task" | "spawn_agent"
     ) {
+        if let Some(name) = metadata.get("agent_name").cloned().or_else(|| {
+            input.and_then(|v| {
+                string(
+                    v,
+                    &[
+                        "agent_name",
+                        "agentName",
+                        "subagent_type",
+                        "agent",
+                        "agent_type",
+                        "task_name",
+                    ],
+                )
+            })
+        }) {
+            metadata.insert("agent_name".into(), name);
+        }
         ToolUsageKind::Agent
     } else {
         return None;
     };
-    let cwd = string(data, &["cwd", "workspace_folder", "workspaceFolder"])?;
+    if let Some(input) = input {
+        let content = serde_json::to_string(input).ok()?;
+        if content.len() <= CONTENT_LIMIT {
+            metadata.insert("input_content".into(), content);
+        } else {
+            // Never upload malformed/truncated JSON or an unbounded payload.
+            metadata.insert("content_truncated".into(), "true".into());
+        }
+    }
+    let name = metadata
+        .get("agent_name")
+        .or_else(|| metadata.get("skill_name"))
+        .cloned();
+    let path = loaded_definition
+        .map(|(_, _, path)| path)
+        .or_else(|| {
+            input
+                .and_then(|v| string(v, &["definition_path", "agent_path", "skill_path"]))
+                .map(|p| PathBuf::from(&cwd).join(p))
+                .filter(|p| configuration_identity(p).is_some())
+        })
+        .or_else(|| {
+            name.as_deref()
+                .and_then(|name| resolve_definition(&cwd, kind, name))
+        });
+    if let Some(path) = path {
+        metadata.insert(
+            "definition_path".into(),
+            path.to_string_lossy().into_owned(),
+        );
+        if let Ok(file) = std::fs::File::open(&path) {
+            use std::io::Read;
+            let mut bytes = Vec::new();
+            if file
+                .take((CONTENT_LIMIT + 1) as u64)
+                .read_to_end(&mut bytes)
+                .is_ok()
+            {
+                let truncated = bytes.len() > CONTENT_LIMIT
+                    || metadata
+                        .get("content_truncated")
+                        .is_some_and(|v| v == "true");
+                bytes.truncate(CONTENT_LIMIT);
+                metadata.insert(
+                    "definition_content".into(),
+                    String::from_utf8_lossy(&bytes).into_owned(),
+                );
+                metadata.insert("content_truncated".into(), truncated.to_string());
+            }
+        }
+    }
     if let Some(id) = string(
         data,
         &["tool_use_id", "toolUseId", "tool_call_id", "toolCallId"],
@@ -132,6 +333,13 @@ pub(crate) fn native_invocation(
     };
     let mut event = event_from_checkpoint(&request, &agent, 0, 0);
     event.kind = kind;
+    if loaded_definition_is_read(&tool) {
+        event.event_type = match kind {
+            ToolUsageKind::Agent => "agent.configuration_loaded",
+            _ => "skill.configuration_loaded",
+        }
+        .into();
+    }
     // Absence of a file checkpoint is not evidence of zero artifacts.
     event.artifact_count = None;
     event.lines_added = None;
@@ -217,12 +425,9 @@ mod tests {
                 assert_eq!(event.artifact_count, None);
                 assert_eq!(event.lines_added, None);
                 let serialized = serde_json::to_string(&event).unwrap();
-                for secret in [
-                    "private-input",
-                    "private-args",
-                    "private-output",
-                    "transcript_path",
-                ] {
+                assert!(serialized.contains("private-input"));
+                assert!(serialized.contains("private-args"));
+                for secret in ["private-output", "transcript_path"] {
                     assert!(!serialized.contains(secret));
                 }
                 if kind == ToolUsageKind::Skill {
@@ -240,9 +445,56 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
-    fn native_hooks_capture_all_providers_without_files_or_payloads() {
+    fn native_hooks_capture_inputs_but_never_ai_outputs() {
         let _flag = TelemetryFlag::set("true");
         assert_eq!(matrix().len(), 12);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn concrete_agent_and_skill_definitions_are_snapshotted() {
+        let _flag = TelemetryFlag::set("true");
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join(".github/agents/speckit.plan.agent.md");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "---\nname: speckit.plan\n---\n制定计划").unwrap();
+        for provider in ["claude", "codex", "github-copilot", "github-copilot-cli"] {
+            let mut data = hook(provider, "Agent", "PostToolUse");
+            data["cwd"] = json!(root.path());
+            data["toolInput"]["subagent_type"] = json!("speckit.plan");
+            let event = parse(provider, data);
+            assert_eq!(event.agent_name.as_deref(), Some("speckit.plan"));
+            assert!(event.definition_content.unwrap().contains("制定计划"));
+            let mut data = hook(provider, "Read", "PostToolUse");
+            data["cwd"] = json!(root.path());
+            data["toolInput"] = json!({"file_path": path});
+            let event = parse(provider, data);
+            assert_eq!(event.agent_name.as_deref(), Some("speckit.plan"));
+            assert_eq!(event.event_type, "agent.configuration_loaded");
+        }
+        let skill = root.path().join(".agents/skills/review/SKILL.md");
+        std::fs::create_dir_all(skill.parent().unwrap()).unwrap();
+        std::fs::write(&skill, "审查规则").unwrap();
+        let mut data = hook("codex", "exec_command", "PostToolUse");
+        data["cwd"] = json!(root.path());
+        data["toolInput"] = json!({"cmd": format!("cat '{}'", skill.display())});
+        let event = parse("codex", data);
+        assert_eq!(event.skill_name.as_deref(), Some("review"));
+        assert_eq!(event.definition_content.as_deref(), Some("审查规则"));
+
+        let command = root.path().join(".claude/commands/speckit.implement.md");
+        std::fs::create_dir_all(command.parent().unwrap()).unwrap();
+        std::fs::write(command, "执行编码规则").unwrap();
+        let mut data = hook("claude", "Skill", "PostToolUse");
+        data["cwd"] = json!(root.path());
+        data["toolInput"] =
+            json!({"skill": "speckit.implement", "args": "x".repeat(CONTENT_LIMIT)});
+        let event = parse("claude", data);
+        assert_eq!(event.kind, ToolUsageKind::Agent);
+        assert_eq!(event.agent_name.as_deref(), Some("speckit.implement"));
+        assert_eq!(event.definition_content.as_deref(), Some("执行编码规则"));
+        assert_eq!(event.content_truncated, Some(true));
+        assert!(event.input_content.is_none());
     }
 
     #[test]

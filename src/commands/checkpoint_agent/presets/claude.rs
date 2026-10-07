@@ -64,7 +64,10 @@ impl AgentPreset for ClaudePreset {
 
         let mut invocation =
             crate::tool_usage::native_invocation(&data, "claude", &session_id, trace_id);
-        if invocation.is_some() && parse::file_paths_from_tool_input(&data, cwd).is_empty() {
+        if invocation.as_ref().is_some_and(|invocation| matches!(invocation,
+            ParsedHookEvent::ToolInvocation { event, .. } if event.event_type.ends_with("configuration_loaded")))
+            || (invocation.is_some() && parse::file_paths_from_tool_input(&data, cwd).is_empty())
+        {
             return Ok(vec![invocation.take().unwrap()]);
         }
 

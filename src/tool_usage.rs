@@ -1,8 +1,8 @@
 //! Feature-gated Skill/Agent/MCP usage telemetry.
 //!
 //! The event is deliberately independent from the legacy metrics schema.  It
-//! contains invocation metadata and aggregate artifact information, never the
-//! prompt, transcript, MCP arguments, or tool output.
+//! contains explicit configuration snapshots and invocation inputs when enabled.
+//! AI replies and tool outputs are never collected as user prompts.
 
 use crate::authorship::working_log::AgentId;
 use crate::commands::checkpoint_agent::orchestrator::CheckpointRequest;
@@ -16,7 +16,7 @@ use std::collections::HashMap;
 mod native_hook;
 pub(crate) use native_hook::{hook_metadata, native_invocation};
 
-pub const TOOL_USAGE_SCHEMA_VERSION: &str = "tool_usage/v1";
+pub const TOOL_USAGE_SCHEMA_VERSION: &str = "tool_usage/v2";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -49,6 +49,16 @@ pub struct ToolUsageEvent {
     pub agent_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub definition_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub definition_content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_truncated: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -167,6 +177,11 @@ pub fn event_from_checkpoint(
         agent_type: Some(agent_id.tool.clone()),
         agent_id: Some(agent_id.id.clone()),
         model: (!agent_id.model.is_empty()).then(|| agent_id.model.clone()),
+        agent_name: metadata_value(metadata, &["agent_name"]),
+        definition_path: metadata_value(metadata, &["definition_path"]),
+        definition_content: metadata_value(metadata, &["definition_content"]),
+        input_content: metadata_value(metadata, &["input_content"]),
+        content_truncated: metadata.get("content_truncated").map(|v| v == "true"),
         session_id,
         trace_id: Some(request.trace_id.clone()),
         task_id,
@@ -216,7 +231,20 @@ pub fn record_checkpoint(
 }
 
 fn is_completed_checkpoint(request: &CheckpointRequest) -> bool {
-    request.checkpoint_kind.is_ai()
+    metadata_value(
+        &request.metadata,
+        &[
+            "agent_name",
+            "skill_name",
+            "skill",
+            "mcp_server",
+            "mcpServer",
+            "mcp_tool",
+            "mcpTool",
+        ],
+    )
+    .is_some()
+        && request.checkpoint_kind.is_ai()
         && request.path_role != crate::daemon::checkpoint::PreparedPathRole::WillEdit
         && request
             .metadata
@@ -253,6 +281,11 @@ pub fn record_human_outcome(
         agent_type: Some("human".to_string()),
         agent_id: None,
         model: None,
+        agent_name: None,
+        definition_path: None,
+        definition_content: None,
+        input_content: None,
+        content_truncated: None,
         session_id: request
             .stream_source
             .as_ref()
@@ -330,6 +363,10 @@ mod tests {
         request.path_role = PreparedPathRole::Edited;
         assert!(!is_human_modification(&request, 5, 1));
         request.checkpoint_kind = CheckpointKind::AiAgent;
+        assert!(!is_completed_checkpoint(&request));
+        request
+            .metadata
+            .insert("agent_name".into(), "speckit.plan".into());
         assert!(is_completed_checkpoint(&request));
         request
             .metadata

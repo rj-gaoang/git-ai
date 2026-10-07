@@ -164,6 +164,28 @@ fn collect_messages_from_value_for_tool(
             }
         }
         Value::Object(object) => {
+            // Message bodies are opaque: never discover a nested user role in
+            // assistant output, a tool result, or an unrecognised message.
+            if object.get("role").is_some()
+                || object
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .is_some_and(|kind| {
+                        matches!(
+                            kind,
+                            "tool_result" | "tool_use" | "function_call_output" | "function_call"
+                        )
+                    })
+            {
+                if let Some(message) = message_from_object_for_tool(object, tool)
+                    && message
+                        .text()
+                        .is_none_or(|text| text.len() <= MAX_PROMPT_TEXT_BYTES)
+                {
+                    transcript.add_message(message);
+                }
+                return;
+            }
             if let Some(message) = message_from_object_for_tool(object, tool) {
                 if message
                     .text()
@@ -174,7 +196,25 @@ fn collect_messages_from_value_for_tool(
                 return;
             }
 
-            for nested in object.values() {
+            if is_claude_tool_result(object)
+                || object
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .is_some_and(|kind| {
+                        matches!(
+                            kind.split('.').next().unwrap_or(kind),
+                            "user" | "assistant" | "human" | "ai"
+                        )
+                    })
+            {
+                return;
+            }
+
+            // Traverse transcript containers, not arbitrary response payloads.
+            for key in ["messages", "events", "requests", "payload", "message"] {
+                let Some(nested) = object.get(key) else {
+                    continue;
+                };
                 collect_messages_from_value_for_tool(nested, transcript, tool);
             }
         }
@@ -184,11 +224,10 @@ fn collect_messages_from_value_for_tool(
 
 fn message_from_object_for_tool(
     object: &serde_json::Map<String, Value>,
-    tool: Option<&str>,
+    _tool: Option<&str>,
 ) -> Option<Message> {
-    if tool == Some("claude") && is_claude_tool_result(object) {
-        return None;
-    }
+    // A user message may contain text and a tool result together. Extract only
+    // its text blocks rather than discarding the genuine user text as well.
     message_from_object(object)
 }
 
@@ -218,7 +257,12 @@ fn message_from_object(object: &serde_json::Map<String, Value>) -> Option<Messag
         .or_else(|| object.get("content"))
         .or_else(|| object.get("message"))
         .or_else(|| object.get("data"))
-        .and_then(text_from_value)?;
+        .and_then(|value| {
+            text_from_value(
+                value,
+                matches!(normalized_role, "user" | "human" | "user_message"),
+            )
+        })?;
 
     let timestamp = object
         .get("timestamp")
@@ -228,8 +272,8 @@ fn message_from_object(object: &serde_json::Map<String, Value>) -> Option<Messag
         .map(ToString::to_string);
 
     match normalized_role {
-        "user" | "human" => Some(Message::user(text, timestamp)),
-        "assistant" | "ai" => Some(Message::assistant(text, timestamp)),
+        "user" | "human" | "user_message" => Some(Message::user(text, timestamp)),
+        "assistant" | "ai" | "agent_message" => Some(Message::assistant(text, timestamp)),
         "thinking" => Some(Message::thinking(text, timestamp)),
         "plan" => Some(Message::plan(text, timestamp)),
         _ => None,
@@ -240,6 +284,38 @@ fn message_from_object(object: &serde_json::Map<String, Value>) -> Option<Messag
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn nested_output_roles_and_mixed_tool_blocks_are_not_user_input() {
+        let value = serde_json::json!({"messages": [
+            {"role": "assistant", "content": {"role": "user", "text": "AI output"}},
+            {"type": "user", "message": {"role": "user", "content": [
+                {"type": "tool_result", "content": {"role": "user", "text": "tool output"}}
+            ]}},
+            {"role": "user", "content": [
+                {"type": "input_text", "text": "real input"},
+                {"role": "assistant", "text": "nested AI reply"},
+                {"type": "output_text", "text": "output block"},
+                {"type": "tool_result", "content": "tool output"}
+            ]},
+            {"type": "user", "message": {"role": "user", "content": [
+                {"type": "text", "text": "Claude input"},
+                {"type": "tool_result", "content": "tool output"}
+            ]}},
+            {"type": "event_msg", "payload": {"type": "user_message", "message": "Codex input"}}
+        ]});
+        let mut transcript = AiTranscript::new();
+        collect_messages_from_value_for_tool(&value, &mut transcript, Some("claude"));
+        let users: Vec<_> = transcript
+            .messages()
+            .iter()
+            .filter_map(|m| match m {
+                Message::User { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(users, ["real input", "Claude input", "Codex input"]);
+    }
 
     #[test]
     fn transcript_from_jsonl_parses_copilot_event_stream_messages() {
@@ -432,21 +508,40 @@ mod tests {
     }
 }
 
-fn text_from_value(value: &Value) -> Option<String> {
+fn text_from_value(value: &Value, user_only: bool) -> Option<String> {
     match value {
         Value::String(text) => Some(text.clone()),
         Value::Array(items) => {
             let parts = items
                 .iter()
-                .filter_map(text_from_value)
+                .filter_map(|value| text_from_value(value, user_only))
                 .filter(|part| !part.trim().is_empty())
                 .collect::<Vec<_>>();
             (!parts.is_empty()).then(|| parts.join("\n"))
         }
-        Value::Object(object) => object
-            .get("text")
-            .or_else(|| object.get("content"))
-            .and_then(text_from_value),
+        Value::Object(object) => {
+            if user_only
+                && object
+                    .get("role")
+                    .and_then(Value::as_str)
+                    .is_some_and(|role| !matches!(role, "user" | "human"))
+            {
+                return None;
+            }
+            if object
+                .get("type")
+                .and_then(Value::as_str)
+                .is_some_and(|kind| {
+                    !matches!(kind, "text" | "input_text") && (user_only || kind != "output_text")
+                })
+            {
+                return None;
+            }
+            object
+                .get("text")
+                .or_else(|| object.get("content"))
+                .and_then(|value| text_from_value(value, user_only))
+        }
         _ => None,
     }
 }

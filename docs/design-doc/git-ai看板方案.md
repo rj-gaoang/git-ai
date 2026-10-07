@@ -4030,3 +4030,14 @@ checkpoint、metrics 和其他 RFC3339 时间链路不变。
 **页面验证现状：** `https://aicr.ruijie.com.cn/git-ai-tool-usage` 的 HTTP 入口可达。独立网关签名后的 overview 请求返回 HTTP 200、业务 code 401、无 data，需要 ai-cr 登录会话；captchaImage 返回 captchaEnabled=true。本轮浏览器工具未连接可用浏览器，无法使用已有登录会话完成页面渲染、筛选和四个 GET 查询验收。此限制属于 ai-cr 看板认证和浏览器连接，不是开发平台不可达或部署无权限。不能将页面入口 HTTP 200 当成页面展示成功。
 
 **能力边界与版本说明：** 默认仍关闭，需显式启用。只有提供相应原生 hook 字段的客户端版本可识别具体调用，读取 SKILL.md 本身不等于 Skill 调用证据；当前安装器未默认订阅 PostToolUseFailure，解析支持不等于自动覆盖所有失败事件。无文件 checkpoint 的产物数量、增删行保持缺省，避免伪造零产物；人工修改信号不等于已采纳或拒绝，深入的采纳率分析尚未实现。时间字符串仍由 UTC 生成，但生产 Java 默认时区与数据库时区是否一致尚未验证，不应声称时间趋势已验收。本轮修复只影响使用新客户端后的事件，不回写历史数据。
+
+### 2026-10-07：具体 Agent 配置、调用正文与用户提示词详情（v2）
+
+- 根因：v1 将普通 AI checkpoint 当作 Agent，混淆来源工具与具体配置，且不保存配置正文和调用参数；通用 transcript 解析器递归进入 assistant/tool_result 内嵌消息时，也可能将其中的 user 标签误认作人工输入。上传 helpers 原已过滤 Message::User，污染发生在消息解析及服务端接收/历史展示边界，未涉及自动更新或代码归因计算。
+- `src/tool_usage.rs` 升级 `tool_usage/v2`，增加 `agent_name`、`definition_path`、`definition_content`、`input_content`、`content_truncated`。Copilot/Codex/Claude 仅为 provider；Agent 名称来自明确配置元数据，如 `speckit.plan`。普通 AI 编辑不再自动算 Agent。
+- `src/tool_usage/native_hook.rs` 从原生 Agent/Skill/MCP 事件采集实际输入，并读取匹配的 Agent/Skill 配置正文，每项限制 64 KiB。明确 Read/read_file/readFile、单个 cat/Get-Content 配置读取另记为 `agent.configuration_loaded` / `skill.configuration_loaded`，展示“读取配置”，不能据此宣称执行成功。无 SKILL.md 而存在 Agent 配置的 Claude command 按 Agent 分类。不上传工具返回正文。覆盖现有 hook 和明确读取事件，不能假定所有来源版本提供完整证据。
+- `src/authorship/prompt_utils.rs` 尊重消息边界与角色，仅提取用户文本；Claude 混合文本与 tool_result 的 user 事件保留文本、排除工具结果；支持 Codex user_message。`src/integration/upload_stats.rs` 加入与遥测一致的 sessionId。后端以相同规则过滤新入库及结构化历史提示词；旧纯文本无法可靠分离已混入的 AI 回复，不自动改写历史。
+- 原入口 **AI编程统计 → 统计看板**（`/gitai/dashboard`）的“提示词与工具”抽屉并排展示人工提示词与 Agent/Skill/MCP 内容，窄屏上下排列；区分来源工具、配置读取、执行调用，提供类型筛选、分页、错误重试。关联范围是提交提示词对应的完整会话，并非该次提交独占调用；无可识别会话时返回空，避免展示无关事件。
+- 遥测仍默认关闭，配置读取事件不建立文件归因 checkpoint，原代码归因和 metrics 保持既有路径。旧事件没有正文无法补全；旧 Agent 事件缺具体名称不作为新 Agent 展示。
+- 验证：task test 的 tool_usage（13 passed / 1 ignored）、prompt_utils（9 passed）、build_prompt_stats（3 passed），cargo fmt 与 diff 检查；后端用户过滤、会话关联和上传回执三项 main 测试通过。前端真实 Chrome headless 渲染源码组件，验证三类正文、类型筛选、600px 布局、快速切换提交响应隔离、失败与无提示词状态。UI 测试使用测试数据，不能替代生产上传及页面验收。
+- 发布顺序：已有 v1 表先执行 ai-cr 的 `docs/git_ai_tool_usage_v2_migration.sql`，部署前后端，再升级采集客户端；本条记录不代表已经发布。

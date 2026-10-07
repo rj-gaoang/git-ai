@@ -2104,6 +2104,7 @@ fn build_prompt_stats(prompts: &BTreeMap<String, PromptRecord>) -> Vec<Value> {
             );
             json!({
                 "promptHash": prompt_hash,
+                "sessionId": crate::authorship::authorship_log_serialization::generate_session_id(&prompt.agent_id.id, &prompt.agent_id.tool),
                 "tool": tool,
                 "model": model_or_unknown(model),
                 "humanAuthor": prompt.human_author.as_ref().and_then(|value| trim_non_empty(value)),
@@ -2830,6 +2831,14 @@ mod tests {
         let prompt = &payload[0];
 
         assert_eq!(prompt["promptHash"], "prompt-123");
+        assert_eq!(
+            prompt["sessionId"],
+            crate::authorship::authorship_log_serialization::generate_session_id(
+                "session-1",
+                " github copilot "
+            )
+        );
+        assert!(!prompt["messages"].to_string().contains("assistant reply"));
         assert_eq!(prompt["tool"], "github copilot");
         assert_eq!(prompt["model"], "gpt-5.4");
         assert_eq!(prompt["humanAuthor"], "dev@example.com");
