@@ -1,0 +1,48 @@
+Cargo.toml
+  s_364b9432e76389::t_6dbdbeb17a8662 3
+docs/design-doc/git-ai看板方案.md
+  s_364b9432e76389::t_2f408b1e694eea 4069-4075
+---
+{
+  "schema_version": "authorship/3.1.0",
+  "git_ai_version": "development:2.2.53",
+  "base_commit_sha": "3bae89ea4446d668e21b60ac49ac218d7ef59de4",
+  "prompts": {
+    "s_364b9432e76389::t_2f408b1e694eea": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a11083-3810-7302-94f2-175bc01ce98e",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "gaoang <gaoang@ruijie.com.cn>",
+      "messages": [],
+      "total_additions": 8,
+      "total_deletions": 1,
+      "accepted_lines": 4075,
+      "overriden_lines": 0
+    },
+    "s_364b9432e76389::t_6dbdbeb17a8662": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a11083-3810-7302-94f2-175bc01ce98e",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "gaoang <gaoang@ruijie.com.cn>",
+      "messages": [],
+      "total_additions": 8,
+      "total_deletions": 1,
+      "accepted_lines": 89,
+      "overriden_lines": 0
+    }
+  },
+  "sessions": {
+    "s_364b9432e76389": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a11083-3810-7302-94f2-175bc01ce98e",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "gaoang <gaoang@ruijie.com.cn>"
+    }
+  }
+}
