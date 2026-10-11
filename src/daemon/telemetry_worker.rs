@@ -186,6 +186,14 @@ impl DaemonTelemetryWorkerHandle {
         }
     }
 
+    /// Called from the transcript worker's spawn_blocking task. Unlike the
+    /// best-effort log path, do not discard events before persisting the cursor.
+    pub fn submit_tool_usage_blocking(&self, events: Vec<ToolUsageEvent>) {
+        self.buffer
+            .blocking_lock()
+            .ingest_envelopes(vec![TelemetryEnvelope::ToolUsage { events }]);
+    }
+
     /// Submit CAS records synchronously (best-effort, non-blocking).
     ///
     /// Used by daemon-owned post-commit paths that cannot route through the

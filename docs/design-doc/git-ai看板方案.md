@@ -4052,3 +4052,17 @@ checkpoint、metrics 和其他 RFC3339 时间链路不变。
 - 历史修复脚本在 ai-cr `scripts/repair_gitai_prompt_incident_20261007.py`，默认只读计划；显式执行时先备份、锁定目标行，清理两条提示词，使用真实 `speckit.plan` Agent 和 `ces-testpoint-testing` Skill 全文纠正 UI 样例，再做入库全文回读验证；不会把模拟调用冒充实际执行。数据库跳板令牌 19:39:02 过期，当前尚未执行历史清理。
 - 事件采集开关仍默认关闭。出问题记录客户端版本为 2.2.51；本轮修复在 2.2.52 源码上完成，不能仅凭安装版本相同认定已含修复。前后端构建和本地组件验证不等于平台部署或线上 UI 验收。
 - 已使用 `task dev` 安装本轮 debug 构建（2.2.52 debug）；target/debug、bin、launcher 三处 SHA256 一致，并更新 hooks。没有修改全局遥测开关。Chrome 在运行但缺失 ChatGPT 扩展及 native host，无法连接既有登录窗口；平台页面 HTTP 200 可达，尚未触发本轮部署。
+
+### 2026-10-12：真实 Agent 漏采及相对路径正文修复
+
+**真实根因：** 20261011-test 测试会话的 Codex rollout 保存了 `collaboration.spawn_agent` 的请求及对应 `function_call_output`，但该调用没有 PostToolUse hook，原采集路径无法看到执行。另一个真实 `exec_command` 在 ai-cr-manage-service 目录读取相对 Agent 路径，Codex hook 将工具归一化为 Bash，仅保留 command，cwd 却是外层 workspace 根；直接拼接路径因而读取失败。不是配置文件过短，也不是服务端拒绝正文。
+
+- `src/tool_usage/codex_stream.rs` 增加独立增量调用流，按 call_id 配对 spawn_agent/followup_task 的请求和返回。游标持久保存 offset、工作目录、外部 session、未返回请求，支持半行 JSONL、分批读取和进程重启。spawn 成功回执只代表 `agent.started`，失败为 `agent.failed`；桥接器返回空字符串的 followup 记为 `agent.invoked`、status=unknown，不能由此认定任务完成。
+- Codex 工具流与原 transcript metrics 使用不同 watermark，既不重复发送 raw metrics，也不创建文件归因 checkpoint。仅启用遥测时每 5 秒检查变化并发现本轮 daemon 启动后有变化的会话，无需等待文件编辑 hook。既有统计 offset 初始化新游标时最多回看 512 KiB，恢复未返回请求而不发送已完成历史调用；没有统计游标的旧会话按本轮启动时间过滤调用，避免启用后重放历史。
+- `native_hook.rs` 读取 input 和顶层 workdir/cwd/working_directory 等字段。对 Codex 丢失 workdir 的配置读取，`codex_context.rs` 只读当前 rollout 尾部 512 KiB：常规调用按 call_id 对应；桥接生成的 exec-* ID 无法对上外层 call_id，故仅在最近 5 分钟、当前 turn 最新 exec 中识别 exact command 与唯一静态 workdir。不执行 JavaScript、不解释动态目录、不跨仓库搜索配置；存在多个目录、缺失目录或不支持的表达式时不猜测。
+- 配置读取事件返回恢复后的真实调用目录供仓库过滤使用。已成功读取的配置只在本地索引 session+kind+name 到文件路径，不保存正文；执行时据真实读取证据解析配置，防止同名 Agent/Skill 互相覆盖。全局 Skill 文件位置不作为调用仓库目录。
+- 正文保存保留首尾空白和末尾换行，不再按标识符 metadata 的 trim 规则处理。调用输入与配置正文仍分别限制 64 KiB，不上传工具返回正文。rollout 中加密的 Agent message 不作为可读提示词发送，标记 content_truncated；不解密、不补造正文。文件归因、commit、notes、用户提示词过滤保持原路径，feature flag 仍默认关闭。
+
+**验证：** task test 默认 daemon 模式，工具采集 24 项通过、1 项生产写入测试默认 ignored；原 watermark 42 项、stream worker 18 项、Codex reader 11 项通过，共 95 项。cargo fmt --all -- --check、cargo check -q --lib、git diff --check 通过。真实相对路径读到 Agent 正文 2049 / 1364 字、Skill 正文 16693 字，与原文件逐字一致，收到生产接口 HTTP 200、code=200、rejected=0；MCP node_repl.js 真实调用同样已收到完整成功回执。真实 followup 执行自动采集并上传为 agent.invoked，具体配置 gitai_prompt_audit、正文 1364 字，event_id=`evt_fba1b9ebf292b07ed43c52cc9c76695fb40338ff53fc44dd1eab22f48f32f9e1`、session_id=`s_364b9432e76389`，accepted=1；原样重复上传回执 accepted=0、duplicate=1、rejected=0。真实配置读取与 Agent 执行分开验收，不直接插库造记录。证据在本机 `%TEMP%/gitai-agent-path-fix-20261011/verification-report.json` 和 upload-observations.jsonl。
+
+**运行范围：** 使用 task dev 安装本机 2.2.53 debug 修复构建；版本字符串本身不足以区分相同版本的源码改动。该修改在 git-ai 客户端，不需要新 SQL 或 ai-cr 服务端迁移。尚未发布正式客户端版本，也不将接口成功当成线上 UI 已验收。旧漏事件不自动回写；遥测仍为现有尽力上传，网络故障的持久重试队列不属于本次修复。验证结束后已恢复测试前配置，遥测关闭，停止本地转发器。

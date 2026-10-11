@@ -195,6 +195,17 @@ impl Agent for CodexAgent {
         watermark: Box<dyn WatermarkStrategy>,
         session_id: &str,
     ) -> Result<StreamBatch, StreamError> {
+        if let Some(cursor) = watermark
+            .as_any()
+            .downcast_ref::<crate::tool_usage::codex_stream::InvocationCursor>()
+        {
+            return crate::tool_usage::codex_stream::read_batch(
+                path,
+                cursor.clone(),
+                session_id,
+                self.batch_size,
+            );
+        }
         // Downcast watermark to ByteOffsetWatermark
         let byte_watermark = watermark
             .as_any()
@@ -328,7 +339,7 @@ impl Agent for CodexAgent {
 
     fn streams(&self) -> Vec<StreamDescriptor> {
         let format = StreamFormat::CodexJsonl;
-        vec![StreamDescriptor {
+        let mut streams = vec![StreamDescriptor {
             stream_kind: "transcript",
             format,
             watermark_type: format.watermark_type(),
@@ -336,7 +347,19 @@ impl Agent for CodexAgent {
             shared: false,
             watermark_type_resolver: None,
             format_resolver: None,
-        }]
+        }];
+        if crate::tool_usage::enabled() {
+            streams.push(StreamDescriptor {
+                stream_kind: "tool_usage",
+                format,
+                watermark_type: crate::streams::watermark::WatermarkType::CodexToolUsage,
+                path_resolver: PathResolverKind::Identity,
+                shared: false,
+                watermark_type_resolver: None,
+                format_resolver: None,
+            });
+        }
+        streams
     }
 }
 

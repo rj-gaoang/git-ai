@@ -233,6 +233,7 @@ struct StreamWorker {
     checkpoint_rx: tokio::sync::mpsc::UnboundedReceiver<CheckpointNotification>,
     sweep_rx: tokio::sync::mpsc::UnboundedReceiver<SweepTrigger>,
     sweep_trigger_gate: SweepTriggerGate,
+    tool_usage_started_at: std::time::SystemTime,
 }
 
 impl StreamWorker {
@@ -261,6 +262,7 @@ impl StreamWorker {
             checkpoint_rx,
             sweep_rx,
             sweep_trigger_gate,
+            tool_usage_started_at: std::time::SystemTime::now(),
         }
     }
 
@@ -272,6 +274,7 @@ impl StreamWorker {
 
         let mut processing_ticker = interval(PROCESSING_TICK_INTERVAL);
         let mut sweep_ticker = interval(Duration::from_secs(30 * 60)); // NEW: 30 minutes
+        let mut tool_usage_ticker = interval(Duration::from_secs(5));
 
         // Skip the first immediate tick
         processing_ticker.tick().await;
@@ -289,6 +292,11 @@ impl StreamWorker {
 
         loop {
             tokio::select! {
+                _ = tool_usage_ticker.tick() => {
+                    if crate::tool_usage::enabled() {
+                        self.enqueue_changed_tool_usage();
+                    }
+                }
                 _ = self.shutdown_notify.notified() => {
                     tracing::info!("transcript worker received shutdown signal");
                     self.drain_immediate_tasks().await;
@@ -328,6 +336,76 @@ impl StreamWorker {
         }
 
         tracing::info!("transcript worker shutdown complete");
+    }
+
+    fn enqueue_changed_tool_usage(&mut self) {
+        // Collaboration-only sessions may never trigger a file checkpoint.
+        // Discover only rollouts changed since this daemon started, independently
+        // of the optional metrics sweep and without replaying older sessions.
+        use crate::streams::agent::Agent;
+        let agent = crate::streams::agents::CodexAgent::new();
+        if let Some(descriptor) = agent
+            .streams()
+            .into_iter()
+            .find(|s| s.stream_kind == "tool_usage")
+            && let Ok(sessions) = agent.discover_sessions()
+        {
+            for session in sessions {
+                if !std::fs::metadata(&session.stream_path)
+                    .and_then(|m| m.modified())
+                    .is_ok_and(|mtime| mtime >= self.tool_usage_started_at)
+                {
+                    continue;
+                }
+                let path =
+                    std::fs::canonicalize(&session.stream_path).unwrap_or(session.stream_path);
+                let cwd = agent.infer_cwd(&path);
+                let _ = self.ensure_stream_session(
+                    &session.session_id,
+                    "codex",
+                    &descriptor,
+                    &path,
+                    Some(&session.external_session_id),
+                    session.external_parent_session_id.as_deref(),
+                    cwd.as_deref(),
+                );
+            }
+        }
+        let Ok(streams) = self.streams_db.all_streams() else {
+            return;
+        };
+        for stream in streams
+            .into_iter()
+            .filter(|s| s.tool == "codex" && s.stream_kind == "tool_usage")
+        {
+            let path = PathBuf::from(&stream.stream_path);
+            let key = (path.clone(), stream.stream_kind.clone());
+            if self.in_flight.contains(&key)
+                || self
+                    .priority_queue
+                    .iter()
+                    .chain(self.delayed_tasks.iter())
+                    .any(|task| {
+                        task.canonical_path == path && task.stream_kind == stream.stream_kind
+                    })
+                || !std::fs::metadata(&path)
+                    .is_ok_and(|meta| meta.len() != stream.last_known_size as u64)
+            {
+                continue;
+            }
+            self.priority_queue.push(ProcessingTask {
+                priority: Priority::Immediate,
+                session_id: stream.session_id,
+                stream_kind: stream.stream_kind,
+                tool: stream.tool,
+                trace_id: None,
+                tool_use_id: None,
+                canonical_path: path,
+                repo_work_dir: stream.repo_work_dir.map(PathBuf::from),
+                retry_count: 0,
+                next_retry_at: None,
+            });
+        }
     }
 
     /// Run a sweep across all agents to discover new/behind sessions.
@@ -753,7 +831,51 @@ impl StreamWorker {
         }
 
         let effective_wm_type = stream.effective_watermark_type(stream_path);
-        let initial_watermark = effective_wm_type.create_initial_watermark();
+        let initial_watermark: Box<dyn WatermarkStrategy> = if tool == "codex"
+            && stream.stream_kind == "tool_usage"
+            && let Some(existing) =
+                self.streams_db
+                    .get_stream(session_id, "transcript", &path_str)?
+        {
+            // Enabling collection does not replay unrelated historical sessions.
+            // Existing metrics progress is used only to seed this new cursor;
+            // afterwards the two streams advance independently.
+            Box::new(
+                crate::tool_usage::codex_stream::InvocationCursor::at_offset(
+                    stream_path,
+                    existing.watermark_value.parse().unwrap_or(0),
+                    repo_work_dir
+                        .map(|p| p.to_string_lossy().into_owned())
+                        .or(existing.repo_work_dir)
+                        .or_else(|| {
+                            crate::streams::agent::Agent::infer_cwd(
+                                &crate::streams::agents::CodexAgent::new(),
+                                stream_path,
+                            )
+                            .map(|p| p.to_string_lossy().into_owned())
+                        })
+                        .unwrap_or_default(),
+                    external_session_id.unwrap_or("").into(),
+                )
+                .with_start_time(
+                    self.tool_usage_started_at
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs() as i64,
+                ),
+            )
+        } else if tool == "codex" && stream.stream_kind == "tool_usage" {
+            Box::new(
+                crate::tool_usage::codex_stream::InvocationCursor::starting_at(
+                    self.tool_usage_started_at
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs() as i64,
+                ),
+            )
+        } else {
+            effective_wm_type.create_initial_watermark()
+        };
 
         // For shared streams, external_session_id/parent/repo_work_dir are meaningless
         // since the resource serves all sessions — use empty/None to avoid stale first-caller data
@@ -878,6 +1000,9 @@ impl StreamWorker {
             .ok_or_else(|| StreamError::Fatal {
                 message: format!("stream not found: {}", task.session_id),
             })?;
+        if task.stream_kind == "tool_usage" && !crate::tool_usage::enabled() {
+            return Ok(());
+        }
 
         let agent =
             crate::streams::agent::get_agent(&task.tool).ok_or_else(|| StreamError::Fatal {
@@ -971,6 +1096,29 @@ impl StreamWorker {
             }
 
             let batch_count = batch.events.len();
+
+            // Independent cursor: the metrics stream may already have consumed
+            // calls that never produce native hooks. Never upload these twice
+            // as raw metrics or synthesize file attribution checkpoints.
+            if task.tool == "codex" && task.stream_kind == "tool_usage" {
+                if crate::tool_usage::enabled() {
+                    let events = batch
+                        .events
+                        .into_iter()
+                        .filter_map(|value| serde_json::from_value(value).ok())
+                        .collect();
+                    telemetry.submit_tool_usage_blocking(events);
+                }
+                total_events += batch_count;
+                db.update_watermark(
+                    &stream.session_id,
+                    &task.stream_kind,
+                    &stream.stream_path,
+                    batch.new_watermark.as_ref(),
+                )?;
+                current_watermark = batch.new_watermark;
+                continue;
+            }
 
             let is_otel_stream = task.stream_kind == "otel_traces";
             let metric_events: Vec<MetricEvent> = batch

@@ -9,6 +9,80 @@ use std::path::PathBuf;
 
 const CONTENT_LIMIT: usize = 64 * 1024;
 
+fn definition_index_path(session: &str, kind: ToolUsageKind, name: &str) -> Option<PathBuf> {
+    Some(
+        crate::config::internal_dir_path()?
+            .join("tool-usage-definitions")
+            .join(digest(session).trim_start_matches("sha256:"))
+            .join(format!(
+                "{}.json",
+                digest(&serde_json::to_string(&(kind, name)).ok()?).trim_start_matches("sha256:")
+            )),
+    )
+}
+
+// Remember only a successfully read configuration path. This bridges native
+// read hooks and Codex collaboration calls without scanning unrelated repos.
+pub(super) fn remember_definition(event: &ToolUsageEvent) {
+    if event.status != ToolUsageStatus::Success
+        || !matches!(
+            event.event_type.as_str(),
+            "agent.configuration_loaded" | "skill.configuration_loaded"
+        )
+        || event.definition_content.is_none()
+    {
+        return;
+    }
+    let (Some(session), Some(name), Some(path)) = (
+        event.session_id.as_deref(),
+        event.agent_name.as_deref().or(event.skill_name.as_deref()),
+        event.definition_path.as_deref(),
+    ) else {
+        return;
+    };
+    let Some(index) = definition_index_path(session, event.kind, name) else {
+        return;
+    };
+    if let Some(parent) = index.parent()
+        && std::fs::create_dir_all(parent).is_ok()
+        && let Ok(bytes) = serde_json::to_vec(&path)
+    {
+        let _ = crate::mdm::utils::write_atomic(&index, &bytes);
+    }
+}
+
+fn previously_read_definition(session: &str, kind: ToolUsageKind, name: &str) -> Option<PathBuf> {
+    let name = name.rsplit('/').next()?;
+    for candidate in [name.to_owned(), name.replace('_', "-")] {
+        let index = definition_index_path(session, kind, &candidate)?;
+        let mut bytes = Vec::new();
+        use std::io::Read;
+        std::fs::File::open(index)
+            .ok()
+            .and_then(|file| file.take(16 * 1024).read_to_end(&mut bytes).ok());
+        let Ok(path) = serde_json::from_slice::<String>(&bytes) else {
+            continue;
+        };
+        let path = PathBuf::from(path);
+        if path.is_file() && configuration_identity(&path) == Some((kind, candidate)) {
+            return Some(path);
+        }
+    }
+    None
+}
+
+fn input_cwd(input: Option<&Value>, cwd: &str) -> PathBuf {
+    input
+        .and_then(|v| {
+            string(
+                v,
+                &["workdir", "cwd", "working_directory", "workingDirectory"],
+            )
+        })
+        .map(|dir| PathBuf::from(cwd).join(dir))
+        .unwrap_or_else(|| PathBuf::from(cwd))
+}
+
 fn configuration_identity(path: &std::path::Path) -> Option<(ToolUsageKind, String)> {
     let normalized = path.to_string_lossy().replace('\\', "/");
     let file = path.file_name()?.to_str()?;
@@ -170,7 +244,45 @@ pub(crate) fn native_invocation(
     let tool = string(data, &["tool_name", "toolName"])?;
     let input = data.get("tool_input").or_else(|| data.get("toolInput"));
     let cwd = string(data, &["cwd", "workspace_folder", "workspaceFolder"])?;
-    let loaded_definition = input.and_then(|v| configuration_read(&tool, v, &cwd));
+    let invocation_cwd = string(data, &["workdir", "working_directory", "workingDirectory"])
+        .map(|dir| PathBuf::from(&cwd).join(dir))
+        .unwrap_or_else(|| PathBuf::from(&cwd));
+    let definition_cwd = input_cwd(input, &invocation_cwd.to_string_lossy());
+    let definition_cwd = if agent_type == "codex"
+        && input.is_some_and(|v| {
+            string(
+                v,
+                &["workdir", "cwd", "working_directory", "workingDirectory"],
+            )
+            .is_none()
+        })
+        && string(data, &["workdir", "working_directory", "workingDirectory"]).is_none()
+        && input.is_some_and(|v| {
+            configuration_read(&tool, v, &definition_cwd.to_string_lossy()).is_some()
+        }) {
+        super::codex_context::invocation_workdir(data, session)
+            .map(|dir| PathBuf::from(&cwd).join(dir))
+            .unwrap_or(definition_cwd)
+    } else {
+        definition_cwd
+    };
+    let definition_cwd = definition_cwd.to_string_lossy();
+    let tool = tool.strip_prefix("collaboration.").unwrap_or(&tool);
+    let loaded_definition = input.and_then(|v| configuration_read(tool, v, &definition_cwd));
+    if let Some((_, _, path)) = &loaded_definition
+        && !path.is_file()
+    {
+        crate::diagnostics::append_debug_event(
+            "tool_usage_definition_missing",
+            serde_json::json!({
+                "agentType": agent_type, "tool": tool, "hookCwd": cwd,
+                "definitionCwd": definition_cwd, "definitionPath": path,
+                "hookKeys": data.as_object().map(|v| v.keys().collect::<Vec<_>>()),
+                "inputKeys": input.and_then(Value::as_object).map(|v| v.keys().collect::<Vec<_>>()),
+                "toolUseId": string(data, &["tool_use_id", "toolUseId"]),
+            }),
+        );
+    }
     // Only named invocations are intercepted. Ordinary edit/bash hooks retain
     // their original checkpoint and attribution behavior.
     let mut metadata = hook_metadata(data);
@@ -197,18 +309,15 @@ pub(crate) fn native_invocation(
         metadata.insert("mcp_server".into(), server.into());
         metadata.insert("mcp_tool".into(), method.into());
         ToolUsageKind::Mcp
-    } else if matches!(
-        tool.as_str(),
-        "Skill" | "skill" | "read_skill" | "use_skill"
-    ) {
+    } else if matches!(tool, "Skill" | "skill" | "read_skill" | "use_skill") {
         let name = metadata
             .get("skill_name")
             .cloned()
             .or_else(|| input.and_then(|v| string(v, &["skill", "name", "skill_name"])))?;
         // Claude exposes command configurations through its Skill tool too.
         // Use the actual configuration file to distinguish an Agent from a Skill.
-        if resolve_definition(&cwd, ToolUsageKind::Skill, &name).is_none()
-            && resolve_definition(&cwd, ToolUsageKind::Agent, &name).is_some()
+        if resolve_definition(&definition_cwd, ToolUsageKind::Skill, &name).is_none()
+            && resolve_definition(&definition_cwd, ToolUsageKind::Agent, &name).is_some()
         {
             metadata.remove("skill_name");
             metadata.insert("agent_name".into(), name);
@@ -218,8 +327,8 @@ pub(crate) fn native_invocation(
             ToolUsageKind::Skill
         }
     } else if matches!(
-        tool.as_str(),
-        "Agent" | "Task" | "agent" | "task" | "spawn_agent"
+        tool,
+        "Agent" | "Task" | "agent" | "task" | "spawn_agent" | "followup_task"
     ) {
         if let Some(name) = metadata.get("agent_name").cloned().or_else(|| {
             input.and_then(|v| {
@@ -232,6 +341,7 @@ pub(crate) fn native_invocation(
                         "agent",
                         "agent_type",
                         "task_name",
+                        "target",
                     ],
                 )
             })
@@ -260,14 +370,22 @@ pub(crate) fn native_invocation(
         .or_else(|| {
             input
                 .and_then(|v| string(v, &["definition_path", "agent_path", "skill_path"]))
-                .map(|p| PathBuf::from(&cwd).join(p))
+                .map(|p| PathBuf::from(definition_cwd.as_ref()).join(p))
                 .filter(|p| configuration_identity(p).is_some())
         })
         .or_else(|| {
             name.as_deref()
-                .and_then(|name| resolve_definition(&cwd, kind, name))
+                .and_then(|name| resolve_definition(&definition_cwd, kind, name))
+        })
+        .or_else(|| {
+            name.as_deref().and_then(|name| {
+                previously_read_definition(&generate_session_id(session, agent_type), kind, name)
+            })
         });
     if let Some(path) = path {
+        if let Some((ToolUsageKind::Agent, name)) = configuration_identity(&path) {
+            metadata.insert("agent_name".into(), name);
+        }
         metadata.insert(
             "definition_path".into(),
             path.to_string_lossy().into_owned(),
@@ -333,6 +451,9 @@ pub(crate) fn native_invocation(
     };
     let mut event = event_from_checkpoint(&request, &agent, 0, 0);
     event.kind = kind;
+    if matches!(tool, "spawn_agent" | "followup_task") {
+        event.event_type = "agent.started".into();
+    }
     if loaded_definition_is_read(&tool) {
         event.event_type = match kind {
             ToolUsageKind::Agent => "agent.configuration_loaded",
@@ -361,7 +482,7 @@ pub(crate) fn native_invocation(
     }
     Some(ParsedHookEvent::ToolInvocation {
         event: Box::new(event),
-        cwd: PathBuf::from(cwd),
+        cwd: PathBuf::from(definition_cwd.as_ref()),
     })
 }
 
@@ -452,13 +573,126 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
+    fn relative_configuration_reads_use_invocation_workdir() {
+        let _flag = TelemetryFlag::set("true");
+        let root = tempfile::tempdir().unwrap();
+        for (relative, kind, body) in [
+            (
+                ".github/agents/review.agent.md",
+                ToolUsageKind::Agent,
+                "完整 Agent 正文\n最后一行",
+            ),
+            (
+                ".agents/skills/review/SKILL.md",
+                ToolUsageKind::Skill,
+                "完整 Skill 正文\n最后一行",
+            ),
+        ] {
+            let path = root.path().join("project").join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, body).unwrap();
+            for provider in ["claude", "codex", "github-copilot", "github-copilot-cli"] {
+                for dir in [
+                    "project".into(),
+                    root.path().join("project").to_string_lossy().into_owned(),
+                ] {
+                    for (tool, input) in [
+                        ("Read", json!({"file_path":relative,"workdir":dir})),
+                        (
+                            "exec_command",
+                            json!({"cmd":format!("Get-Content {relative}"),"workdir":dir}),
+                        ),
+                        (
+                            "exec_command",
+                            json!({"command":format!("cat '{relative}'"),"workdir":dir}),
+                        ),
+                    ] {
+                        let mut data = hook(provider, tool, "PostToolUse");
+                        data["cwd"] = json!(root.path());
+                        data["toolInput"] = input;
+                        let event = parse(provider, data.clone());
+                        assert_eq!(event.kind, kind);
+                        assert_eq!(event.definition_content.as_deref(), Some(body));
+                        assert_eq!(event.definition_path.as_deref(), path.to_str());
+                        let ParsedHookEvent::ToolInvocation { cwd, .. } =
+                            native_invocation(&data, provider, "s", "t").unwrap()
+                        else {
+                            panic!()
+                        };
+                        assert_eq!(cwd, root.path().join("project"));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn namespaced_spawn_is_started_not_completed_and_pre_is_ignored() {
+        let _flag = TelemetryFlag::set("true");
+        let mut data = hook("codex", "collaboration.spawn_agent", "PostToolUse");
+        data["toolInput"] = json!({"task_name":"review","message":"review changes"});
+        let event = parse("codex", data.clone());
+        assert_eq!(event.agent_name.as_deref(), Some("review"));
+        assert_eq!(event.event_type, "agent.started");
+        data["hookEventName"] = json!("PreToolUse");
+        assert!(native_invocation(&data, "codex", "s", "t").is_none());
+        data["hookEventName"] = json!("PostToolUseFailure");
+        assert_eq!(parse("codex", data).event_type, "agent.failed");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn same_name_agent_skill_indices_do_not_collide() {
+        let _flag = TelemetryFlag::set("true");
+        let root = tempfile::tempdir().unwrap();
+        let session = format!("cache-test-{}", generate_v4());
+        let internal = generate_session_id(&session, "codex");
+        for (relative, kind, body) in [
+            (
+                ".github/agents/review.agent.md",
+                ToolUsageKind::Agent,
+                "agent正文",
+            ),
+            (
+                ".agents/skills/review/SKILL.md",
+                ToolUsageKind::Skill,
+                "skill正文",
+            ),
+        ] {
+            let path = root.path().join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, body).unwrap();
+            let mut data = hook("codex", "Read", "PostToolUse");
+            data["toolInput"] = json!({"file_path":path});
+            let ParsedHookEvent::ToolInvocation { event, .. } =
+                native_invocation(&data, "codex", &session, "t").unwrap()
+            else {
+                panic!()
+            };
+            remember_definition(&event);
+            assert_eq!(event.kind, kind);
+        }
+        for (kind, body) in [
+            (ToolUsageKind::Agent, "agent正文"),
+            (ToolUsageKind::Skill, "skill正文"),
+        ] {
+            let path = previously_read_definition(&internal, kind, "/root/review").unwrap();
+            assert_eq!(std::fs::read_to_string(path).unwrap(), body);
+            std::fs::remove_file(definition_index_path(&internal, kind, "review").unwrap())
+                .unwrap();
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
     fn concrete_agent_and_skill_definitions_are_snapshotted() {
         let _flag = TelemetryFlag::set("true");
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join(".github/agents/speckit.plan.agent.md");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         let agent_body = format!(
-            "---\nname: speckit.plan\n---\n{}\n配置正文结尾",
+            "\n---\nname: speckit.plan\n---\n{}\n配置正文结尾\n\n",
             "制定计划：拆解需求、检查依赖并制定验证步骤。\n".repeat(200)
         );
         std::fs::write(&path, &agent_body).unwrap();
@@ -487,7 +721,7 @@ mod tests {
         let skill = root.path().join(".agents/skills/review/SKILL.md");
         std::fs::create_dir_all(skill.parent().unwrap()).unwrap();
         let skill_body = format!(
-            "{}\n技能正文结尾",
+            "\n{}\n技能正文结尾\n\n",
             "审查规则：逐条检查业务逻辑、边界条件与回归验证。\n".repeat(200)
         );
         std::fs::write(&skill, &skill_body).unwrap();

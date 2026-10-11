@@ -25,6 +25,7 @@ pub enum WatermarkType {
     Timestamp,
     Hybrid,
     TimestampCursor,
+    CodexToolUsage,
 }
 
 impl fmt::Display for WatermarkType {
@@ -35,6 +36,7 @@ impl fmt::Display for WatermarkType {
             WatermarkType::Timestamp => write!(f, "Timestamp"),
             WatermarkType::Hybrid => write!(f, "Hybrid"),
             WatermarkType::TimestampCursor => write!(f, "TimestampCursor"),
+            WatermarkType::CodexToolUsage => write!(f, "CodexToolUsage"),
         }
     }
 }
@@ -49,6 +51,7 @@ impl FromStr for WatermarkType {
             "Timestamp" => Ok(WatermarkType::Timestamp),
             "Hybrid" => Ok(WatermarkType::Hybrid),
             "TimestampCursor" => Ok(WatermarkType::TimestampCursor),
+            "CodexToolUsage" => Ok(WatermarkType::CodexToolUsage),
             _ => Err(StreamError::Parse {
                 line: 0,
                 message: format!("Invalid watermark type: {}", s),
@@ -66,6 +69,13 @@ impl WatermarkType {
             WatermarkType::Timestamp => Ok(Box::new(TimestampWatermark::from_str(s)?)),
             WatermarkType::Hybrid => Ok(Box::new(HybridWatermark::from_str(s)?)),
             WatermarkType::TimestampCursor => Ok(Box::new(TimestampCursorWatermark::from_str(s)?)),
+            WatermarkType::CodexToolUsage => {
+                serde_json::from_str::<crate::tool_usage::codex_stream::InvocationCursor>(s)
+                    .map(|cursor| Box::new(cursor) as Box<dyn WatermarkStrategy>)
+                    .map_err(|e| StreamError::Fatal {
+                        message: format!("Invalid invocation cursor: {e}"),
+                    })
+            }
         }
     }
 
@@ -78,6 +88,9 @@ impl WatermarkType {
             )),
             WatermarkType::Hybrid => Box::new(HybridWatermark::new(0, 0, None)),
             WatermarkType::TimestampCursor => Box::new(TimestampCursorWatermark::initial()),
+            WatermarkType::CodexToolUsage => {
+                Box::new(crate::tool_usage::codex_stream::InvocationCursor::default())
+            }
         }
     }
 }

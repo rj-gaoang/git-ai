@@ -13,6 +13,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 
+mod codex_context;
+pub(crate) mod codex_stream;
 mod native_hook;
 pub(crate) use native_hook::{hook_metadata, native_invocation};
 
@@ -179,8 +181,10 @@ pub fn event_from_checkpoint(
         model: (!agent_id.model.is_empty()).then(|| agent_id.model.clone()),
         agent_name: metadata_value(metadata, &["agent_name"]),
         definition_path: metadata_value(metadata, &["definition_path"]),
-        definition_content: metadata_value(metadata, &["definition_content"]),
-        input_content: metadata_value(metadata, &["input_content"]),
+        // Content snapshots preserve leading/trailing whitespace and final newline.
+        // Identifier metadata uses trimmed values, but prose is not an identifier.
+        definition_content: metadata.get("definition_content").cloned(),
+        input_content: metadata.get("input_content").cloned(),
         content_truncated: metadata.get("content_truncated").map(|v| v == "true"),
         session_id,
         trace_id: Some(request.trace_id.clone()),
@@ -209,6 +213,7 @@ pub fn record(event: ToolUsageEvent) {
     if !enabled() {
         return;
     }
+    native_hook::remember_definition(&event);
     crate::observability::submit_tool_usage(vec![event]);
 }
 
