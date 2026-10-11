@@ -4066,3 +4066,10 @@ checkpoint、metrics 和其他 RFC3339 时间链路不变。
 **验证：** task test 默认 daemon 模式，工具采集 24 项通过、1 项生产写入测试默认 ignored；原 watermark 42 项、stream worker 18 项、Codex reader 11 项通过，共 95 项。cargo fmt --all -- --check、cargo check -q --lib、git diff --check 通过。真实相对路径读到 Agent 正文 2049 / 1364 字、Skill 正文 16693 字，与原文件逐字一致，收到生产接口 HTTP 200、code=200、rejected=0；MCP node_repl.js 真实调用同样已收到完整成功回执。真实 followup 执行自动采集并上传为 agent.invoked，具体配置 gitai_prompt_audit、正文 1364 字，event_id=`evt_fba1b9ebf292b07ed43c52cc9c76695fb40338ff53fc44dd1eab22f48f32f9e1`、session_id=`s_364b9432e76389`，accepted=1；原样重复上传回执 accepted=0、duplicate=1、rejected=0。真实配置读取与 Agent 执行分开验收，不直接插库造记录。证据在本机 `%TEMP%/gitai-agent-path-fix-20261011/verification-report.json` 和 upload-observations.jsonl。
 
 **运行范围：** 使用 task dev 安装本机 2.2.53 debug 修复构建；版本字符串本身不足以区分相同版本的源码改动。该修改在 git-ai 客户端，不需要新 SQL 或 ai-cr 服务端迁移。尚未发布正式客户端版本，也不将接口成功当成线上 UI 已验收。旧漏事件不自动回写；遥测仍为现有尽力上传，网络故障的持久重试队列不属于本次修复。验证结束后已恢复测试前配置，遥测关闭，停止本地转发器。
+
+### 2026-10-12：2.2.54 正式版发布准备
+
+- 将 Cargo.toml 与 Cargo.lock 中 git-ai 的版本同步为 2.2.54，包含修复提交 `0e6afb9f4`。
+- 按既有发布流程从 `feature_20261006_gaoang` 运行 `Release Build`，参数为 `dry_run=false`、`release_production=true`，目标仓库为 `rj-gaoang/git-ai`、稳定标签为 `v2.2.54`。
+- 发布验收要求：六个平台二进制、两种安装脚本和 SHA256SUMS 齐全，release 不是 draft/prerelease，latest 指向 v2.2.54；下载 Windows x64 资产校验 SHA256，并运行 `--version` 确认实际版本为 2.2.54。
+- `tool_usage_telemetry` 保持 debug/release 默认关闭，不需要新 SQL 或 ai-cr 服务端部署。历史漏采事件不自动补写；线上 UI 验收与客户端发布分别记录。
