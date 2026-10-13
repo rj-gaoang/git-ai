@@ -346,9 +346,37 @@ fn flush_tool_usage(events: &[ToolUsageEvent]) {
         schema_version: crate::tool_usage::TOOL_USAGE_SCHEMA_VERSION.to_string(),
         events: events.to_vec(),
     };
+    let mut kinds = std::collections::BTreeMap::new();
+    for event in events {
+        let kind = match event.kind {
+            crate::tool_usage::ToolUsageKind::Agent => "agent",
+            crate::tool_usage::ToolUsageKind::Skill => "skill",
+            crate::tool_usage::ToolUsageKind::Mcp => "mcp",
+            crate::tool_usage::ToolUsageKind::HumanOutcome => "human_outcome",
+        };
+        *kinds.entry(kind).or_insert(0usize) += 1;
+    }
+    let summary = serde_json::json!({
+        "eventCount": events.len(),
+        "kindCounts": kinds,
+        "sessionIds": events.iter().filter_map(|event| event.session_id.as_deref())
+            .collect::<std::collections::BTreeSet<_>>().into_iter().take(10).collect::<Vec<_>>(),
+        "url": remote_url,
+    });
+    crate::diagnostics::append_debug_event("tool_usage_upload_started", summary.clone());
     // The endpoint is independently versioned.  A missing endpoint on an
     // older server is intentionally treated as a best-effort telemetry miss.
-    let _ = client.upload_tool_usage_at(&remote_url, &batch);
+    match client.upload_tool_usage_at(&remote_url, &batch) {
+        Ok(()) => {
+            crate::diagnostics::append_debug_event("tool_usage_upload_succeeded", summary);
+        }
+        Err(error) => {
+            let mut details = summary;
+            details["error"] = serde_json::json!(error.to_string());
+            crate::diagnostics::append_debug_event("tool_usage_upload_failed", details);
+            tracing::warn!(%error, event_count = events.len(), "tool usage upload failed");
+        }
+    }
 }
 
 fn flush_metrics(events: &[MetricEvent]) {

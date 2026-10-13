@@ -459,6 +459,10 @@ pub fn post_commit_with_final_state(
     // Persist and upload only the user's prompt inputs, not assistant/tool outputs.
     retain_user_prompt_messages(&mut authorship_log.metadata.prompts);
 
+    // The dashboard upload is independent of Git note/CAS storage. Keep a
+    // redacted snapshot before the note policy consumes the prompt messages.
+    let upload_authorship_log = authorship_log_for_stats_upload(&authorship_log, effective_storage);
+
     match effective_storage {
         PromptStorageMode::Local => {
             // Local only: strip all messages from notes (they stay in sqlite only)
@@ -749,13 +753,28 @@ pub fn post_commit_with_final_state(
     crate::integration::upload_stats::maybe_upload_after_commit(
         repo,
         &commit_sha,
-        &authorship_log,
+        &upload_authorship_log,
         stats.as_ref(),
         will_recompute_missing_stats_for_upload,
         &ignore_patterns,
     );
 
     Ok((commit_sha.to_string(), authorship_log))
+}
+
+pub(crate) fn authorship_log_for_stats_upload(
+    authorship_log: &AuthorshipLog,
+    storage: PromptStorageMode,
+) -> AuthorshipLog {
+    let mut upload_log = authorship_log.clone();
+    retain_user_prompt_messages(&mut upload_log.metadata.prompts);
+    if storage == PromptStorageMode::Local {
+        // Explicit local-only and repository exclusions also apply to ai-cr.
+        strip_prompt_messages(&mut upload_log.metadata.prompts);
+    } else {
+        redact_secrets_from_prompts(&mut upload_log.metadata.prompts);
+    }
+    upload_log
 }
 
 pub fn repair_authorship_note_from_archived_working_log(

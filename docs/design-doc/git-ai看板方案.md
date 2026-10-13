@@ -4073,3 +4073,18 @@ checkpoint、metrics 和其他 RFC3339 时间链路不变。
 - 按既有发布流程从 `feature_20261006_gaoang` 运行 `Release Build`，参数为 `dry_run=false`、`release_production=true`，目标仓库为 `rj-gaoang/git-ai`、稳定标签为 `v2.2.54`。
 - 发布验收要求：六个平台二进制、两种安装脚本和 SHA256SUMS 齐全，release 不是 draft/prerelease，latest 指向 v2.2.54；下载 Windows x64 资产校验 SHA256，并运行 `--version` 确认实际版本为 2.2.54。
 - `tool_usage_telemetry` 保持 debug/release 默认关闭，不需要新 SQL 或 ai-cr 服务端部署。历史漏采事件不自动补写；线上 UI 验收与客户端发布分别记录。
+
+### 2026-10-13：默认存储模式下提示词上传丢正文的根因修复
+
+**现场与证据：** 本机 2026-10-12 19:03 至 2026-10-13 00:24 的五次提交 `d9c92bea6`、`c069a0a84`、`e07b5ef50`、`a9a593ed4`、`fde3350bf` 均关联 Copilot 会话 `s_c0cd5b1961ea76`。本地日志显示构建 authorship log 时有 256 条消息，写 note 后为 0，存储策略为 `default`；看板上传摘要 `promptsWithText=0`，接口 HTTP 200、业务 code=200。只读查询 `cr.git_ai_commit_stats` 确认五次提交已入库，关联 `git_ai_prompt_stats` 的 `prompt_text`、`messages_json`、`messages_url` 均为空。最后一次提交已有 161 行 AI 归因及两条提示词元数据；归档 checkpoint 中的消息包含 6 条 user 和 250 条 assistant，说明用户正文在上传之前确实存在。
+
+**代码根因：** `src/authorship/post_commit.rs` 对同一个 AuthorshipLog 先执行 note/CAS 存储策略，再交给 `maybe_upload_after_commit`。`default` 模式无论是否能入 CAS，都会从 note 对象清空 messages，导致后续 ai-cr 上传读取到空正文。丢失发生在客户端存储策略与上传对象共用的边界；不是服务端收到了正文后丢弃，也不是 commit 未进入上传链路。
+
+- 在存储策略清空消息前建立独立的上传副本，保留用户输入并使用现有 secret redaction；同步和后台自动上传均使用该副本。Git note/CAS 继续使用原存储策略，AI/human/unknown 计数不变。显式 `local` 和仓库提示词排除规则继续禁止上传正文。
+- 此修复覆盖当前提交的自动上传；仅从已清空 note 重读的手动上传、无 daemon 的补充上传及失败旧提交重试，仍没有正文恢复机制。本轮不读取最新会话来覆盖旧提交，也不实施历史数据修复。
+- 本机实际配置 `tool_usage_telemetry=true`，不能把此次事件归因于默认开关关闭。该 Copilot 原始 transcript 以终端、文件读取和编辑为主，没有发现 Agent/MCP/Skill 调用或读取 `SKILL.md`、`.agent.md`、`.prompt.md` 的证据；对应 session 在工具事件表为空符合目前证据。其他真实会话已有三类事件入库，不能据此推定此会话同样应有事件，不能补造调用。
+- `src/daemon/telemetry_worker.rs` 原先忽略工具事件上传错误，现增加 `tool_usage_upload_started/succeeded/failed` 日志，记录批次大小、种类数量、最多十个 session ID、目标 URL 及失败原因，不记录正文。成功仍要求既有完整业务回执；保持尽力上传，不增加历史重放或持久重试队列。
+
+**验证：** `task test CARGO_TEST_ARGS=--lib TEST_FILTER=dashboard_prompt_upload` 两项通过：存储策略回归验证 Default/Notes 副本保留脱敏用户正文、Local 禁止正文、assistant 不上传；真实 checkpoint → post_commit → 本地 mock HTTP 回归分别验证同步和后台上传，note 消息为空而请求仍含用户提示词，AI 1 行、unknown 0 行，且上传成功状态落盘。`task test CARGO_TEST_ARGS=--lib TEST_FILTER=tool_usage_full_url` 一项通过，覆盖 HTTP/业务错误、不完整回执和旧路径兼容。`cargo fmt --all -- --check`、`git diff --check` 通过；测试编译覆盖修改，只有已有 daemon dead-code 警告。没有运行全量测试。
+
+**运行与历史边界：** 安装版现场为 2.2.53，本轮修改在 2.2.54 源码中；尚未安装该修复、重启 daemon 或发布版本。数据库只读查询并回滚，没有更新历史行，也没有向真实远程接口发送测试请求。本机运行版更新后才会使用本轮修复，源码修改不代表远程看板历史已恢复。

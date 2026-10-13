@@ -1,0 +1,2 @@
+com.posthog.java:posthog:1.2.0
+io.sentry:sentry:8.53.0

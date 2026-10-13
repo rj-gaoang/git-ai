@@ -2819,6 +2819,185 @@ mod tests {
     }
 
     #[test]
+    fn dashboard_prompt_upload_survives_default_note_message_stripping() {
+        use crate::authorship::post_commit::authorship_log_for_stats_upload;
+        use crate::authorship::secrets::strip_prompt_messages;
+        use crate::config::PromptStorageMode;
+
+        let mut note = AuthorshipLog::new();
+        note.metadata.prompts.insert(
+            "s_session::t_edit".into(),
+            PromptRecord {
+                agent_id: AgentId {
+                    tool: "github-copilot".into(),
+                    id: "session-1".into(),
+                    model: "model-1".into(),
+                },
+                human_author: None,
+                messages: vec![
+                    Message::user("fix the order calculation".into(), None),
+                    Message::assistant("private assistant output".into(), None),
+                    Message::user("secret: sk_live_51HG8vDKj2xPmVnRqT9wYzABC".into(), None),
+                ],
+                total_additions: 161,
+                total_deletions: 0,
+                accepted_lines: 161,
+                overriden_lines: 0,
+                messages_url: None,
+                custom_attributes: None,
+            },
+        );
+        for mode in [PromptStorageMode::Default, PromptStorageMode::Notes] {
+            let upload = authorship_log_for_stats_upload(&note, mode);
+            let mut stored_note = note.clone();
+            strip_prompt_messages(&mut stored_note.metadata.prompts);
+            let payload = build_prompt_stats(&upload.metadata.prompts);
+            assert!(
+                stored_note
+                    .metadata
+                    .prompts
+                    .values()
+                    .all(|p| p.messages.is_empty())
+            );
+            assert_eq!(payload[0]["acceptedLines"], 161);
+            assert!(
+                payload[0]["promptText"]
+                    .as_str()
+                    .unwrap()
+                    .contains("fix the order calculation")
+            );
+            assert_eq!(payload[0]["messages"].as_array().unwrap().len(), 2);
+            let serialized = serde_json::to_string(&payload).unwrap();
+            assert!(!serialized.contains("private assistant output"));
+            assert!(!serialized.contains("sk_live_51HG8vDKj2xPmVnRqT9wYzABC"));
+        }
+        // An explicit local-only setting or excluded repository still withholds text.
+        let local = authorship_log_for_stats_upload(&note, PromptStorageMode::Local);
+        let payload = build_prompt_stats(&local.metadata.prompts);
+        assert!(payload[0]["promptText"].is_null());
+        assert_eq!(payload[0]["messages"], json!([]));
+        assert_eq!(payload[0]["acceptedLines"], 161);
+        assert_eq!(
+            note.metadata
+                .prompts
+                .values()
+                .next()
+                .unwrap()
+                .messages
+                .len(),
+            3
+        );
+    }
+
+    #[test]
+    fn dashboard_prompt_upload_from_real_post_commit_keeps_user_text() {
+        use crate::authorship::transcript::AiTranscript;
+        use crate::authorship::working_log::CheckpointKind;
+
+        let _g = EnvGuard::new();
+        let mut server = mockito::Server::new();
+        let (payload_tx, payload_rx) = mpsc::channel();
+        let mock = server
+            .mock("POST", "/upload")
+            .with_status(200)
+            .with_body_from_request(move |request| {
+                let payload: Value = serde_json::from_slice(request.body().unwrap()).unwrap();
+                payload_tx.send(payload).unwrap();
+                br#"{"code":200}"#.to_vec()
+            })
+            .expect(2)
+            .create();
+
+        for async_mode in [false, true] {
+            unsafe {
+                std::env::set_var(
+                    "GIT_AI_REPORT_REMOTE_URL",
+                    format!("{}/upload", server.url()),
+                );
+                std::env::set_var("GIT_AI_AUTO_UPLOAD_AI_STATS", "true");
+                std::env::set_var(
+                    "GIT_AI_TEST_CONFIG_PATCH",
+                    json!({
+                        "prompt_storage": "default",
+                        "exclude_prompts_in_repositories": [],
+                        "feature_flags": {"async_mode": async_mode}
+                    })
+                    .to_string(),
+                );
+            }
+            let repo = TmpRepo::new().expect("temporary repository");
+            repo.write_file("example.txt", "seed\n", true).unwrap();
+            let base = repo.commit_all("seed").unwrap();
+            repo.write_file("example.txt", "seed\nai line\n", true)
+                .unwrap();
+            repo.trigger_checkpoint_with_ai("prompt-upload-session", None, Some("mock_ai"))
+                .unwrap();
+            repo.gitai_repo()
+                .storage
+                .working_log_for_base_commit(&base)
+                .unwrap()
+                .mutate_all_checkpoints(|checkpoints| {
+                    let checkpoint = checkpoints
+                        .iter_mut()
+                        .find(|checkpoint| checkpoint.kind == CheckpointKind::AiAgent)
+                        .expect("AI checkpoint");
+                    let mut transcript = AiTranscript::new();
+                    transcript.add_message(Message::user("fix the order calculation".into(), None));
+                    transcript
+                        .add_message(Message::assistant("private assistant output".into(), None));
+                    checkpoint.transcript = Some(transcript);
+                    Ok(())
+                })
+                .unwrap();
+
+            let returned_note = repo.commit_with_message("AI edit").unwrap();
+            let sha = repo.get_head_commit_sha().unwrap();
+            for note in [
+                returned_note,
+                get_authorship(repo.gitai_repo(), &sha).unwrap(),
+            ] {
+                assert!(!note.metadata.prompts.is_empty());
+                assert!(
+                    note.metadata
+                        .prompts
+                        .values()
+                        .all(|prompt| prompt.messages.is_empty())
+                );
+            }
+            let payload = payload_rx
+                .recv_timeout(Duration::from_secs(10))
+                .expect("post-commit should upload to the local HTTP server");
+            let commit = &payload["commits"][0];
+            assert_eq!(commit["commitSha"], sha);
+            assert_eq!(commit["stats"]["aiAdditions"], 1);
+            assert_eq!(commit["stats"]["unknownAdditions"], 0);
+            let prompt = &commit["prompts"][0];
+            assert_eq!(prompt["promptText"], "fix the order calculation");
+            assert_eq!(prompt["messages"].as_array().unwrap().len(), 1);
+            assert!(!payload.to_string().contains("private assistant output"));
+            // Wait for the background task to finish writing its success state
+            // before the temporary repository and environment are released.
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            loop {
+                let index = load_upload_status_index(repo.gitai_repo());
+                if index
+                    .notes
+                    .get(&sha)
+                    .is_some_and(|record| record.upload_status == NoteUploadStatus::Succeeded)
+                {
+                    break;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "upload should succeed"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+        mock.assert();
+    }
+
+    #[test]
     fn build_prompt_stats_includes_prompt_text_and_messages() {
         let mut prompts = BTreeMap::new();
         prompts.insert(
@@ -3557,6 +3736,7 @@ mod tests {
         ide_version: Option<String>,
         plugin_version: Option<String>,
         auto_upload_ai_stats: Option<String>,
+        config_patch: Option<String>,
         term_program: Option<String>,
         term_program_version: Option<String>,
     }
@@ -3573,6 +3753,7 @@ mod tests {
                 ide_version: std::env::var("GIT_AI_REPORT_IDE_VERSION").ok(),
                 plugin_version: std::env::var("GIT_AI_REPORT_PLUGIN_VERSION").ok(),
                 auto_upload_ai_stats: std::env::var("GIT_AI_AUTO_UPLOAD_AI_STATS").ok(),
+                config_patch: std::env::var("GIT_AI_TEST_CONFIG_PATCH").ok(),
                 term_program: std::env::var("TERM_PROGRAM").ok(),
                 term_program_version: std::env::var("TERM_PROGRAM_VERSION").ok(),
             }
@@ -3609,6 +3790,10 @@ mod tests {
                 match &self.auto_upload_ai_stats {
                     Some(v) => std::env::set_var("GIT_AI_AUTO_UPLOAD_AI_STATS", v),
                     None => std::env::remove_var("GIT_AI_AUTO_UPLOAD_AI_STATS"),
+                }
+                match &self.config_patch {
+                    Some(v) => std::env::set_var("GIT_AI_TEST_CONFIG_PATCH", v),
+                    None => std::env::remove_var("GIT_AI_TEST_CONFIG_PATCH"),
                 }
                 match &self.term_program {
                     Some(v) => std::env::set_var("TERM_PROGRAM", v),
